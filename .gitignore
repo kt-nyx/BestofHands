@@ -1,0 +1,12 @@
+dist/
+tools/ExportTool/
+*.pak
+*.zip
+*.log
+
+.idea/
+.vs/
+.vscode/settings.json
+
+Thumbs.db
+.DS_Store

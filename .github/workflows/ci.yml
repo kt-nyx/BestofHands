@@ -1,0 +1,102 @@
+# SPDX-License-Identifier: Unlicense
+
+name: CI and Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Test and package
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.14"
+
+      - name: Validate release tag
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: pwsh -NoProfile -File .\scripts\validate-release-tag.ps1 -Tag $env:RELEASE_TAG
+
+      - name: Validate and test
+        shell: pwsh
+        run: pwsh -NoProfile -File .\scripts\test.ps1
+
+      - name: Download pinned LSLib ExportTool
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/Norbyte/lslib/releases/download/v1.20.4/ExportTool-v1.20.4.zip'
+          $zip = Join-Path $env:RUNNER_TEMP 'ExportTool-v1.20.4.zip'
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $expected = '5E02368FB8ACAFDA9B45ACBA37A3F3BF507FC3D65A083A159ABBEAB06337190E'
+          $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+          if ($actual -ne $expected) {
+            throw "LSLib archive hash mismatch: $actual"
+          }
+          $destination = Join-Path $env:RUNNER_TEMP 'ExportTool-v1.20.4'
+          Expand-Archive -LiteralPath $zip -DestinationPath $destination
+          $divine = Get-ChildItem -LiteralPath $destination -Filter 'Divine.exe' -File -Recurse |
+            Select-Object -First 1
+          if ($null -eq $divine) {
+            throw 'Divine.exe was not present in the pinned ExportTool archive.'
+          }
+          "DIVINE_PATH=$($divine.FullName)" >> $env:GITHUB_ENV
+
+      - name: Build verified release archive
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File .\scripts\build.ps1 -DivinePath $env:DIVINE_PATH
+          pwsh -NoProfile -File .\scripts\package-release.ps1
+
+      - name: Upload ZIP candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: BestofHands-${{ github.sha }}
+          path: dist/BestofHands.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub release
+    if: github.ref_type == 'tag'
+    needs: verify
+    runs-on: windows-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download verified ZIP
+        uses: actions/download-artifact@v4
+        with:
+          name: BestofHands-${{ github.sha }}
+          path: dist
+
+      - name: Publish semantic release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create $env:RELEASE_TAG .\dist\BestofHands.zip `
+            --verify-tag `
+            --title "Best of Hands - Quick Lockpick & Disarm $env:RELEASE_TAG" `
+            --generate-notes

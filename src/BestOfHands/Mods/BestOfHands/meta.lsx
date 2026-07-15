@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<save>
+  <version major="4" minor="8" revision="0" build="500" />
+  <region id="Config">
+    <node id="root">
+      <children>
+        <node id="Conflicts" />
+        <node id="Dependencies" />
+        <node id="ModuleInfo">
+          <attribute id="Author" type="LSString" value="" />
+          <attribute id="CharacterCreationLevelName" type="FixedString" value="" />
+          <attribute id="Description" type="LSString" value="Starts lockpick rolls from normal interaction and uses the active party's best Sleight of Hand for lockpicking and trap disarming." />
+          <attribute id="FileSize" type="uint64" value="0" />
+          <attribute id="Folder" type="LSString" value="BestOfHands" />
+          <attribute id="LobbyLevelName" type="FixedString" value="" />
+          <attribute id="MD5" type="LSString" value="" />
+          <attribute id="MainMenuBackgroundVideo" type="FixedString" value="" />
+          <attribute id="MenuLevelName" type="FixedString" value="" />
+          <attribute id="Name" type="FixedString" value="Best of Hands - Quick Lockpick &amp; Disarm" />
+          <attribute id="NumPlayers" type="uint8" value="4" />
+          <attribute id="PhotoBooth" type="FixedString" value="" />
+          <attribute id="PublishHandle" type="uint64" value="0" />
+          <attribute id="StartupLevelName" type="FixedString" value="" />
+          <attribute id="Tags" type="LSString" value="Gameplay;Quality of Life;Script Extender" />
+          <attribute id="Type" type="FixedString" value="Add-on" />
+          <attribute id="UUID" type="FixedString" value="8a82593c-28a3-4ed1-8c46-3d9bacff42e1" />
+          <attribute id="Version64" type="int64" value="36028797018963968" />
+          <children>
+            <node id="PublishVersion">
+              <attribute id="Version64" type="int64" value="36028797018963968" />
+            </node>
+            <node id="Scripts" />
+            <node id="TargetModes">
+              <children>
+                <node id="Target">
+                  <attribute id="Object" type="FixedString" value="Story" />
+                </node>
+              </children>
+            </node>
+          </children>
+        </node>
+      </children>
+    </node>
+  </region>
+</save>

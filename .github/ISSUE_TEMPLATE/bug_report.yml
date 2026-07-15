@@ -1,0 +1,79 @@
+name: Bug report
+description: Report incorrect behavior, a crash, cleanup leak, or compatibility problem.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove overlapping lockpick/party-skill mods before reporting. Never upload an unredacted save or log containing private paths or identifiers.
+  - type: input
+    id: best_of_hands_version
+    attributes:
+      label: Best of Hands version and package SHA-256
+      placeholder: "1.0.0; ABCD..."
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: BG3, Script Extender, and Windows versions
+      placeholder: "BG3 4.1.1..., BG3SE API/updater ..., Windows ..."
+    validations:
+      required: true
+  - type: textarea
+    id: related_mods
+    attributes:
+      label: Related mods and load order
+      description: Include lockpick, context-menu, party-size, class/item, and skill-sharing mods.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Include initiator/specialist sheet modifiers, object type, key/tools, and tools before/after.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized Best of Hands logs and status
+      description: Include relevant `[best_of_hands]` lines and the output of `!best_of_hands_status`.
+      render: text
+  - type: dropdown
+    id: clean_setup
+    attributes:
+      label: Reproduces without overlapping reference/skill mods?
+      options:
+        - "Yes"
+        - "No"
+        - "Not tested"
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I finished/cancelled active rolls and backed up the test save before changing mods.
+          required: true
+        - label: I removed personal paths and unrelated multiplayer identifiers from posted evidence.
+          required: true

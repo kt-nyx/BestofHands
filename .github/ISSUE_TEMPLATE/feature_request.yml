@@ -1,0 +1,42 @@
+name: Feature request
+description: Propose a narrowly scoped improvement.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Player problem
+      description: Describe the friction, not only a preferred implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Desired behavior
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and non-goal impact
+      description: Explain whether this affects dialogue, pickpocket, stealth, tools, direct unlock, buffs, settings, or dependencies.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Game/API evidence
+      description: Link public API documentation or provide sanitized observations. Do not paste other mods' source.
+  - type: checkboxes
+    id: clean_room
+    attributes:
+      label: Clean implementation
+      options:
+        - label: This request does not include copied reference-mod code or assets.
+          required: true
