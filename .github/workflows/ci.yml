@@ -22,12 +22,13 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v8
         with:
           version: "0.11.14"
+          enable-cache: false
 
       - name: Validate release tag
         if: github.ref_type == 'tag'
@@ -67,7 +68,7 @@ jobs:
           pwsh -NoProfile -File .\scripts\package-release.ps1
 
       - name: Upload ZIP candidate
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: BestofHands-${{ github.sha }}
           path: dist/BestofHands.zip
@@ -85,7 +86,7 @@ jobs:
 
     steps:
       - name: Download verified ZIP
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: BestofHands-${{ github.sha }}
           path: dist
