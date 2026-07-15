@@ -102,3 +102,55 @@ jobs:
             --verify-tag `
             --title "Best of Hands - Quick Lockpick & Disarm $env:RELEASE_TAG" `
             --generate-notes
+
+  publish-nexus:
+    name: Publish approved Nexus Mods release
+    if: github.ref_type == 'tag'
+    needs:
+      - verify
+      - release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    environment:
+      name: nexus-production
+      url: https://www.nexusmods.com/baldursgate3/mods/23881?tab=files
+    concurrency:
+      group: nexus-production
+      cancel-in-progress: false
+
+    steps:
+      - name: Download verified ZIP
+        uses: actions/download-artifact@v8
+        with:
+          name: BestofHands-${{ github.sha }}
+          path: dist
+
+      - name: Derive Nexus Mods version
+        id: nexus-version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Release tag does not contain a stable semantic version: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Upload approved release to Nexus Mods
+        uses: Nexus-Mods/upload-action@19da5c91527877cd0bfedc6e6239c911035846a0 # v1.0.0-beta.9
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_id: ${{ vars.NEXUSMODS_FILE_ID }}
+          filename: dist/BestofHands.zip
+          version: ${{ steps.nexus-version.outputs.version }}
+          display_name: Best of Hands - Quick Lockpick and Disarm
+          category: main
+          archive_existing_version: true
+          primary_mod_manager_download: true
+          allow_mod_manager_download: true
+          show_requirements_pop_up: true
+          update_mod_version: true
