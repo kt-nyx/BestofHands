@@ -56,6 +56,10 @@ listen("RequestCanUse", 3, "before", function(character, item, requestId)
         target = item,
         request_id = requestId,
     })
+    -- A use attempt on a target with an in-flight delegated permission marks
+    -- that delegation as contended so a concurrency-induced rejection can be
+    -- re-driven instead of aborted.
+    interaction.OnCompetingUse(item)
 end)
 
 listen("RequestProcessed", 3, "after", function(character, requestId, accepted)

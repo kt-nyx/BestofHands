@@ -53,6 +53,8 @@ Osiris listeners (Init.lua)
 
 The coordinator reserves one action-target pair at a time. A second attempt against the same target is suppressed while the first is active; actions against different targets remain independent. Permission and roll timeouts clear state without retry.
 
+Spam-clicking a locked target queues extra vanilla use orders. If one lands on the target while its delegated permission request is in flight, vanilla rejects that private response. Because the target stays reserved, trailing `UseFinished` events are coalesced rather than starting fresh delegations, and the observed contention re-drives permission once for the same record instead of aborting. This removes the visible open-then-close flicker without adding any delay.
+
 ### Party and tool selection
 
 Candidate enumeration starts from `DB_Players`; it is not capped at the vanilla party size. A specialist must be an active member of the initiator's party, in the same loaded region, alive/available, and not a summon. The initiator wins ties.
@@ -123,7 +125,7 @@ Do not change the module UUID during ordinary development.
 - Use the specialist as the literal active-roll roller; never add two characters' modifiers.
 - Keep tool selection and failure consumption paired through one recorded owner/template.
 - Reserve state by action and target, with additional request and roll indexes for correlation.
-- Do not retry permission, roll, use, or resource operations automatically.
+- Do not retry permission, roll, use, or resource operations automatically. The one exception is the correlated permission re-drive: when a competing same-target use is observed during a permission request and vanilla then rejects that private response, the delegation re-drives permission once for the still-reserved target. The contention signal is what separates this from a genuine denial, which still aborts; an uncontended rejection is never retried.
 - Treat uncertain engine state conservatively: skip delegation or automation rather than guessing.
 - Keep trace listeners observational.
 

@@ -10,6 +10,11 @@ function InteractionCoordinator.Create(settings, api, resolver, diagnostics)
     local opening = {}
     local forcedTurnBased = {}
     local nextRequestId = 1000000000
+    -- One initial permission attempt plus a single correlated re-drive. A
+    -- competing same-target Use can make vanilla reject the private permission
+    -- response; when that contention is observed, re-drive once rather than
+    -- aborting and letting a trailing UseFinished restart from scratch.
+    local MAX_PERMISSION_ATTEMPTS = 2
     local instance = {}
 
     local function actionTargetKey(action, target)
@@ -165,6 +170,12 @@ function InteractionCoordinator.Create(settings, api, resolver, diagnostics)
             abort(record, "target_no_longer_available")
             return false
         end
+
+        -- Each attempt watches for a competing same-target interaction.
+        -- Contention seen during this specific attempt is what distinguishes a
+        -- concurrency-corrupted rejection from a genuine permission denial.
+        record.contended = false
+        record.permissionAttempts = (record.permissionAttempts or 0) + 1
 
         local requestId = allocateRequestId()
         record.phase = "permission"
@@ -337,6 +348,19 @@ function InteractionCoordinator.Create(settings, api, resolver, diagnostics)
         return true
     end
 
+    function instance.OnCompetingUse(target)
+        -- A queued Use order (for example, from spam-clicking) that lands on a
+        -- target while its delegated permission request is in flight makes
+        -- vanilla reject that private response. Record the contention so the
+        -- rejection can be told apart from a genuine permission denial and the
+        -- delegation re-driven once rather than torn down.
+        for _, record in pairs(pendingByTarget) do
+            if record.target == target and record.phase == "permission" then
+                record.contended = true
+            end
+        end
+    end
+
     function instance.OnRequestProcessed(actor, requestId, accepted)
         local key = requestKey(actor, requestId)
         local native = pendingByNativeRequest[key]
@@ -365,6 +389,35 @@ function InteractionCoordinator.Create(settings, api, resolver, diagnostics)
         end
         pendingByPermissionRequest[key] = nil
         if accepted == 0 then
+            -- A competing same-target Use that landed during this permission
+            -- window can make vanilla reject the private response even though
+            -- the initiator was never actually denied. When that contention is
+            -- what happened, keep the target reserved and re-drive the same
+            -- delegation once the queued Use has drained, instead of aborting
+            -- and letting a trailing UseFinished restart from scratch (which
+            -- reads on screen as the check opening and immediately closing).
+            -- A genuine denial carries no contention and still aborts here.
+            if permission.contended
+                and permission.permissionAttempts < MAX_PERMISSION_ATTEMPTS
+                and api.IsActionAvailable(permission.action, permission.target)
+                and pendingByTarget[actionTargetKey(permission.action, permission.target)] == permission then
+                permission.phase = "permission_queued"
+                diagnostics.Trace("delegated_permission_redrive", {
+                    action = permission.action,
+                    actor = permission.initiator,
+                    attempt = permission.permissionAttempts,
+                    origin = permission.origin,
+                    specialist = permission.specialist,
+                    target = permission.target,
+                })
+                api.Schedule(0, function()
+                    if permission.phase == "permission_queued"
+                        and pendingByTarget[actionTargetKey(permission.action, permission.target)] == permission then
+                        beginPermission(permission)
+                    end
+                end)
+                return true
+            end
             abort(permission, "permission_blocked")
             return true
         end

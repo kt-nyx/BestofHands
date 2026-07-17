@@ -451,6 +451,61 @@ test("blocked initiator permission and timeout clean delegation state", function
     assertEqual(2, #calls.permission, "no permission retry")
 end)
 
+test("a contended permission rejection re-drives the same reserved delegation", function()
+    local api, resolver, calls = makeInteractionApi()
+    local coordinator = InteractionCoordinator.Create(delegationSettings, api, resolver, diagnostics)
+    coordinator.OnUseFinished("actor", "door", 0)
+    runQueuedQuickPermission(calls)
+    assertEqual(1, #calls.permission, "first permission attempt")
+
+    -- A competing same-target use lands while the private permission request
+    -- is in flight, so vanilla rejects that response.
+    coordinator.OnCompetingUse("door")
+    assertEqual(true, coordinator.OnRequestProcessed(
+        "actor", calls.permission[1][4], 0
+    ), "contended rejection handled")
+    assertEqual(1, coordinator.Count(), "target stays reserved for re-drive")
+    assertEqual(0, #calls.rolls, "no roll on the rejected attempt")
+
+    -- The re-drive re-requests permission for the same reserved record.
+    calls.timers[#calls.timers]()
+    assertEqual(2, #calls.permission, "single re-drive re-requests permission")
+    startAcceptedRoll(coordinator, calls, "actor")
+    assertEqual(1, #calls.rolls, "re-driven delegation reaches the roll")
+    assertEqual("best", calls.rolls[1][1], "specialist rolls after re-drive")
+end)
+
+test("an uncontended permission rejection still aborts without retry", function()
+    local api, resolver, calls = makeInteractionApi()
+    local coordinator = InteractionCoordinator.Create(delegationSettings, api, resolver, diagnostics)
+    coordinator.OnUseFinished("actor", "door", 0)
+    runQueuedQuickPermission(calls)
+    -- No competing use: a genuine denial must not be re-driven.
+    assertEqual(true, coordinator.OnRequestProcessed(
+        "actor", calls.permission[1][4], 0
+    ), "genuine denial handled")
+    assertEqual(0, coordinator.Count(), "denied delegation cleared")
+    assertEqual(1, #calls.permission, "no permission re-drive on denial")
+end)
+
+test("the correlated permission re-drive fires at most once", function()
+    local api, resolver, calls = makeInteractionApi()
+    local coordinator = InteractionCoordinator.Create(delegationSettings, api, resolver, diagnostics)
+    coordinator.OnUseFinished("actor", "door", 0)
+    runQueuedQuickPermission(calls)
+
+    coordinator.OnCompetingUse("door")
+    coordinator.OnRequestProcessed("actor", calls.permission[1][4], 0)
+    calls.timers[#calls.timers]()
+    assertEqual(2, #calls.permission, "one re-drive issued")
+
+    -- Contended again, but the single re-drive is already spent.
+    coordinator.OnCompetingUse("door")
+    coordinator.OnRequestProcessed("actor", calls.permission[2][4], 0)
+    assertEqual(0, coordinator.Count(), "second contended rejection aborts")
+    assertEqual(0, #calls.rolls, "no roll after the re-drive is exhausted")
+end)
+
 test("server bootstrap registers the narrow event surface", function()
     local listeners = {}
     local commands = {}
