@@ -441,6 +441,19 @@ function InteractionCoordinator.Create(settings, api, resolver, diagnostics)
 
         if result == 1 then
             local completed = api.CompleteAction(record.action, record.target, record.specialist)
+            local disarmNotified = false
+            if completed and record.action == "disarm" then
+                -- The custom active roll does not emit vanilla's disarm
+                -- outcome event. Preserve the initiating character as the
+                -- story actor while allowing the trap's own scripts to handle
+                -- destruction, persistence, and other success behavior.
+                disarmNotified = api.NotifyDisarmAttempt(
+                    record.target,
+                    record.initiator,
+                    record.tool.item,
+                    true
+                )
+            end
             local opened = false
             if completed and record.action == "lockpick" then
                 local key = openingKey(record.initiator, record.target)
@@ -458,16 +471,31 @@ function InteractionCoordinator.Create(settings, api, resolver, diagnostics)
                 action = record.action,
                 actor = record.initiator,
                 completed = completed and 1 or 0,
+                disarm_notified = disarmNotified and 1 or 0,
                 opened = opened and 1 or 0,
                 origin = record.origin,
                 specialist = record.specialist,
                 target = record.target,
             })
         elseif result == 0 then
+            local disarmNotified = false
+            if record.action == "disarm" then
+                -- Notify while the concrete toolkit still exists so native
+                -- trap failure handlers receive the same event payload as a
+                -- normal failed attempt. Resource consumption remains paired
+                -- with the recorded owner/template immediately afterward.
+                disarmNotified = api.NotifyDisarmAttempt(
+                    record.target,
+                    record.initiator,
+                    record.tool.item,
+                    false
+                )
+            end
             local consumed = api.ConsumeActionTool(record.tool)
             diagnostics.Info("delegated_action_failed", {
                 action = record.action,
                 actor = record.initiator,
+                disarm_notified = disarmNotified and 1 or 0,
                 origin = record.origin,
                 specialist = record.specialist,
                 target = record.target,

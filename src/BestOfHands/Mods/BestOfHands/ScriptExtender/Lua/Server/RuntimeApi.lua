@@ -337,6 +337,13 @@ function RuntimeApi.Create(settings, diagnostics)
         end)
     end
 
+    function api.NotifyDisarmAttempt(item, character, tool, succeeded)
+        return safe(diagnostics, "AttemptedDisarm", false, function()
+            Osi.AttemptedDisarm(item, character, tool, succeeded and 1 or 0)
+            return true
+        end)
+    end
+
     function api.UseTarget(character, item, event)
         return safe(diagnostics, "Use", false, function()
             Osi.Use(character, item, 1, 1, event)

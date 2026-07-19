@@ -39,7 +39,7 @@ Osiris listeners (Init.lua)
 4. Otherwise, a one-shot custom response blocks the original roll.
 5. Best of Hands runs the normal permission/crime procedures as the initiator under a private request ID.
 6. An accepted response starts `RequestActiveRoll` as the selected specialist.
-7. A matching private `RollResult` completes the action and clears transient state.
+7. A matching private `RollResult` completes the action and clears transient state. Delegated disarm outcomes also emit the native `AttemptedDisarm` event exactly once, using the initiator and selected toolkit, so trap-specific success and failure behavior still runs.
 
 ### Automatic lockpick after ordinary interaction
 

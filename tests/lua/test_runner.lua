@@ -194,11 +194,44 @@ test("runtime difficulty lookup uses template then component fallback", function
     ), "runtime fallback difficulty")
 end)
 
+test("runtime emits native-compatible disarm outcomes", function()
+    local calls = { armed = {}, attempted = {} }
+    _G.Ext = {}
+    _G.Osi = {
+        SetTrapArmed = function(item, armed)
+            calls.armed[#calls.armed + 1] = { item, armed }
+        end,
+        AttemptedDisarm = function(item, character, tool, succeeded)
+            calls.attempted[#calls.attempted + 1] = {
+                item, character, tool, succeeded,
+            }
+        end,
+    }
+    local api = RuntimeApi.Create({}, diagnostics)
+
+    assertEqual(true, api.CompleteAction("disarm", "trap", "specialist"), "disarm completion")
+    assertEqual("trap", calls.armed[1][1], "disarmed target")
+    assertEqual(0, calls.armed[1][2], "armed state cleared")
+    assertEqual(true, api.NotifyDisarmAttempt(
+        "trap", "initiator", "toolkit", true
+    ), "success notification")
+    assertEqual(true, api.NotifyDisarmAttempt(
+        "trap", "initiator", "toolkit", false
+    ), "failure notification")
+    assertEqual("trap", calls.attempted[1][1], "success target")
+    assertEqual("initiator", calls.attempted[1][2], "success initiator")
+    assertEqual("toolkit", calls.attempted[1][3], "success toolkit")
+    assertEqual(1, calls.attempted[1][4], "success result")
+    assertEqual(0, calls.attempted[2][4], "failure result")
+end)
+
 local function makeInteractionApi()
     local calls = {
         blocks = {},
         complete = {},
         consume = {},
+        disarm = {},
+        outcomes = {},
         permission = {},
         rolls = {},
         targetUse = {},
@@ -230,7 +263,13 @@ local function makeInteractionApi()
     end
     api.CompleteAction = function(action, target, actor)
         calls.complete[#calls.complete + 1] = { action, target, actor }
+        calls.outcomes[#calls.outcomes + 1] = "complete"
         state.actionAvailable[action] = false
+        return true
+    end
+    api.NotifyDisarmAttempt = function(target, actor, tool, succeeded)
+        calls.disarm[#calls.disarm + 1] = { target, actor, tool, succeeded }
+        calls.outcomes[#calls.outcomes + 1] = succeeded and "disarm_success" or "disarm_failure"
         return true
     end
     api.UseTarget = function(actor, target)
@@ -239,6 +278,7 @@ local function makeInteractionApi()
     end
     api.ConsumeActionTool = function(tool)
         calls.consume[#calls.consume + 1] = tool
+        calls.outcomes[#calls.outcomes + 1] = "consume"
         return true
     end
     api.Schedule = function(_, callback) calls.timers[#calls.timers + 1] = callback end
@@ -372,12 +412,14 @@ test("delegated failure consumes the selected tool and cancellation consumes non
     assertEqual(1, #calls.consume, "failed roll consumption")
     assertEqual("best", calls.consume[1].owner, "selected owner consumed")
     assertEqual(0, #calls.complete, "failed roll completion")
+    assertEqual(0, #calls.disarm, "lockpick failure disarm outcomes")
 
     coordinator.OnUseFinished("actor", "door", 0)
     runQueuedQuickPermission(calls)
     startAcceptedRoll(coordinator, calls, "actor")
     coordinator.OnRollResult("BestOfHands_DelegatedLockpick", "best", "door", 2)
     assertEqual(1, #calls.consume, "cancelled roll consumption")
+    assertEqual(0, #calls.disarm, "lockpick cancellation disarm outcomes")
 end)
 
 test("manual native request is blocked then delegated through vanilla permission", function()
@@ -422,7 +464,7 @@ test("quick delegation suppresses an overtaking native initiator roll", function
     assertEqual("best", calls.rolls[1][1], "specialist still rolls")
 end)
 
-test("trap disarm is delegated and completed as the specialist", function()
+test("delegated trap success preserves the native outcome contract", function()
     local api, resolver, calls = makeInteractionApi()
     local coordinator = InteractionCoordinator.Create(delegationSettings, api, resolver, diagnostics)
     coordinator.OnNativeRequest("disarm", "actor", "trap", 44)
@@ -432,7 +474,39 @@ test("trap disarm is delegated and completed as the specialist", function()
     coordinator.OnRollResult("BestOfHands_DelegatedDisarm", "best", "trap", 1)
     assertEqual("disarm", calls.complete[1][1], "completed disarm")
     assertEqual("best", calls.complete[1][3], "disarm specialist")
+    assertEqual("trap", calls.disarm[1][1], "outcome target")
+    assertEqual("actor", calls.disarm[1][2], "outcome initiator")
+    assertEqual("tools", calls.disarm[1][3], "outcome toolkit")
+    assertEqual(true, calls.disarm[1][4], "success outcome")
+    assertEqual(1, #calls.disarm, "single outcome")
+    assertEqual("complete", calls.outcomes[#calls.outcomes - 1], "disarm before outcome")
+    assertEqual("disarm_success", calls.outcomes[#calls.outcomes], "success outcome order")
+    assertEqual(0, #calls.consume, "success consumption")
     assertEqual(0, #calls.targetUse, "trap not opened")
+end)
+
+test("delegated trap failure reports before consumption and cancellation reports nothing", function()
+    local api, resolver, calls = makeInteractionApi()
+    local coordinator = InteractionCoordinator.Create(delegationSettings, api, resolver, diagnostics)
+    coordinator.OnNativeRequest("disarm", "actor", "trap", 47)
+    coordinator.OnRequestProcessed("actor", 47, 0)
+    calls.timers[#calls.timers]()
+    startAcceptedRoll(coordinator, calls, "actor")
+    coordinator.OnRollResult("BestOfHands_DelegatedDisarm", "best", "trap", 0)
+    assertEqual(false, calls.disarm[1][4], "failure outcome")
+    assertEqual("actor", calls.disarm[1][2], "failure initiator")
+    assertEqual("tools", calls.disarm[1][3], "failure toolkit")
+    assertEqual("disarm_failure", calls.outcomes[#calls.outcomes - 1], "failure before consumption")
+    assertEqual("consume", calls.outcomes[#calls.outcomes], "failure consumption order")
+    assertEqual(1, #calls.consume, "failure consumption")
+
+    coordinator.OnNativeRequest("disarm", "actor", "trap", 48)
+    coordinator.OnRequestProcessed("actor", 48, 0)
+    calls.timers[#calls.timers]()
+    startAcceptedRoll(coordinator, calls, "actor")
+    coordinator.OnRollResult("BestOfHands_DelegatedDisarm", "best", "trap", 2)
+    assertEqual(1, #calls.disarm, "cancelled outcome count")
+    assertEqual(1, #calls.consume, "cancelled consumption")
 end)
 
 test("blocked initiator permission and timeout clean delegation state", function()
