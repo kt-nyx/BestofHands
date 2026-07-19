@@ -146,6 +146,9 @@ jobs:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}
           file_id: ${{ vars.NEXUSMODS_FILE_ID }}
           filename: dist/BestofHands.zip
+          description: |-
+            - Fixed issue where disarmed traps would sometimes remain active.
+            - Fixed issue where fast, repeated clicks on locked doors/containers sometimes caused the skillcheck roll to immediately close.
           version: ${{ steps.nexus-version.outputs.version }}
           display_name: Best of Hands - Quick Lockpick and Disarm
           category: main
