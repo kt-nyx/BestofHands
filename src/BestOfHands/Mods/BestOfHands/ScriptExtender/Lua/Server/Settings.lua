@@ -4,25 +4,29 @@ return {
     MOD_NAME = "Best of Hands",
     LOG_PREFIX = "best_of_hands",
     MODULE_UUID = "8a82593c-28a3-4ed1-8c46-3d9bacff42e1",
-    VERSION = "1.0.1",
+    VERSION = "2.0.0",
 
     ACTIVE_ASSISTANCE_VAR = "ActiveAssistance",
-    ACTION_PERMISSION_TIMEOUT_MS = 5000,
-    DELEGATION_ROLL_TIMEOUT_MS = 300000,
-    QUICK_LOCKPICK_OPEN_TIMEOUT_MS = 5000,
-    DELEGATED_LOCKPICK_ROLL_EVENT = "BestOfHands_DelegatedLockpick",
-    DELEGATED_DISARM_ROLL_EVENT = "BestOfHands_DelegatedDisarm",
-    TRACE_EVENTS = false,
+    NATIVE_ACTION_TIMEOUT_MS = 300000,
+    NATIVE_REFERENCE_TRACE_TIMEOUT_MS = 30000,
+    NATIVE_HANDSHAKE_ATTEMPTS = 40,
+    NATIVE_HANDSHAKE_POLL_MS = 250,
+    -- Development default: keep the complete Lua, client, and native trace
+    -- enabled until the delegated-roll presentation work is finalized.
+    TRACE_EVENTS = true,
 
-    -- Closed and opened Thieves' Tools root templates used by the base game.
-    THIEVES_TOOLS_TEMPLATES = {
+    -- Base-game tool roots. These are used only as a conservative delegation
+    -- precondition; BG3 remains responsible for choosing and consuming tools.
+    -- Optional tool providers can extend this boundary when their integration
+    -- is implemented.
+    VANILLA_THIEVES_TOOLS_TEMPLATES = {
         "08851ac0-3bfa-44f3-80c6-6ab0536f0e10",
         "e32a200c-5b63-414d-ae57-00e7b38f125b",
     },
-
-    TRAP_DISARM_TOOL_TEMPLATES = {
+    VANILLA_TRAP_DISARM_TOOL_TEMPLATES = {
         "22c74b5e-bef2-41b1-b9ed-f4acc766d4ee",
     },
+    MISSING_TOOL_ERROR_KEY = "CannotUse",
 
     INELIGIBLE_STATUSES = {
         "DEAD",

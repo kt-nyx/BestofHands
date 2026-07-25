@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Unlicense
 
 [CmdletBinding()]
-param()
+param(
+    [switch]$BuildNative
+)
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -18,6 +20,13 @@ try {
     uv run --python 3.13 --with 'lupa==2.6' --with 'pyyaml==6.0.3' python .\scripts\run_lua_tests.py
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
+    }
+
+    if ($BuildNative) {
+        & (Join-Path $PSScriptRoot 'build-native.ps1') -Configuration Release
+        if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+        }
     }
 }
 finally {

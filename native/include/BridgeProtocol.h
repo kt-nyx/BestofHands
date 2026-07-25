@@ -1,0 +1,230 @@
+// SPDX-License-Identifier: Unlicense
+#pragma once
+
+#include <charconv>
+#include <cstdint>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace best_of_hands {
+
+inline constexpr std::string_view kProtocolVersion = "5";
+inline constexpr std::string_view kPluginVersion = "2.0.0";
+
+enum class ActionKind {
+    Lockpick,
+    Disarm,
+};
+
+struct ActionRecord {
+    std::uint64_t id{};
+    ActionKind kind{};
+    std::uint64_t initiator{};
+    std::uint64_t specialist{};
+    std::uint64_t target{};
+    std::uint64_t roll{};
+    std::uint64_t finishedEvent{};
+    std::string rollUuid;
+    std::uint8_t presentationAdvantage{ 0xff };
+};
+
+struct BridgeDocument {
+    bool valid{ false };
+    bool trace{ false };
+    std::string probe;
+    std::string nativeSession;
+    std::vector<ActionRecord> records;
+};
+
+struct ClientActionRecord {
+    std::uint64_t id{};
+    std::string rollUuid;
+    std::uint64_t initiator{};
+    std::uint64_t specialist{};
+    std::uint64_t target{};
+};
+
+struct ClientBridgeDocument {
+    bool valid{ false };
+    bool trace{ false };
+    std::string nativeSession;
+    std::vector<ClientActionRecord> records;
+};
+
+inline bool ParseUnsigned(std::string_view text, int base, std::uint64_t& value)
+{
+    value = 0;
+    if (text.empty()) {
+        return false;
+    }
+    auto const result = std::from_chars(text.data(), text.data() + text.size(), value, base);
+    return result.ec == std::errc{} && result.ptr == text.data() + text.size();
+}
+
+inline std::vector<std::string_view> Split(std::string_view value, char delimiter)
+{
+    std::vector<std::string_view> parts;
+    std::size_t start = 0;
+    while (start <= value.size()) {
+        auto const end = value.find(delimiter, start);
+        if (end == std::string_view::npos) {
+            parts.emplace_back(value.substr(start));
+            break;
+        }
+        parts.emplace_back(value.substr(start, end - start));
+        start = end + 1;
+    }
+    return parts;
+}
+
+inline BridgeDocument ParseBridgeDocument(std::string_view text)
+{
+    BridgeDocument document;
+    bool protocolOk = false;
+    bool versionOk = false;
+    bool complete = false;
+
+    std::size_t start = 0;
+    while (start <= text.size()) {
+        auto const end = text.find('\n', start);
+        auto line = text.substr(start, end == std::string_view::npos ? text.size() - start : end - start);
+        if (!line.empty() && line.back() == '\r') {
+            line.remove_suffix(1);
+        }
+
+        if (line.starts_with("protocol=")) {
+            protocolOk = line.substr(9) == kProtocolVersion;
+        } else if (line.starts_with("pak_version=")) {
+            versionOk = line.substr(12) == kPluginVersion;
+        } else if (line.starts_with("probe=")) {
+            document.probe.assign(line.substr(6));
+        } else if (line.starts_with("native_session=")) {
+            document.nativeSession.assign(line.substr(15));
+        } else if (line.starts_with("trace=")) {
+            document.trace = line.substr(6) == "1";
+        } else if (line.starts_with("record=")) {
+            auto const fields = Split(line.substr(7), '\t');
+            if (fields.size() != 12) {
+                return {};
+            }
+            ActionRecord record;
+            if (!ParseUnsigned(fields[0], 10, record.id)) {
+                return {};
+            }
+            if (fields[1] == "lockpick") {
+                record.kind = ActionKind::Lockpick;
+            } else if (fields[1] == "disarm") {
+                record.kind = ActionKind::Disarm;
+            } else {
+                return {};
+            }
+            if (!ParseUnsigned(fields[2], 16, record.initiator)
+                || !ParseUnsigned(fields[3], 16, record.specialist)
+                || !ParseUnsigned(fields[4], 16, record.target)
+                || !ParseUnsigned(fields[5], 16, record.roll)
+                || !ParseUnsigned(fields[6], 16, record.finishedEvent)
+                || record.initiator == 0
+                || record.specialist == 0
+                || record.target == 0) {
+                return {};
+            }
+            if (fields[7] != "0") {
+                record.rollUuid.assign(fields[7]);
+            }
+            std::uint64_t advantage{};
+            if (!ParseUnsigned(fields[11], 10, advantage)
+                || advantage > 2) {
+                if (fields[11] != "-1") {
+                    return {};
+                }
+            } else {
+                record.presentationAdvantage = static_cast<std::uint8_t>(advantage);
+            }
+            document.records.push_back(record);
+        } else if (line == "end=1") {
+            complete = true;
+        }
+
+        if (end == std::string_view::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+
+    document.valid = protocolOk && versionOk && complete && !document.probe.empty();
+    if (!document.valid) {
+        document.records.clear();
+    }
+    return document;
+}
+
+inline ClientBridgeDocument ParseClientBridgeDocument(std::string_view text)
+{
+    ClientBridgeDocument document;
+    bool protocolOk = false;
+    bool versionOk = false;
+    bool complete = false;
+
+    std::size_t start = 0;
+    while (start <= text.size()) {
+        auto const end = text.find('\n', start);
+        auto line = text.substr(start,
+            end == std::string_view::npos ? text.size() - start : end - start);
+        if (!line.empty() && line.back() == '\r') {
+            line.remove_suffix(1);
+        }
+
+        if (line.starts_with("protocol=")) {
+            protocolOk = line.substr(9) == kProtocolVersion;
+        } else if (line.starts_with("pak_version=")) {
+            versionOk = line.substr(12) == kPluginVersion;
+        } else if (line.starts_with("native_session=")) {
+            document.nativeSession.assign(line.substr(15));
+        } else if (line.starts_with("trace=")) {
+            document.trace = line.substr(6) == "1";
+        } else if (line.starts_with("record=")) {
+            auto const fields = Split(line.substr(7), '\t');
+            if (fields.size() != 5) {
+                return {};
+            }
+            ClientActionRecord record;
+            if (!ParseUnsigned(fields[0], 10, record.id)
+                || fields[1].empty()
+                || !ParseUnsigned(fields[2], 16, record.initiator)
+                || !ParseUnsigned(fields[3], 16, record.specialist)
+                || !ParseUnsigned(fields[4], 16, record.target)
+                || record.id == 0
+                || record.initiator == 0
+                || record.specialist == 0
+                || record.target == 0) {
+                return {};
+            }
+            record.rollUuid.assign(fields[1]);
+            document.records.push_back(std::move(record));
+        } else if (line == "end=1") {
+            complete = true;
+        }
+
+        if (end == std::string_view::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+
+    document.valid = protocolOk && versionOk && complete
+        && !document.nativeSession.empty();
+    if (!document.valid) {
+        document.records.clear();
+    }
+    return document;
+}
+
+inline std::string ActionName(ActionKind kind)
+{
+    return kind == ActionKind::Lockpick ? "lockpick" : "disarm";
+}
+
+} // namespace best_of_hands

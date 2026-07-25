@@ -3,624 +3,1473 @@
 local luaRoot = BEST_OF_HANDS_ROOT .. "/src/BestOfHands/Mods/BestOfHands/ScriptExtender/Lua/Server/"
 local PartySkillResolver = dofile(luaRoot .. "PartySkillResolver.lua")
 local LegacyAssistanceCleanup = dofile(luaRoot .. "LegacyAssistanceCleanup.lua")
-local InteractionCoordinator = dofile(luaRoot .. "InteractionCoordinator.lua")
-local RuntimeApi = dofile(luaRoot .. "RuntimeApi.lua")
+local NativeBridge = dofile(luaRoot .. "NativeBridge.lua")
+local NativeInteractionCoordinator = dofile(luaRoot .. "NativeInteractionCoordinator.lua")
+local NativeRuntimeApi = dofile(luaRoot .. "NativeRuntimeApi.lua")
+local NativePresentationBridge = dofile(
+    BEST_OF_HANDS_ROOT
+        .. "/src/BestOfHands/Mods/BestOfHands/ScriptExtender/Lua/Client/"
+        .. "NativePresentationBridge.lua"
+)
+local UiRollDiagnostics = dofile(
+    BEST_OF_HANDS_ROOT
+        .. "/src/BestOfHands/Mods/BestOfHands/ScriptExtender/Lua/Client/"
+        .. "UiRollDiagnostics.lua"
+)
 
 local passed = 0
 local failed = 0
 
 local function assertEqual(expected, actual, message)
     if expected ~= actual then
-        error(string.format("%s: expected %s, got %s", message, tostring(expected), tostring(actual)), 2)
+        error(string.format(
+            "%s: expected %s, got %s",
+            message,
+            tostring(expected),
+            tostring(actual)
+        ), 2)
+    end
+end
+
+local function assertContains(text, expected, message)
+    if type(text) ~= "string" or not text:find(expected, 1, true) then
+        error(string.format("%s: '%s' was not found", message, expected), 2)
     end
 end
 
 local function test(name, callback)
-    local ok, err = xpcall(callback, debug.traceback)
+    local ok, errorMessage = xpcall(callback, debug.traceback)
     if ok then
         passed = passed + 1
         print("PASS " .. name)
     else
         failed = failed + 1
-        print("FAIL " .. name .. "\n" .. tostring(err))
+        print("FAIL " .. name .. "\n" .. tostring(errorMessage))
     end
 end
 
-local diagnostics = {
-    Info = function() end,
-    Warn = function() end,
-    Error = function() end,
-    Trace = function() end,
-}
+local function recordingDiagnostics()
+    local records = {}
+    local instance = {}
+    for _, level in ipairs({ "Info", "Warn", "Error", "Trace" }) do
+        instance[level] = function(event, fields)
+            records[#records + 1] = { event = event, fields = fields, level = level }
+        end
+    end
+    instance.IsTraceEnabled = function() return true end
+    return instance, records
+end
 
-local function makeResolverApi(scores, overrides)
+local function findRecord(records, event)
+    for index = #records, 1, -1 do
+        if records[index].event == event then
+            return records[index]
+        end
+    end
+    return nil
+end
+
+local function resolverApi(scores, overrides)
     overrides = overrides or {}
-    local api = {}
-    api.GetPlayers = function() return overrides.players or { "actor", "best", "tie" } end
-    api.CalculateSleightOfHand = function(character) return scores[character] end
-    api.IsPartyMember = function(character) return overrides.partyMember ~= character end
-    api.IsInPartyWith = function(character) return overrides.otherParty ~= character end
-    api.IsDead = function(character) return overrides.dead == character end
-    api.IsSummon = function(character) return overrides.summon == character end
-    api.GetRegion = function(character)
-        if overrides.otherRegion == character then return "B" end
-        return "A"
-    end
-    api.HasIneligibleStatus = function(character)
-        if overrides.downed == character then return true, "DOWNED" end
-        return false, nil
-    end
-    return api
+    return {
+        CalculateSleightOfHand = function(character) return scores[character] end,
+        GetPlayers = function() return overrides.players or { "actor", "best", "other" } end,
+        GetRegion = function(character)
+            return overrides.regions and overrides.regions[character] or "R"
+        end,
+        HasIneligibleStatus = function(character)
+            return overrides.ineligible == character, "TEST"
+        end,
+        IsDead = function(character) return overrides.dead == character end,
+        IsInPartyWith = function(character) return overrides.outside ~= character end,
+        IsPartyMember = function(character) return overrides.inactive ~= character end,
+        IsSummon = function(character) return overrides.summon == character end,
+    }
 end
 
-test("resolver selects the best eligible raw modifier", function()
-    local resolver = PartySkillResolver.Create(makeResolverApi({ actor = 3, best = 9, tie = 4 }), diagnostics)
-    local result = resolver.Resolve("actor", "chest", "lockpick", 12)
+test("resolver selects the highest eligible raw Sleight of Hand profile", function()
+    local resolver = PartySkillResolver.Create(
+        resolverApi({ actor = 1, best = 13, other = 4 }),
+        recordingDiagnostics()
+    )
+    local result = resolver.Resolve("actor", "target", "lockpick", 7)
     assertEqual("best", result.specialist, "specialist")
-    assertEqual(3, result.initiatorScore, "initiator score")
-    assertEqual(9, result.specialistScore, "specialist score")
+    assertEqual(13, result.specialistScore, "specialist score")
+    assertEqual(1, result.initiatorScore, "initiator score")
 end)
 
-test("resolver prefers initiator on a tie", function()
-    local resolver = PartySkillResolver.Create(makeResolverApi({ actor = 9, best = 9, tie = 9 }), diagnostics)
-    local result = resolver.Resolve("actor", "door", "lockpick", 13)
-    assertEqual("actor", result.specialist, "tie winner")
+test("resolver keeps the initiator on a tie", function()
+    local resolver = PartySkillResolver.Create(
+        resolverApi({ actor = 9, best = 9, other = 2 }),
+        recordingDiagnostics()
+    )
+    assertEqual("actor", resolver.Resolve("actor", "target", "disarm", 2).specialist, "tie")
 end)
 
-test("resolver filters unavailable and cross-region candidates", function()
-    local resolver = PartySkillResolver.Create(makeResolverApi(
-        { actor = 2, best = 20, tie = 18 },
-        { downed = "best", otherRegion = "tie" }
-    ), diagnostics)
-    local result = resolver.Resolve("actor", "trap", "disarm", 14)
-    assertEqual("actor", result.specialist, "filtered winner")
+test("resolver excludes unavailable party members", function()
+    local api = resolverApi(
+        { actor = 1, best = 20, other = 7 },
+        { dead = "best" }
+    )
+    local resolver = PartySkillResolver.Create(api, recordingDiagnostics())
+    assertEqual("other", resolver.Resolve("actor", "target", "lockpick", 3).specialist, "eligible")
 end)
 
-test("resolver includes active companions and compares raw roll modifiers", function()
-    local api = makeResolverApi({ actor = 1, best = 12, tie = 2 })
-    -- Deliberately omit IsControlled: BG3 reports it only for the currently
-    -- selected actor, while all active companions still pass party membership.
-    local resolver = PartySkillResolver.Create(api, diagnostics)
-    local result = resolver.Resolve("actor", "door", "lockpick", 15)
-    assertEqual("best", result.specialist, "unselected active companion")
-    assertEqual(12, result.specialistScore, "raw modifier")
+test("legacy boost cleanup retains only failed removals", function()
+    local state = {
+        one = { actor = "a", delta = 5, source = "s" },
+        two = { actor = "b", delta = 2, source = "t" },
+    }
+    local saved = nil
+    local cleanup = LegacyAssistanceCleanup.Create({
+        LoadAssistanceState = function() return state end,
+        RemoveSkillBoost = function(actor) return actor == "a" end,
+        SaveAssistanceState = function(value) saved = value return true end,
+    }, recordingDiagnostics())
+    cleanup.RecoverPersisted()
+    assertEqual(1, cleanup.Count(), "retained count")
+    assertEqual(nil, saved.one, "removed record")
+    assertEqual("b", saved.two.actor, "retained record")
 end)
 
-local function makeLegacyCleanupApi()
-    local state = {}
-    local removeSucceeds = true
-    local calls = { remove = {}, saved = {} }
-    local api = {}
-    api.RemoveSkillBoost = function(actor, delta, source)
-        calls.remove[#calls.remove + 1] = { actor, delta, source }
-        return removeSucceeds
-    end
-    api.SaveAssistanceState = function(value)
-        state = value
-        calls.saved[#calls.saved + 1] = value
-        return true
-    end
-    api.LoadAssistanceState = function() return state end
-    return api, calls,
-        function(value) state = value end,
-        function(value) removeSucceeds = value end
+local function entity(guid, handle)
+    return setmetatable({
+        Uuid = { EntityUuid = guid },
+        guid = guid,
+        handle = handle,
+    }, {
+        __tostring = function(value) return "Entity (" .. value.handle .. ")" end,
+    })
 end
 
-test("legacy cleanup removes a persisted temporary boost", function()
-    local api, calls, setState = makeLegacyCleanupApi()
-    setState({ actor = {
-        action = "lockpick", actor = "actor", delta = 4,
-        requestId = 30, source = "BestOfHands_Assistance_4", target = "chest",
-    } })
-    local cleanup = LegacyAssistanceCleanup.Create(api, diagnostics)
-    cleanup.RecoverPersisted()
-    assertEqual(1, #calls.remove, "recovery remove count")
-    assertEqual(4, calls.remove[1][2], "recovered modifier")
-    assertEqual(0, cleanup.Count(), "retained count")
-    assertEqual(nil, next(calls.saved[#calls.saved]), "persisted state cleared")
-end)
+local actor = entity("00000000-0000-0000-0000-000000000001", "0200000100000001")
+local specialist = entity("00000000-0000-0000-0000-000000000002", "0200000100000002")
+local target = entity("00000000-0000-0000-0000-000000000003", "0200000100000003")
 
-test("legacy cleanup retains ownership until exact removal succeeds", function()
-    local api, calls, setState, setRemoveSucceeds = makeLegacyCleanupApi()
-    setState({ actor = {
-        actor = "actor", delta = 3, source = "BestOfHands_Assistance_3",
-    } })
-    setRemoveSucceeds(false)
-    local cleanup = LegacyAssistanceCleanup.Create(api, diagnostics)
-    cleanup.RecoverPersisted()
-    assertEqual(1, cleanup.Count(), "failed cleanup retained")
-    setRemoveSucceeds(true)
-    cleanup.RecoverPersisted()
-    assertEqual(0, cleanup.Count(), "retry cleanup cleared")
-    assertEqual(2, #calls.remove, "exact removal retried")
-end)
-
-test("runtime tool sourcing honors holder priority across tool states", function()
-    local inventory = {
-        ["specialist|opened"] = "specialist-opened-tools",
-        ["actor|closed"] = "actor-closed-tools",
-        ["camp|closed"] = "camp-tools",
-        ["other|opened"] = "other-tools",
+local function installEntityMock()
+    local entities = {
+        actor = actor,
+        best = specialist,
+        target = target,
+        [actor] = actor,
+        [specialist] = specialist,
+        [target] = target,
     }
-    _G.Ext = {}
-    _G.Osi = {
-        DB_Players = { Get = function() return {
-            { "specialist" }, { "actor" }, { "camp" }, { "other" },
-        } end },
-        GetItemByTemplateInInventory = function(template, holder)
-            return inventory[holder .. "|" .. template] or ""
-        end,
-        GetItemByTemplateInPartyInventory = function() return "" end,
-        GetInventoryOwner = function(item) return item:match("^([^-]+)") end,
-        IsInPartyWith = function() return 1 end,
-        IsPartyMember = function(character) return character == "camp" and 0 or 1 end,
+    Ext = Ext or {}
+    Ext.Entity = Ext.Entity or {}
+    Ext.Entity.Get = function(value)
+        return entities[value] or (type(value) == "table" and value or nil)
+    end
+end
+
+test("native bridge requires a live matching challenge acknowledgement", function()
+    installEntityMock()
+    local files = {}
+    local scheduled = {}
+    local warnings = 0
+    Ext.IO = {
+        LoadFile = function(path) return files[path] end,
+        SaveFile = function(path, value) files[path] = value return true end,
     }
-    local api = RuntimeApi.Create({
-        THIEVES_TOOLS_TEMPLATES = { "closed", "opened" },
-        TRAP_DISARM_TOOL_TEMPLATES = { "disarm" },
-    }, diagnostics)
-
-    local tool = api.FindActionTool("lockpick", "specialist", "actor")
-    assertEqual("specialist-opened-tools", tool.item, "specialist before actor")
-
-    inventory["specialist|opened"] = nil
-    inventory["actor|closed"] = nil
-    tool = api.FindActionTool("lockpick", "specialist", "actor")
-    assertEqual("other-tools", tool.item, "active party fallback excludes camp")
+    Ext.Utils = { MonotonicTime = function() return 42 end }
+    Osi = {
+        GetHostCharacter = function() return "actor" end,
+        OpenMessageBox = function() warnings = warnings + 1 end,
+    }
+    local api = {
+        Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
+    }
+    local settings = {
+        NATIVE_HANDSHAKE_ATTEMPTS = 2,
+        NATIVE_HANDSHAKE_POLL_MS = 1,
+        TRACE_EVENTS = false,
+        VERSION = "2.0.0",
+    }
+    local bridge = NativeBridge.Create(settings, api, recordingDiagnostics())
+    bridge.BeginHandshake()
+    assertEqual(false, bridge.IsReady(), "not ready before ack")
+    local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
+    files["BestOfHandsNative.status"] = table.concat({
+        "protocol=5",
+        "version=2.0.0",
+        "state=ready",
+        "session=123-456",
+        "pid=123",
+        "hooks=" .. NativeBridge.REQUIRED_HOOKS,
+        "ack=" .. probe,
+        "detail=ok",
+        "end=1",
+        "",
+    }, "\n")
+    scheduled[1]()
+    assertEqual(true, bridge.IsReady(), "ready after ack")
+    assertContains(files["BestOfHandsNative.actions"], "native_session=123-456", "session echoed")
+    local written, reason = bridge.Upsert({
+        action = "lockpick",
+        id = 9,
+        initiator = "actor",
+        specialist = "best",
+        target = "target",
+    })
+    assertEqual(true, written, reason or "record written")
+    assertContains(files["BestOfHandsNative.actions"],
+        "record=9\tlockpick\t0200000100000001\t0200000100000002\t0200000100000003\t0\t0",
+        "native action record")
+    local roll = entity("00000000-0000-0000-0000-000000000009", "0200000200000009")
+    local correlated, correlationReason = bridge.SetRoll(
+        9,
+        roll,
+        "00000000-0000-0000-0000-000000000009"
+    )
+    assertEqual(true, correlated, correlationReason or "roll correlated")
+    assertContains(files["BestOfHandsNative.actions"],
+        "record=9\tlockpick\t0200000100000001\t0200000100000002\t0200000100000003\t0200000200000009\t0",
+        "correlated roll record")
+    local finished = entity("00000000-0000-0000-0000-000000000010", "0200000200000010")
+    local finishedCorrelated, finishedReason = bridge.SetFinishedEvent(9, finished)
+    assertEqual(true, finishedCorrelated, finishedReason or "finished event correlated")
+    assertContains(files["BestOfHandsNative.actions"],
+        "record=9\tlockpick\t0200000100000001\t0200000100000002\t0200000100000003\t0200000200000009\t0200000200000010",
+        "correlated finished-event record")
+    local presentationWritten, presentationReason = bridge.SetPresentation(9, 1)
+    assertEqual(true, presentationWritten, presentationReason or "presentation written")
+    assertContains(
+        files["BestOfHandsNative.actions"],
+        "\t00000000-0000-0000-0000-000000000009"
+            .. "\t00000000-0000-0000-0000-000000000001"
+            .. "\t00000000-0000-0000-0000-000000000002"
+            .. "\t00000000-0000-0000-0000-000000000003\t1",
+        "stable client correlation and presentation state"
+    )
+    assertEqual(0, warnings, "no warning")
 end)
 
-test("runtime difficulty lookup uses template then component fallback", function()
-    local templateDifficulty = "template-dc"
-    _G.Osi = { GetTemplate = function() return "root-template" end }
-    _G.Ext = {
-        Template = {
-            GetRootTemplate = function() return {
-                LockDifficultyClassID = templateDifficulty,
-            } end,
-            GetTemplate = function() return nil end,
+test("native bridge fails closed and warns once when the DLL is unavailable", function()
+    installEntityMock()
+    local files = {}
+    local scheduled = {}
+    local warnings = 0
+    Ext.IO = {
+        LoadFile = function(path) return files[path] end,
+        SaveFile = function(path, value) files[path] = value return true end,
+    }
+    Ext.Utils = { MonotonicTime = function() return 99 end }
+    Osi = {
+        GetHostCharacter = function() return "actor" end,
+        OpenMessageBox = function() warnings = warnings + 1 end,
+    }
+    local bridge = NativeBridge.Create({
+        NATIVE_HANDSHAKE_ATTEMPTS = 1,
+        NATIVE_HANDSHAKE_POLL_MS = 1,
+        TRACE_EVENTS = false,
+        VERSION = "2.0.0",
+    }, {
+        Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
+    }, recordingDiagnostics())
+    bridge.BeginHandshake()
+    scheduled[1]()
+    assertEqual(false, bridge.IsReady(), "bridge disabled")
+    assertEqual(1, warnings, "one warning")
+end)
+
+test("native bridge disables delegation if the acknowledged native session is lost", function()
+    installEntityMock()
+    local files = {}
+    local scheduled = {}
+    local warnings = 0
+    Ext.IO = {
+        LoadFile = function(path) return files[path] end,
+        SaveFile = function(path, value) files[path] = value return true end,
+    }
+    Ext.Utils = {}
+    Osi = {
+        GetHostCharacter = function() return "actor" end,
+        OpenMessageBox = function() warnings = warnings + 1 end,
+    }
+    local bridge = NativeBridge.Create({
+        NATIVE_HANDSHAKE_ATTEMPTS = 1,
+        NATIVE_HANDSHAKE_POLL_MS = 1,
+        TRACE_EVENTS = false,
+        VERSION = "2.0.0",
+    }, {
+        Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
+    }, recordingDiagnostics())
+    bridge.BeginHandshake()
+    local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
+    files["BestOfHandsNative.status"] = table.concat({
+        "protocol=5", "version=2.0.0", "state=ready", "session=session-a",
+        "pid=10", "hooks=" .. NativeBridge.REQUIRED_HOOKS,
+        "ack=" .. probe, "detail=ok", "end=1", "",
+    }, "\n")
+    scheduled[1]()
+    assertEqual(true, bridge.IsReady(), "initially ready")
+    files["BestOfHandsNative.status"] = table.concat({
+        "protocol=5", "version=2.0.0", "state=waiting_for_server", "session=session-a",
+        "pid=10", "hooks=none", "ack=" .. probe, "detail=world changed", "end=1", "",
+    }, "\n")
+    local written, reason = bridge.Upsert({
+        action = "disarm", id = 3, initiator = "actor", specialist = "best", target = "target",
+    })
+    assertEqual(false, written, "record rejected")
+    assertEqual("native_bridge_not_ready", reason, "lost bridge reason")
+    assertEqual(false, bridge.IsReady(), "bridge disabled")
+    assertEqual(1, warnings, "visible warning")
+end)
+
+test("client bridge correlates delegated rolls by stable UUID and publishes client handles", function()
+    local clientActor = entity(actor.guid, "01c0000100000001")
+    local clientSpecialist = entity(specialist.guid, "01c0000100000002")
+    local clientTarget = entity(target.guid, "01c0000100000003")
+    local clientRoll = entity(
+        "00000000-0000-0000-0000-000000000004",
+        "01c0000200000004"
+    )
+    local entities = {
+        [clientActor] = clientActor,
+        [clientSpecialist] = clientSpecialist,
+        [clientTarget] = clientTarget,
+        [clientRoll] = clientRoll,
+        [actor.guid] = clientActor,
+        [specialist.guid] = clientSpecialist,
+        [target.guid] = clientTarget,
+    }
+    local callbacks = {}
+    local files = {
+        ["BestOfHandsNative.actions"] = table.concat({
+            "protocol=5",
+            "pak_version=2.0.0",
+            "probe=test",
+            "native_session=44-55",
+            "trace=1",
+            "record=7\tdisarm\t0200000100000001\t0200000100000002"
+                .. "\t0200000100000003\t0200000200000004\t0"
+                .. "\t00000000-0000-0000-0000-000000000004"
+                .. "\t" .. actor.guid
+                .. "\t" .. specialist.guid
+                .. "\t" .. target.guid
+                .. "\t1",
+            "end=1",
+            "",
+        }, "\n"),
+    }
+    Ext = {
+        Entity = {
+            Get = function(value)
+                return entities[value] or (type(value) == "table" and value or nil)
+            end,
+            OnCreate = function(componentName, callback)
+                callbacks[componentName .. "Create"] = callback
+                return 1
+            end,
+            OnChange = function(componentName, callback)
+                callbacks[componentName .. "Change"] = callback
+                return 2
+            end,
+            OnDestroy = function(componentName, callback)
+                callbacks[componentName .. "Destroy"] = callback
+                return 3
+            end,
         },
-        Entity = { Get = function() return {
-            Lock = { field_8 = "runtime-dc" },
-        } end },
+        IO = {
+            LoadFile = function(path) return files[path] end,
+            SaveFile = function(path, value) files[path] = value return true end,
+        },
+        Timer = { WaitFor = function() end },
+        Utils = { Print = function() end },
     }
-    local api = RuntimeApi.Create({}, diagnostics)
-    assertEqual("template-dc", api.GetActionDifficultyClass(
-        "lockpick", "chest"
-    ), "template difficulty")
-
-    templateDifficulty = "00000000-0000-0000-0000-000000000000"
-    assertEqual("runtime-dc", api.GetActionDifficultyClass(
-        "lockpick", "chest"
-    ), "runtime fallback difficulty")
+    local bridge = NativePresentationBridge.Start({
+        TRACE_EVENTS = true,
+        VERSION = "2.0.0",
+    })
+    local component = {
+        RollContext = 5,
+        Roller = clientActor,
+        RollUuid = clientRoll.guid,
+        Subject = clientTarget,
+        AdvantageType = "None",
+    }
+    clientRoll.RequestedRoll = component
+    callbacks.RequestedRollCreate(clientRoll, nil, component)
+    local record = bridge.GetRecord(clientRoll, component)
+    assertEqual("delegated", record.profileMode, "delegated client classification")
+    assertEqual(clientSpecialist.handle, record.specialistHandle, "client specialist mapped")
+    assertEqual(1, record.presentationAdvantage, "specialist advantage retained for diagnostics")
+    assertEqual("None", component.AdvantageType, "client roll component remains untouched")
+    files["BestOfHandsNative.actions"] = files["BestOfHandsNative.actions"]:gsub(
+        "\t1\nend=1",
+        "\t2\nend=1"
+    )
+    bridge.RefreshRecord(record)
+    assertEqual(2, record.presentationAdvantage, "presentation state refreshes after modifier observation")
+    assertContains(
+        files["BestOfHandsNative.client"],
+        "record=7\t" .. clientRoll.guid
+            .. "\t" .. clientActor.handle
+            .. "\t" .. clientSpecialist.handle
+            .. "\t" .. clientTarget.handle,
+        "client bridge record"
+    )
+    callbacks.RequestedRollDestroy(clientRoll, nil, component)
+    assertEqual(nil,
+        files["BestOfHandsNative.client"]:find("record=7", 1, true),
+        "destroyed client mapping removed")
 end)
 
-test("runtime emits native-compatible disarm outcomes", function()
-    local calls = { armed = {}, attempted = {} }
-    _G.Ext = {}
-    _G.Osi = {
-        SetTrapArmed = function(item, armed)
-            calls.armed[#calls.armed + 1] = { item, armed }
+test("client diagnostics leave active-roll presentation to the native hook", function()
+    local callbacks = {}
+    local output = {}
+    local rollEntity = entity(
+        "00000000-0000-0000-0000-000000000034",
+        "01c0000200000034"
+    )
+    local requestedRoll = {
+        AdvantageType = "None",
+        RollContext = 5,
+        Roller = actor,
+        Subject = target,
+    }
+    rollEntity.RequestedRoll = requestedRoll
+    local advantageEntry = {
+        AdvantageType = "Advantage",
+        IsAdvantage = true,
+        IsDisabled = false,
+        Name = "Cat's Grace",
+        Type = "gui::VMRollModifier",
+    }
+    local modifierEntry = {
+        IsAdvantage = false,
+        IsDisabled = false,
+        Name = "Dexterity",
+        Value = 5,
+        Type = "gui::VMRollModifier",
+    }
+    local rollViewModel = {
+        Advantages = { advantageEntry },
+        Modifiers = { modifierEntry },
+        RollAdvantageType = "None",
+        Type = "gui::VMActiveRoll",
+    }
+    local dataContext = {
+        FinalResult = 28,
+        Roll = rollViewModel,
+        RollState = "WaitForStart",
+        SelectedBoostModifierList = {},
+        Type = "gui::DCActiveRoll",
+    }
+    local widget = {
+        DataContext = dataContext,
+        Find = function() return nil end,
+        Name = "ActiveRoll",
+        Type = "ls::UIWidget",
+        VisualChildrenCount = 0,
+    }
+    local layer = {
+        Type = "Noesis::Grid",
+        VisualChildrenCount = 1,
+        VisualChild = function(_, index)
+            return index == 0 and widget or nil
         end,
-        AttemptedDisarm = function(item, character, tool, succeeded)
-            calls.attempted[#calls.attempted + 1] = {
-                item, character, tool, succeeded,
+    }
+    local root = {
+        Find = function() return nil end,
+        Type = "Noesis::FrameworkElement",
+        VisualChildrenCount = 1,
+        VisualChild = function(_, index)
+            return index == 0 and layer or nil
+        end,
+    }
+    Ext = {
+        Entity = {
+            Get = function(value)
+                return value == rollEntity and rollEntity
+                    or (type(value) == "table" and value or nil)
+            end,
+            OnChange = function(componentName, callback)
+                callbacks[componentName .. "Change"] = callback
+                return 2
+            end,
+            OnCreate = function(componentName, callback)
+                callbacks[componentName .. "Create"] = callback
+                return 1
+            end,
+            OnDestroy = function(componentName, callback)
+                callbacks[componentName .. "Destroy"] = callback
+                return 3
+            end,
+        },
+        IO = { LoadFile = function() return nil end },
+        Timer = { WaitFor = function(_, callback) callback() end },
+        UI = { GetRoot = function() return root end },
+        Utils = {
+            MonotonicTime = function() return 42 end,
+            Print = function(line) output[#output + 1] = line end,
+        },
+    }
+    UiRollDiagnostics.Start({ TRACE_EVENTS = true }, {
+        GetRecord = function()
+            return {
+                action = "disarm",
+                delegationId = "17",
+                initiatorHandle = actor.handle,
+                presentationAdvantage = 1,
+                profileMode = "delegated",
+                specialistHandle = specialist.handle,
+                targetHandle = target.handle,
             }
         end,
-    }
-    local api = RuntimeApi.Create({}, diagnostics)
-
-    assertEqual(true, api.CompleteAction("disarm", "trap", "specialist"), "disarm completion")
-    assertEqual("trap", calls.armed[1][1], "disarmed target")
-    assertEqual(0, calls.armed[1][2], "armed state cleared")
-    assertEqual(true, api.NotifyDisarmAttempt(
-        "trap", "initiator", "toolkit", true
-    ), "success notification")
-    assertEqual(true, api.NotifyDisarmAttempt(
-        "trap", "initiator", "toolkit", false
-    ), "failure notification")
-    assertEqual("trap", calls.attempted[1][1], "success target")
-    assertEqual("initiator", calls.attempted[1][2], "success initiator")
-    assertEqual("toolkit", calls.attempted[1][3], "success toolkit")
-    assertEqual(1, calls.attempted[1][4], "success result")
-    assertEqual(0, calls.attempted[2][4], "failure result")
+        RefreshRecord = function(record) return record end,
+    })
+    callbacks.RequestedRollCreate(rollEntity, nil, requestedRoll)
+    local trace = table.concat(output, "\n")
+    assertContains(trace, "client_requested_roll_state", "ECS roll diagnostics retained")
+    assertEqual(nil, trace:find("client_active_roll_visual_tree", 1, true),
+        "inaccessible visual tree is not traversed")
+    assertEqual(nil, trace:find("client_presentation_advantage_sync", 1, true),
+        "Lua does not mutate client presentation")
+    assertEqual("None", rollViewModel.RollAdvantageType,
+        "Lua leaves the viewmodel untouched")
+    assertEqual("None", requestedRoll.AdvantageType, "requested roll remains unmodified")
 end)
 
-local function makeInteractionApi()
-    local calls = {
-        blocks = {},
-        complete = {},
-        consume = {},
-        disarm = {},
-        outcomes = {},
-        permission = {},
-        rolls = {},
-        targetUse = {},
-        timers = {},
-    }
-    local state = {
-        actionAvailable = { lockpick = true, disarm = true },
-        combat = false,
-        difficulty = "dc-15",
-        specialist = "best",
-        tool = { item = "tools", owner = "best", template = "template" },
-    }
-    local api = {}
-    api.IsActionAvailable = function(action) return state.actionAvailable[action] end
-    api.IsInCombat = function() return state.combat end
-    api.FindActionTool = function() return state.tool end
-    api.GetActionDifficultyClass = function() return state.difficulty end
-    api.BlockNativeAction = function(action, actor, target)
-        calls.blocks[#calls.blocks + 1] = { action, actor, target }
-        return true
-    end
-    api.ProcessActionPermission = function(action, actor, target, requestId)
-        calls.permission[#calls.permission + 1] = { action, actor, target, requestId }
-        return true
-    end
-    api.RequestActiveSleightRoll = function(actor, target, difficulty, event)
-        calls.rolls[#calls.rolls + 1] = { actor, target, difficulty, event }
-        return true
-    end
-    api.CompleteAction = function(action, target, actor)
-        calls.complete[#calls.complete + 1] = { action, target, actor }
-        calls.outcomes[#calls.outcomes + 1] = "complete"
-        state.actionAvailable[action] = false
-        return true
-    end
-    api.NotifyDisarmAttempt = function(target, actor, tool, succeeded)
-        calls.disarm[#calls.disarm + 1] = { target, actor, tool, succeeded }
-        calls.outcomes[#calls.outcomes + 1] = succeeded and "disarm_success" or "disarm_failure"
-        return true
-    end
-    api.UseTarget = function(actor, target)
-        calls.targetUse[#calls.targetUse + 1] = { actor, target }
-        return true
-    end
-    api.ConsumeActionTool = function(tool)
-        calls.consume[#calls.consume + 1] = tool
-        calls.outcomes[#calls.outcomes + 1] = "consume"
-        return true
-    end
-    api.Schedule = function(_, callback) calls.timers[#calls.timers + 1] = callback end
-
-    local resolver = {
-        Resolve = function(actor, target, action, requestId)
-            local specialist = state.specialist
-            return {
-                action = action,
-                initiator = actor,
-                initiatorScore = specialist == actor and 12 or 1,
-                requestId = requestId,
-                specialist = specialist,
-                specialistScore = 12,
+test("runtime tool precheck uses BG3 party inventory without consuming anything", function()
+    local queried = {}
+    local responses = {}
+    local errors = {}
+    Osi = {
+        DB_CustomDisarmTrapResponse = function(character, target, result)
+            responses[#responses + 1] = {
+                action = "disarm",
+                character = character,
+                result = result,
                 target = target,
             }
         end,
+        DB_CustomLockpickItemResponse = function(character, target, result)
+            responses[#responses + 1] = {
+                action = "lockpick",
+                character = character,
+                result = result,
+                target = target,
+            }
+        end,
+        GetInventoryOwner = function() return "tool-owner" end,
+        GetItemByTemplateInPartyInventory = function(template, character)
+            queried[#queried + 1] = { template = template, character = character }
+            if template == "opened-tools" then
+                return "tool-item"
+            end
+            return nil
+        end,
+        ShowError = function(character, key)
+            errors[#errors + 1] = { character = character, key = key }
+        end,
     }
-    return api, resolver, calls, state
+    local api = NativeRuntimeApi.Create({
+        MISSING_TOOL_ERROR_KEY = "CannotUse",
+        VANILLA_THIEVES_TOOLS_TEMPLATES = { "closed-tools", "opened-tools" },
+        VANILLA_TRAP_DISARM_TOOL_TEMPLATES = { "disarm-kit" },
+    }, recordingDiagnostics())
+    local tool = api.FindNativeActionTool("lockpick", "actor")
+    assertEqual("tool-item", tool.item, "party tool")
+    assertEqual("tool-owner", tool.owner, "native inventory owner")
+    assertEqual("opened-tools", tool.template, "matching template")
+    assertEqual(2, #queried, "template fallbacks checked")
+    assertEqual("actor", queried[1].character, "initiator anchors magic pockets")
+    assertEqual(nil, api.FindNativeActionTool("disarm", "actor"), "missing kit")
+    local rejected, notified =
+        api.RejectNativeActionWithoutTool("lockpick", "actor", "target")
+    assertEqual(true, rejected, "lockpick request rejected")
+    assertEqual(true, notified, "native error notification shown")
+    assertEqual("lockpick", responses[1].action, "lockpick response database")
+    assertEqual(0, responses[1].result, "lockpick rejection result")
+    assertEqual("CannotUse", errors[1].key, "known native error key")
+    api.RejectNativeActionWithoutTool("disarm", "actor", "trap")
+    assertEqual("disarm", responses[2].action, "disarm response database")
+    assertEqual(0, responses[2].result, "disarm rejection result")
+end)
+
+local function makeCoordinator(options)
+    options = options or {}
+    installEntityMock()
+    local removed = {}
+    local rollCorrelations = {}
+    local presentationStates = {}
+    local rejections = {}
+    local upserts = {}
+    local bridge = {
+        IsReady = function() return true end,
+        Remove = function(id) removed[#removed + 1] = id return true end,
+        SetRoll = function(id, roll)
+            rollCorrelations[#rollCorrelations + 1] = { id = id, roll = roll }
+            return true, nil, tostring(roll):match("Entity %((%x+)%)")
+        end,
+        SetFinishedEvent = function(_, eventEntity)
+            return true, nil, tostring(eventEntity):match("Entity %((%x+)%)")
+        end,
+        SetPresentation = function(id, advantageType)
+            presentationStates[#presentationStates + 1] = {
+                id = id,
+                advantageType = advantageType,
+            }
+            return true, nil
+        end,
+        Upsert = function(record)
+            upserts[#upserts + 1] = record
+            return true, nil, {
+                initiatorHandle = actor.handle,
+                specialistHandle = specialist.handle,
+                targetHandle = target.handle,
+            }
+        end,
+    }
+    local resolver = {
+        Resolve = function(initiator, targetValue, action, requestId)
+            return {
+                action = action,
+                initiator = initiator,
+                initiatorScore = 0,
+                requestId = requestId,
+                specialist = options.initiatorIsSpecialist and initiator or "best",
+                specialistScore = options.initiatorIsSpecialist and 0 or 13,
+                target = targetValue,
+            }
+        end,
+    }
+    local timers = {}
+    local diagnostics, records = recordingDiagnostics()
+    local coordinator = NativeInteractionCoordinator.Create({
+        NATIVE_ACTION_TIMEOUT_MS = 100,
+    }, {
+        FindNativeActionTool = function(action)
+            if options.noTool then
+                return nil
+            end
+            return {
+                item = action .. "-tool",
+                owner = "actor",
+                template = action .. "-template",
+            }
+        end,
+        RejectNativeActionWithoutTool = function(action, character, targetValue)
+            rejections[#rejections + 1] = {
+                action = action,
+                character = character,
+                target = targetValue,
+            }
+            return true, true
+        end,
+        Schedule = function(_, callback) timers[#timers + 1] = callback end,
+    }, resolver, bridge, diagnostics)
+    return coordinator, bridge, upserts, removed, records, rollCorrelations, timers,
+        presentationStates, rejections
 end
 
-local delegationSettings = {
-    ACTION_PERMISSION_TIMEOUT_MS = 100,
-    DELEGATION_ROLL_TIMEOUT_MS = 100,
-    DELEGATED_DISARM_ROLL_EVENT = "BestOfHands_DelegatedDisarm",
-    DELEGATED_LOCKPICK_ROLL_EVENT = "BestOfHands_DelegatedLockpick",
-    QUICK_LOCKPICK_OPEN_TIMEOUT_MS = 100,
-}
-
-local function startAcceptedRoll(coordinator, calls, permissionActor)
-    local permission = calls.permission[#calls.permission]
-    coordinator.OnRequestProcessed(permissionActor, permission[4], 1)
-    calls.timers[#calls.timers]()
-end
-
-local function runQueuedQuickPermission(calls)
-    calls.timers[#calls.timers]()
-end
-
-test("quick lockpick asks vanilla permission and rolls as the specialist", function()
-    local api, resolver, calls = makeInteractionApi()
-    local coordinator = InteractionCoordinator.Create(delegationSettings, api, resolver, diagnostics)
-    assertEqual(true, coordinator.OnUseFinished("actor", "chest", 0), "first request")
-    assertEqual(false, coordinator.OnUseFinished("actor", "chest", 0), "duplicate request")
-    assertEqual(0, #calls.permission, "permission deferred outside UseFinished")
-    runQueuedQuickPermission(calls)
-    assertEqual(1, #calls.permission, "permission count")
-    assertEqual("actor", calls.permission[1][2], "permission actor")
-    assertEqual("chest", calls.permission[1][3], "permission target")
-    assertEqual(false, coordinator.OnRequestProcessed(
-        "best", calls.permission[1][4], 1
-    ), "specialist cannot satisfy initiator permission")
-    assertEqual(0, #calls.rolls, "no roll before initiator response")
-    startAcceptedRoll(coordinator, calls, "actor")
-    assertEqual(1, #calls.rolls, "active roll count")
-    assertEqual("best", calls.rolls[1][1], "actual roller")
-    assertEqual("dc-15", calls.rolls[1][3], "lock DC")
-    assertEqual(true, coordinator.OnRollResult(
-        "BestOfHands_DelegatedLockpick", "best", "chest", 1
-    ), "success result")
-    assertEqual("lockpick", calls.complete[1][1], "completed action")
-    assertEqual("best", calls.complete[1][3], "completion specialist")
-    assertEqual("actor", calls.targetUse[1][1], "opening initiator")
-    assertEqual(0, #calls.consume, "success consumption")
-    assertEqual(0, coordinator.Count(), "pending after success")
+test("both actions use the same native delegation path without blocking vanilla", function()
+    local coordinator, _, upserts = makeCoordinator()
+    assertEqual(false, coordinator.OnNativeRequest("lockpick", "actor", "target", 4), "lockpick observation")
+    assertEqual("lockpick", upserts[1].action, "lockpick action")
+    coordinator.Clear("test")
+    assertEqual(false, coordinator.OnNativeRequest("disarm", "actor", "target", 5), "disarm observation")
+    assertEqual("disarm", upserts[2].action, "disarm action")
 end)
 
-test("one action reserves a target across all initiating characters", function()
-    local api, resolver, calls = makeInteractionApi()
-    local coordinator = InteractionCoordinator.Create(delegationSettings, api, resolver, diagnostics)
-
-    assertEqual(true, coordinator.OnUseFinished("actor-a", "chest", 0), "first actor queued")
-    assertEqual(false, coordinator.OnUseFinished("actor-b", "chest", 0), "second actor rejected")
-    assertEqual(1, coordinator.Count(), "single target reservation")
-    runQueuedQuickPermission(calls)
-    assertEqual("actor-a", calls.permission[1][2], "first actor owns permission")
-
-    assertEqual(true, coordinator.OnNativeRequest(
-        "lockpick", "actor-b", "chest", 46
-    ), "competing native request blocked")
-    assertEqual("actor-b", calls.blocks[1][2], "competing actor blocked")
-    assertEqual(1, coordinator.Count(), "original delegation retained")
+test("missing tools reject both native actions before a roll can open", function()
+    local coordinator, _, upserts, removed, records, _, _, _, rejections =
+        makeCoordinator({ noTool = true })
+    assertEqual(false, coordinator.OnNativeRequest("disarm", "actor", "target", 18),
+        "observer publishes rejection")
+    assertEqual(0, #upserts, "no native profile mapping")
+    assertEqual(0, #removed, "nothing to remove")
+    assertEqual(0, coordinator.Count(), "no pending delegation")
+    assertEqual(1, #rejections, "one custom response")
+    assertEqual("disarm", rejections[1].action, "disarm response")
+    local skipped = findRecord(records, "native_tool_unavailable_rejected")
+    assertEqual(
+        1,
+        skipped.fields.response_published,
+        "no-tool response published"
+    )
+    assertEqual(1, skipped.fields.notification_shown, "native notification shown")
 end)
 
-test("different targets can be delegated concurrently", function()
-    local api, resolver = makeInteractionApi()
-    local coordinator = InteractionCoordinator.Create(delegationSettings, api, resolver, diagnostics)
-    assertEqual(true, coordinator.OnUseFinished("actor-a", "chest-a", 0), "first target")
-    assertEqual(true, coordinator.OnUseFinished("actor-b", "chest-b", 0), "second target")
-    assertEqual(2, coordinator.Count(), "independent target reservations")
+test("requested roll is correlated without Lua changing ownership", function()
+    local coordinator, _, _, removed, records, rollCorrelations, _, presentationStates =
+        makeCoordinator()
+    coordinator.OnNativeRequest("disarm", "actor", "target", 6)
+    local rollEntity = entity(
+        "00000000-0000-0000-0000-000000000005",
+        "0200000200000005"
+    )
+    local component = {
+        Entity2Uuid = "",
+        EntityUuid = "",
+        FixedRollBonuses = {},
+        ResolvedRollBonuses = {},
+        RollUuid = "00000000-0000-0000-0000-000000000004",
+        Roller = actor,
+        Subject = target,
+    }
+    rollEntity.RequestedRoll = component
+    assertEqual(true, coordinator.OnRequestedRoll(rollEntity, component), "routed")
+    assertEqual(actor, component.Roller, "Lua does not substitute the roller")
+    assertEqual(rollEntity, rollCorrelations[1].roll, "roll entity published to native bridge")
+    assertEqual(true, coordinator.OnRollModifiers(rollEntity, {
+        ConsumableModifiers = {},
+        DynamicModifiers = {},
+        DynamicModifiers2 = {},
+        DynamicModifiers3 = {},
+        ItemSpellModifiers = {},
+        SpellModifiers = {},
+        StaticModifiers = {},
+        ToggledPassiveModifiers = {},
+    }), "modifier observation routed")
+    assertEqual(actor, component.Roller, "profile substitution never changes ownership")
+    assertEqual(0, presentationStates[1].advantageType, "neutral presentation published")
+    assertEqual(0, #removed, "record remains until native result or timeout")
+    local observed = findRecord(records, "native_modifiers_observed")
+    assertEqual(actor.guid, observed.fields.roll_actor_at_observer,
+        "observer always sees initiator ownership")
+    assertEqual(0, observed.fields.observed_during_native_call,
+        "profile substitution is local rather than component-wide")
 end)
 
-test("a competing native start clears a same-target reservation", function()
-    local api, resolver = makeInteractionApi()
-    local coordinator = InteractionCoordinator.Create(delegationSettings, api, resolver, diagnostics)
-    coordinator.OnUseFinished("actor-a", "chest", 0)
-    assertEqual(true, coordinator.OnNativeStarted(
-        "lockpick", "actor-b", "chest"
-    ), "competing start observed")
-    assertEqual(0, coordinator.Count(), "reservation cleared")
+test("specialist advantage state is published for client presentation", function()
+    local coordinator, _, _, _, _, _, _, presentationStates = makeCoordinator()
+    coordinator.OnNativeRequest("disarm", "actor", "target", 20)
+    local rollEntity = entity(
+        "00000000-0000-0000-0000-000000000026",
+        "0200000200000026"
+    )
+    local requestedRoll = {
+        FixedRollBonuses = {},
+        ResolvedRollBonuses = {},
+        RollUuid = "00000000-0000-0000-0000-000000000027",
+        Roller = actor,
+        Subject = target,
+    }
+    rollEntity.RequestedRoll = requestedRoll
+    coordinator.OnRequestedRoll(rollEntity, requestedRoll)
+    coordinator.OnRollModifiers(rollEntity, {
+        StaticModifiers = {
+            {
+                Disabled = false,
+                Modifier = { AdvantageType = "Advantage" },
+            },
+        },
+    })
+    assertEqual(1, presentationStates[1].advantageType, "advantage published")
+    coordinator.OnRollModifiers(rollEntity, {
+        StaticModifiers = {
+            {
+                Disabled = false,
+                Modifier = { AdvantageType = "Advantage" },
+            },
+            {
+                Disabled = false,
+                Modifier = { AdvantageType = "Disadvantage" },
+            },
+        },
+    }, "changed")
+    assertEqual(0, presentationStates[2].advantageType, "opposed states cancel")
 end)
 
-test("quick lockpick preserves vanilla success and guarded cases", function()
-    local api, resolver, calls, state = makeInteractionApi()
-    local coordinator = InteractionCoordinator.Create(delegationSettings, api, resolver, diagnostics)
-    assertEqual(false, coordinator.OnUseFinished("actor", "chest", 1), "successful vanilla use")
-    state.actionAvailable.lockpick = false
-    assertEqual(false, coordinator.OnUseFinished("actor", "chest", 0), "unlocked target")
-    state.actionAvailable.lockpick = true
-    state.combat = true
-    assertEqual(false, coordinator.OnUseFinished("actor", "chest", 0), "combat")
-    state.combat = false
-    coordinator.OnEnteredForceTurnBased("actor")
-    assertEqual(false, coordinator.OnUseFinished("actor", "chest", 0), "forced turn-based")
-    coordinator.OnLeftForceTurnBased("actor")
-    state.tool = nil
-    assertEqual(false, coordinator.OnUseFinished("actor", "chest", 0), "no tools")
-    state.tool = { item = "tools", owner = "best", template = "template" }
-    state.difficulty = nil
-    assertEqual(false, coordinator.OnUseFinished("actor", "chest", 0), "missing lock DC")
-    assertEqual(0, #calls.permission, "skipped permission count")
+test("a specialist-owned requested roll is rejected without rewriting it", function()
+    local coordinator, _, _, removed, records, rollCorrelations = makeCoordinator()
+    coordinator.OnNativeRequest("lockpick", "actor", "target", 8)
+    local rollEntity = entity(
+        "00000000-0000-0000-0000-000000000008",
+        "0200000200000008"
+    )
+    local component = {
+        Entity2Uuid = "",
+        EntityUuid = "",
+        FixedRollBonuses = {},
+        ResolvedRollBonuses = {},
+        RollUuid = "00000000-0000-0000-0000-000000000007",
+        Roller = specialist,
+        Subject = target,
+    }
+    rollEntity.RequestedRoll = component
+    assertEqual(false, coordinator.OnRequestedRoll(rollEntity, component), "roll rejected")
+    assertEqual(specialist, component.Roller, "Lua never rewrites roll ownership")
+    assertEqual(0, #rollCorrelations, "invalid ownership is not published")
+    assertEqual(1, removed[#removed], "invalid native record removed")
+    assertEqual("Error", findRecord(records, "native_roll_correlation_failed").level,
+        "ownership violation diagnosed")
 end)
 
-test("delegated failure consumes the selected tool and cancellation consumes none", function()
-    local api, resolver, calls = makeInteractionApi()
-    local coordinator = InteractionCoordinator.Create(delegationSettings, api, resolver, diagnostics)
-    coordinator.OnUseFinished("actor", "door", 0)
-    runQueuedQuickPermission(calls)
-    startAcceptedRoll(coordinator, calls, "actor")
-    coordinator.OnRollResult("BestOfHands_DelegatedLockpick", "best", "door", 0)
-    assertEqual(1, #calls.consume, "failed roll consumption")
-    assertEqual("best", calls.consume[1].owner, "selected owner consumed")
-    assertEqual(0, #calls.complete, "failed roll completion")
-    assertEqual(0, #calls.disarm, "lockpick failure disarm outcomes")
-
-    coordinator.OnUseFinished("actor", "door", 0)
-    runQueuedQuickPermission(calls)
-    startAcceptedRoll(coordinator, calls, "actor")
-    coordinator.OnRollResult("BestOfHands_DelegatedLockpick", "best", "door", 2)
-    assertEqual(1, #calls.consume, "cancelled roll consumption")
-    assertEqual(0, #calls.disarm, "lockpick cancellation disarm outcomes")
+test("action stop cannot discard a correlated roll before its native result", function()
+    local coordinator, _, _, removed, _, _, timers = makeCoordinator()
+    coordinator.OnNativeRequest("disarm", "actor", "target", 9)
+    local rollEntity = entity(
+        "00000000-0000-0000-0000-000000000010",
+        "0200000200000010"
+    )
+    local component = {
+        Entity2Uuid = "",
+        EntityUuid = "",
+        FixedRollBonuses = {},
+        ResolvedRollBonuses = {},
+        RollUuid = "00000000-0000-0000-0000-000000000011",
+        Roller = actor,
+        Subject = target,
+    }
+    rollEntity.RequestedRoll = component
+    coordinator.OnRequestedRoll(rollEntity, component)
+    coordinator.OnNativeStopped("disarm", "actor", "target")
+    assertEqual(1, coordinator.Count(), "correlated roll retained after action stop")
+    assertEqual(true,
+        coordinator.OnRollResult("Disarm Trap", "actor", "target", 1, 1, 0),
+        "delegated result reports that it was handled")
+    timers[#timers]()
+    assertEqual(0, coordinator.Count(), "record cleared after native result")
+    assertEqual(1, removed[#removed], "native record removed during result cleanup")
 end)
 
-test("manual native request is blocked then delegated through vanilla permission", function()
-    local api, resolver, calls = makeInteractionApi()
-    local coordinator = InteractionCoordinator.Create(delegationSettings, api, resolver, diagnostics)
-    assertEqual(true, coordinator.OnNativeRequest("lockpick", "actor", "door", 42), "delegated")
-    assertEqual(1, #calls.blocks, "native block count")
-    assertEqual(true, coordinator.OnRequestProcessed("actor", 42, 0), "native rejection observed")
-    calls.timers[#calls.timers]()
-    assertEqual("actor", calls.permission[1][2], "permission initiator")
-    startAcceptedRoll(coordinator, calls, "actor")
-    assertEqual("best", calls.rolls[1][1], "manual actual roller")
-    assertEqual("BestOfHands_DelegatedLockpick", calls.rolls[1][4], "delegated event")
+test("a failed roll remains mapped for native inspiration retry", function()
+    local coordinator, _, _, removed, records, _, timers = makeCoordinator()
+    coordinator.OnNativeRequest("disarm", "actor", "target", 10)
+    local timerCountBeforeFailure = #timers
+    coordinator.OnRollResult("Disarm Trap", "actor", "target", 0, 1, 0)
+    assertEqual(1, coordinator.Count(), "failed roll retained")
+    assertEqual(0, #removed, "native profile mapping remains available")
+    assertEqual(timerCountBeforeFailure, #timers, "no immediate failure cleanup scheduled")
+    assertEqual("Trace", findRecord(records, "native_delegation_retained_for_retry").level,
+        "retry retention traced")
+    coordinator.OnRollResult("Disarm Trap", "actor", "target", 1, 1, 0)
+    timers[#timers]()
+    assertEqual(0, coordinator.Count(), "successful retry clears mapping")
+    assertEqual(1, removed[#removed], "successful retry removes native record")
 end)
 
-test("native request stays vanilla when the initiator is already best", function()
-    local api, resolver, calls, state = makeInteractionApi()
-    state.specialist = "actor"
-    local coordinator = InteractionCoordinator.Create(delegationSettings, api, resolver, diagnostics)
-    assertEqual(false, coordinator.OnNativeRequest("lockpick", "actor", "door", 43), "not delegated")
-    assertEqual(0, #calls.blocks, "native request untouched")
+test("a canceled roll is terminal and clears its native mapping", function()
+    local coordinator, _, _, removed, records, _, timers = makeCoordinator()
+    coordinator.OnNativeRequest("disarm", "actor", "target", 11)
+    local timerCountBeforeCancellation = #timers
+    coordinator.OnRollResult("Disarm Trap", "actor", "target", 2, 1, 0)
+    assertEqual(timerCountBeforeCancellation + 1, #timers, "cancellation cleanup scheduled")
+    timers[#timers]()
+    assertEqual(0, coordinator.Count(), "canceled roll cleared")
+    assertEqual(1, removed[#removed], "canceled roll removes native record")
+    assertEqual("native_roll_canceled",
+        findRecord(records, "native_delegation_cleared").fields.reason,
+        "cancellation reason traced")
+    assertEqual(nil, findRecord(records, "native_delegation_retained_for_retry"),
+        "cancellation is not misclassified as retryable")
 end)
 
-test("quick delegation suppresses an overtaking native initiator roll", function()
-    local api, resolver, calls = makeInteractionApi()
-    local coordinator = InteractionCoordinator.Create(delegationSettings, api, resolver, diagnostics)
-    coordinator.OnUseFinished("actor", "door", 0)
-    runQueuedQuickPermission(calls)
-    local privateRequest = calls.permission[1][4]
-
-    assertEqual(true, coordinator.OnNativeRequest(
-        "lockpick", "actor", "door", 45
-    ), "native roll suppressed")
-    assertEqual(1, #calls.blocks, "native block count")
-    assertEqual(false, coordinator.OnRequestProcessed(
-        "actor", 45, 0
-    ), "native rejection is not the private response")
-    assertEqual(1, coordinator.Count(), "quick record retained")
-
-    coordinator.OnRequestProcessed("actor", privateRequest, 1)
-    calls.timers[#calls.timers]()
-    assertEqual("best", calls.rolls[1][1], "specialist still rolls")
+test("a RequestedRoll Canceled flag cannot tear down a retryable native mapping", function()
+    local coordinator, _, _, removed, _, _, timers = makeCoordinator()
+    coordinator.OnNativeRequest("lockpick", "actor", "target", 19)
+    local rollEntity = entity(
+        "00000000-0000-0000-0000-000000000025",
+        "0200000200000025"
+    )
+    local requestedRoll = {
+        Canceled = true,
+        Entity2Uuid = "",
+        EntityUuid = "",
+        FixedRollBonuses = {},
+        ResolvedRollBonuses = {},
+        RollUuid = "00000000-0000-0000-0000-000000000026",
+        Roller = actor,
+        Subject = target,
+    }
+    rollEntity.RequestedRoll = requestedRoll
+    coordinator.OnRequestedRoll(rollEntity, requestedRoll)
+    local timerCount = #timers
+    assertEqual(true,
+        coordinator.OnRequestedRollChanged(rollEntity, requestedRoll, 1),
+        "canceled-flag change observed")
+    assertEqual(timerCount, #timers, "canceled flag schedules no cleanup")
+    assertEqual(1, coordinator.Count(), "mapping remains available")
+    assertEqual(0, #removed, "bridge mapping remains available")
 end)
 
-test("delegated trap success preserves the native outcome contract", function()
-    local api, resolver, calls = makeInteractionApi()
-    local coordinator = InteractionCoordinator.Create(delegationSettings, api, resolver, diagnostics)
-    coordinator.OnNativeRequest("disarm", "actor", "trap", 44)
-    coordinator.OnRequestProcessed("actor", 44, 0)
-    calls.timers[#calls.timers]()
-    startAcceptedRoll(coordinator, calls, "actor")
-    coordinator.OnRollResult("BestOfHands_DelegatedDisarm", "best", "trap", 1)
-    assertEqual("disarm", calls.complete[1][1], "completed disarm")
-    assertEqual("best", calls.complete[1][3], "disarm specialist")
-    assertEqual("trap", calls.disarm[1][1], "outcome target")
-    assertEqual("actor", calls.disarm[1][2], "outcome initiator")
-    assertEqual("tools", calls.disarm[1][3], "outcome toolkit")
-    assertEqual(true, calls.disarm[1][4], "success outcome")
-    assertEqual(1, #calls.disarm, "single outcome")
-    assertEqual("complete", calls.outcomes[#calls.outcomes - 1], "disarm before outcome")
-    assertEqual("disarm_success", calls.outcomes[#calls.outcomes], "success outcome order")
-    assertEqual(0, #calls.consume, "success consumption")
-    assertEqual(0, #calls.targetUse, "trap not opened")
+test("direct specialist rolls produce bounded vanilla reference comparison traces", function()
+    local coordinator, _, upserts, removed, records, _, timers = makeCoordinator({
+        initiatorIsSpecialist = true,
+    })
+    assertEqual(false,
+        coordinator.OnNativeRequest("disarm", "actor", "target", 20),
+        "direct specialist request remains vanilla")
+    assertEqual(0, #upserts, "reference tracing creates no native mapping")
+    local rollEntity = entity(
+        "00000000-0000-0000-0000-000000000027",
+        "0200000200000027"
+    )
+    local requestedRoll = {
+        Entity2Uuid = "",
+        EntityUuid = "",
+        FixedRollBonuses = {},
+        Metadata = {
+            AbilityBoosts = { Dexterity = 5 },
+            FixedRollBonuses = {},
+            ProficiencyBonus = 4,
+            ResolvedRollBonuses = {},
+            RollBonus = 13,
+            SkillBonuses = { SleightOfHand = 8 },
+        },
+        ResolvedRollBonuses = {},
+        Roll = {
+            Advantage = true,
+            Disadvantage = false,
+            RerollConditions = {},
+            Roll = {
+                AmountOfDices = 1,
+                DiceAdditionalValue = 0,
+                DiceNegative = false,
+                DiceValue = "D20",
+            },
+        },
+        RollUuid = "00000000-0000-0000-0000-000000000028",
+        Roller = actor,
+        Subject = target,
+    }
+    rollEntity.RequestedRoll = requestedRoll
+    assertEqual(true, coordinator.OnRequestedRoll(rollEntity, requestedRoll),
+        "reference roll correlated")
+    assertEqual(true, coordinator.OnRollModifiers(rollEntity, {
+        ConsumableModifiers = {},
+        DynamicModifiers = {},
+        DynamicModifiers2 = {},
+        DynamicModifiers3 = {},
+        ItemSpellModifiers = {},
+        SpellModifiers = {},
+        StaticModifiers = {},
+        ToggledPassiveModifiers = {},
+    }), "reference modifiers observed")
+    local state = findRecord(records, "native_requested_roll_state")
+    assertEqual("vanilla_reference", state.fields.profile_mode, "reference profile mode")
+    assertEqual(13, state.fields.metadata_roll_bonus, "reference metadata captured")
+    assertEqual(1, state.fields.roll_amount_of_dice, "reference die definition captured")
+    assertEqual("reference-1", state.fields.comparison_id, "stable comparison id")
+    assertEqual(0, #removed, "reference tracing never touches native bridge")
+    assertEqual(1, #timers, "reference trace has only its bounded timeout")
 end)
 
-test("delegated trap failure reports before consumption and cancellation reports nothing", function()
-    local api, resolver, calls = makeInteractionApi()
-    local coordinator = InteractionCoordinator.Create(delegationSettings, api, resolver, diagnostics)
-    coordinator.OnNativeRequest("disarm", "actor", "trap", 47)
-    coordinator.OnRequestProcessed("actor", 47, 0)
-    calls.timers[#calls.timers]()
-    startAcceptedRoll(coordinator, calls, "actor")
-    coordinator.OnRollResult("BestOfHands_DelegatedDisarm", "best", "trap", 0)
-    assertEqual(false, calls.disarm[1][4], "failure outcome")
-    assertEqual("actor", calls.disarm[1][2], "failure initiator")
-    assertEqual("tools", calls.disarm[1][3], "failure toolkit")
-    assertEqual("disarm_failure", calls.outcomes[#calls.outcomes - 1], "failure before consumption")
-    assertEqual("consume", calls.outcomes[#calls.outcomes], "failure consumption order")
-    assertEqual(1, #calls.consume, "failure consumption")
-
-    coordinator.OnNativeRequest("disarm", "actor", "trap", 48)
-    coordinator.OnRequestProcessed("actor", 48, 0)
-    calls.timers[#calls.timers]()
-    startAcceptedRoll(coordinator, calls, "actor")
-    coordinator.OnRollResult("BestOfHands_DelegatedDisarm", "best", "trap", 2)
-    assertEqual(1, #calls.disarm, "cancelled outcome count")
-    assertEqual(1, #calls.consume, "cancelled consumption")
+test("requested roll destruction remains mapped for post-roll result and retry UI", function()
+    local coordinator, _, _, removed, records, _, timers = makeCoordinator()
+    coordinator.OnNativeRequest("disarm", "actor", "target", 15)
+    local rollEntity = entity(
+        "00000000-0000-0000-0000-000000000018",
+        "0200000200000018"
+    )
+    local requestedRoll = {
+        Entity2Uuid = "",
+        EntityUuid = "",
+        FixedRollBonuses = {},
+        ResolvedRollBonuses = {},
+        RollUuid = "00000000-0000-0000-0000-000000000019",
+        Roller = actor,
+        Subject = target,
+    }
+    rollEntity.RequestedRoll = requestedRoll
+    coordinator.OnRequestedRoll(rollEntity, requestedRoll)
+    assertEqual(true, coordinator.OnRequestedRollDestroyed(rollEntity, requestedRoll),
+        "destruction routed")
+    assertEqual(1, coordinator.Count(), "destroyed roll remains correlated")
+    assertEqual(0, #removed, "post-roll profile mapping remains available")
+    assertEqual("destroyed",
+        findRecord(records, "native_requested_roll_state").fields.stage,
+        "destruction state traced")
+    assertEqual("Trace",
+        findRecord(records, "native_delegation_retained_after_roll_destroy").level,
+        "post-roll retention traced")
+    coordinator.OnRollResult("Disarm Trap", "actor", "target", 1, 1, 0)
+    timers[#timers]()
+    assertEqual(0, coordinator.Count(), "later success result clears mapping")
+    assertEqual(1, removed[#removed], "later success removes native record")
 end)
 
-test("blocked initiator permission and timeout clean delegation state", function()
-    local api, resolver, calls = makeInteractionApi()
-    local coordinator = InteractionCoordinator.Create(delegationSettings, api, resolver, diagnostics)
-    coordinator.OnUseFinished("actor", "door", 0)
-    runQueuedQuickPermission(calls)
-    coordinator.OnRequestProcessed("actor", calls.permission[1][4], 0)
-    assertEqual(0, coordinator.Count(), "pending after block")
-    assertEqual(0, #calls.rolls, "no blocked roll")
+test("destruction of a superseded roll cannot clear its replacement", function()
+    local coordinator, _, _, removed, _, _, timers = makeCoordinator()
+    coordinator.OnNativeRequest("lockpick", "actor", "target", 16)
+    local firstRoll = entity(
+        "00000000-0000-0000-0000-000000000020",
+        "0200000200000020"
+    )
+    local firstComponent = {
+        Entity2Uuid = "",
+        EntityUuid = "",
+        FixedRollBonuses = {},
+        ResolvedRollBonuses = {},
+        RollUuid = "00000000-0000-0000-0000-000000000021",
+        Roller = actor,
+        Subject = target,
+    }
+    firstRoll.RequestedRoll = firstComponent
+    coordinator.OnRequestedRoll(firstRoll, firstComponent)
+    coordinator.OnRequestedRollDestroyed(firstRoll, firstComponent)
 
-    coordinator.OnUseFinished("actor", "door", 0)
-    runQueuedQuickPermission(calls)
-    calls.timers[#calls.timers]()
-    assertEqual(0, coordinator.Count(), "pending after timeout")
-    assertEqual(2, #calls.permission, "no permission retry")
+    local replacementRoll = entity(
+        "00000000-0000-0000-0000-000000000022",
+        "0200000200000022"
+    )
+    local replacementComponent = {
+        Entity2Uuid = "",
+        EntityUuid = "",
+        FixedRollBonuses = {},
+        ResolvedRollBonuses = {},
+        RollUuid = "00000000-0000-0000-0000-000000000023",
+        Roller = actor,
+        Subject = target,
+    }
+    replacementRoll.RequestedRoll = replacementComponent
+    coordinator.OnRequestedRoll(replacementRoll, replacementComponent)
+    assertEqual(1, coordinator.Count(), "replacement mapping retained")
+    assertEqual(0, #removed, "stale destruction does not remove replacement")
 end)
 
-test("a contended permission rejection re-drives the same reserved delegation", function()
-    local api, resolver, calls = makeInteractionApi()
-    local coordinator = InteractionCoordinator.Create(delegationSettings, api, resolver, diagnostics)
-    coordinator.OnUseFinished("actor", "door", 0)
-    runQueuedQuickPermission(calls)
-    assertEqual(1, #calls.permission, "first permission attempt")
-
-    -- A competing same-target use lands while the private permission request
-    -- is in flight, so vanilla rejects that response.
-    coordinator.OnCompetingUse("door")
-    assertEqual(true, coordinator.OnRequestProcessed(
-        "actor", calls.permission[1][4], 0
-    ), "contended rejection handled")
-    assertEqual(1, coordinator.Count(), "target stays reserved for re-drive")
-    assertEqual(0, #calls.rolls, "no roll on the rejected attempt")
-
-    -- The re-drive re-requests permission for the same reserved record.
-    calls.timers[#calls.timers]()
-    assertEqual(2, #calls.permission, "single re-drive re-requests permission")
-    startAcceptedRoll(coordinator, calls, "actor")
-    assertEqual(1, #calls.rolls, "re-driven delegation reaches the roll")
-    assertEqual("best", calls.rolls[1][1], "specialist rolls after re-drive")
+test("a specialist-owned result is diagnosed and cannot clear an initiator-owned action", function()
+    local coordinator, _, _, removed, records = makeCoordinator()
+    coordinator.OnNativeRequest("disarm", "actor", "target", 13)
+    coordinator.OnRollResult("Disarm Trap", "best", "target", 1, 1, 0)
+    assertEqual(1, coordinator.Count(), "mismatched result remains pending")
+    assertEqual(0, #removed, "mismatched result does not remove native record")
+    local result = findRecord(records, "native_delegated_roll_result")
+    assertEqual(0, result.fields.owner_matches_initiator, "result mismatch diagnosed")
+    assertEqual("Error", result.level, "result mismatch elevated")
 end)
 
-test("an uncontended permission rejection still aborts without retry", function()
-    local api, resolver, calls = makeInteractionApi()
-    local coordinator = InteractionCoordinator.Create(delegationSettings, api, resolver, diagnostics)
-    coordinator.OnUseFinished("actor", "door", 0)
-    runQueuedQuickPermission(calls)
-    -- No competing use: a genuine denial must not be re-driven.
-    assertEqual(true, coordinator.OnRequestProcessed(
-        "actor", calls.permission[1][4], 0
-    ), "genuine denial handled")
-    assertEqual(0, coordinator.Count(), "denied delegation cleared")
-    assertEqual(1, #calls.permission, "no permission re-drive on denial")
+test("post-restoration modifier observation does not rewrite or add a fallback", function()
+    local coordinator, _, _, removed, records = makeCoordinator()
+    coordinator.OnNativeRequest("lockpick", "actor", "target", 7)
+    local component = {
+        Entity2Uuid = "",
+        EntityUuid = "",
+        FixedRollBonuses = {},
+        ResolvedRollBonuses = {},
+        RollUuid = "00000000-0000-0000-0000-000000000004",
+        Roller = actor,
+        Subject = target,
+    }
+    actor.RequestedRoll = component
+    assertEqual(true, coordinator.OnRequestedRoll(actor, component), "roll correlated")
+    assertEqual(actor, component.Roller, "initiator remains untouched")
+    assertEqual(true, coordinator.OnRollModifiers(actor, {}), "modifier observation routed")
+    assertEqual(actor, component.Roller, "observer does not mutate restored ownership")
+    assertEqual(0, #removed, "bridge record retained for native result")
+    assertEqual(actor.guid,
+        findRecord(records, "native_modifiers_observed").fields.roll_actor_at_observer,
+        "post-restoration timing is explicitly traced")
 end)
 
-test("the correlated permission re-drive fires at most once", function()
-    local api, resolver, calls = makeInteractionApi()
-    local coordinator = InteractionCoordinator.Create(delegationSettings, api, resolver, diagnostics)
-    coordinator.OnUseFinished("actor", "door", 0)
-    runQueuedQuickPermission(calls)
-
-    coordinator.OnCompetingUse("door")
-    coordinator.OnRequestProcessed("actor", calls.permission[1][4], 0)
-    calls.timers[#calls.timers]()
-    assertEqual(2, #calls.permission, "one re-drive issued")
-
-    -- Contended again, but the single re-drive is already spent.
-    coordinator.OnCompetingUse("door")
-    coordinator.OnRequestProcessed("actor", calls.permission[2][4], 0)
-    assertEqual(0, coordinator.Count(), "second contended rejection aborts")
-    assertEqual(0, #calls.rolls, "no roll after the re-drive is exhausted")
-end)
-
-test("server bootstrap registers the narrow event surface", function()
-    local listeners = {}
-    local commands = {}
-    local function event()
-        return { Subscribe = function(_, callback) return callback end }
+test("entity observers capture lifecycle, profile changes, and bonus spell requests", function()
+    local coordinator, _, _, _, records = makeCoordinator()
+    local registrations = {}
+    Ext.Entity.OnCreate = function(componentName)
+        registrations[componentName] = "create"
+        return componentName .. "-create"
+    end
+    Ext.Entity.OnCreateDeferred = function(componentName)
+        registrations[componentName] = "deferred"
+        return componentName .. "-deferred"
+    end
+    Ext.Entity.OnChange = function(componentName)
+        registrations[componentName .. "Change"] = "change"
+        return componentName .. "-change"
+    end
+    Ext.Entity.OnDestroy = function(componentName)
+        registrations[componentName .. "Destroy"] = "destroy"
+        return componentName .. "-destroy"
     end
 
-    _G.Ext = {
-        Require = function(path) return dofile(BEST_OF_HANDS_ROOT .. "/src/BestOfHands/Mods/BestOfHands/ScriptExtender/Lua/" .. path) end,
-        Vars = {
-            RegisterModVariable = function() end,
-            GetModVariables = function() return {} end,
-        },
-        Osiris = {
-            RegisterListener = function(name, arity, timing, callback)
-                listeners[name] = { arity = arity, timing = timing, callback = callback }
-            end,
-        },
-        Events = { SessionLoaded = event(), ResetCompleted = event() },
-        RegisterConsoleCommand = function(name, callback) commands[name] = callback end,
-        Utils = { Print = function() end },
-        Timer = { WaitFor = function() end },
-    }
-    _G.Osi = { DB_Players = { Get = function() return {} end } }
+    assertEqual(true, coordinator.Subscribe(), "required observer surface")
+    assertEqual("create", registrations.RequestedRoll, "requested roll observer")
+    assertEqual("change", registrations.RequestedRollChange, "requested roll change observer")
+    assertEqual("destroy", registrations.RequestedRollDestroy, "requested roll destroy observer")
+    assertEqual("deferred", registrations.ServerRollFinishedEvent, "finished-event observer")
+    assertEqual("create", registrations.RollModifiers, "modifier observer")
+    assertEqual("change", registrations.RollModifiersChange, "modifier change observer")
+    assertEqual("create", registrations.ServerRollStartSpellRequest,
+        "bonus spell request observer")
+    assertEqual(nil, findRecord(records, "entity_observer_registration_failed"), "registration errors")
+end)
 
-    dofile(luaRoot .. "Init.lua")
-    assertEqual(3, listeners.RequestCanLockpick.arity, "lockpick request arity")
-    assertEqual(3, listeners.RequestCanDisarmTrap.arity, "disarm request arity")
-    assertEqual(6, listeners.RollResult.arity, "roll result arity")
-    assertEqual(3, listeners.UseFinished.arity, "use finished arity")
-    assertEqual(3, listeners.RequestProcessed.arity, "request processed arity")
-    assertEqual(1, listeners.EnteredForceTurnBased.arity, "forced turn-based arity")
-    assertEqual("before", listeners.UseFinished.timing, "use-finished ordering")
-    assertEqual("after", listeners.RequestProcessed.timing, "request-processed ordering")
-    assertEqual("before", listeners.RequestCanLockpick.timing, "delegation ordering")
-    assertEqual(true, commands.best_of_hands_trace ~= nil, "trace command")
-    assertEqual(true, commands.best_of_hands_status ~= nil, "status command")
+test("bonus spell requests report whether the initiator or specialist was targeted", function()
+    local coordinator, _, _, _, records = makeCoordinator()
+    coordinator.OnNativeRequest("disarm", "actor", "target", 17)
+    local requestEntity = entity(
+        "00000000-0000-0000-0000-000000000024",
+        "0200000200000024"
+    )
+    assertEqual(true, coordinator.OnStartSpellRequest(requestEntity, {
+        Caster = actor,
+        Flags = 3,
+        NetGUID = "bonus-request",
+        Source = actor,
+        Spell = "Target_Guidance",
+        StoryActionId = 42,
+        Targets = {
+            { Target = specialist },
+        },
+    }), "bonus request correlated")
+    local observed = findRecord(records, "native_roll_bonus_spell_request")
+    assertEqual(0, observed.fields.target_matches_initiator, "initiator target flag")
+    assertEqual(1, observed.fields.target_matches_specialist, "specialist target flag")
+    assertEqual(1, observed.fields.target_count, "target count")
+    assertEqual(0, observed.fields.targets_retargeted, "existing specialist target retained")
+    assertEqual("Target_Guidance", observed.fields.spell, "spell traced")
+end)
+
+test("accepted initiator roll bonuses are retargeted to the specialist", function()
+    local coordinator, _, _, _, records = makeCoordinator()
+    coordinator.OnNativeRequest("disarm", "actor", "target", 19)
+    local initialTarget = { Target = actor }
+    assertEqual(true, coordinator.OnStartSpellRequest(entity(
+        "00000000-0000-0000-0000-000000000025",
+        "0200000200000025"
+    ), {
+        Caster = actor,
+        Flags = 17284,
+        NetGUID = "",
+        Source = actor,
+        Spell = "Target_Guidance",
+        StoryActionId = 0,
+        Targets = { initialTarget },
+    }), "bonus request correlated")
+    assertEqual(specialist, initialTarget.Target, "effect target rewritten")
+    local observed = findRecord(records, "native_roll_bonus_retargeted")
+    assertEqual(1, observed.fields.target_count, "one target rewritten")
+    assertEqual("actor", observed.fields.original_target, "initiator eligibility target")
+    assertEqual("best", observed.fields.specialist, "specialist effect target")
+end)
+
+test("initiator-owned finished events are observed without rewriting", function()
+    local coordinator, _, _, _, records = makeCoordinator()
+    coordinator.OnNativeRequest("disarm", "actor", "target", 12)
+    local rollEntity = entity(
+        "00000000-0000-0000-0000-000000000012",
+        "0200000200000012"
+    )
+    local requestedRoll = {
+        Entity2Uuid = "",
+        EntityUuid = "",
+        FixedRollBonuses = {},
+        ResolvedRollBonuses = {},
+        RollUuid = "00000000-0000-0000-0000-000000000013",
+        Roller = actor,
+        Subject = target,
+    }
+    rollEntity.RequestedRoll = requestedRoll
+    coordinator.OnRequestedRoll(rollEntity, requestedRoll)
+
+    local finishedEvent = {
+        RollUuid = requestedRoll.RollUuid,
+        Roller = actor,
+    }
+    local finishedEntity = entity(
+        "00000000-0000-0000-0000-000000000014",
+        "0200000200000014"
+    )
+    coordinator.OnFinishedEvents(finishedEntity, { Events = { finishedEvent } }, "created")
+    assertEqual(actor, finishedEvent.Roller, "event owner remains untouched")
+    local observed = findRecord(records, "native_finished_event_correlated")
+    assertEqual(finishedEntity.handle, observed.fields.finished_event_handle,
+        "event handle published for native routing")
+    assertEqual(actor.guid, observed.fields.roller_before, "initiator observed")
+    assertEqual(actor.guid, observed.fields.roller_after, "initiator published unchanged")
+    assertEqual(1, observed.fields.owner_matches_initiator, "native ownership asserted")
+end)
+
+test("a specialist-owned finished event is rejected without rewriting it", function()
+    local coordinator, _, _, _, records = makeCoordinator()
+    coordinator.OnNativeRequest("disarm", "actor", "target", 14)
+    local rollEntity = entity(
+        "00000000-0000-0000-0000-000000000015",
+        "0200000200000015"
+    )
+    local requestedRoll = {
+        Entity2Uuid = "",
+        EntityUuid = "",
+        FixedRollBonuses = {},
+        ResolvedRollBonuses = {},
+        RollUuid = "00000000-0000-0000-0000-000000000016",
+        Roller = actor,
+        Subject = target,
+    }
+    rollEntity.RequestedRoll = requestedRoll
+    coordinator.OnRequestedRoll(rollEntity, requestedRoll)
+
+    local finishedEvent = {
+        RollUuid = requestedRoll.RollUuid,
+        Roller = specialist,
+    }
+    local finishedEntity = entity(
+        "00000000-0000-0000-0000-000000000017",
+        "0200000200000017"
+    )
+    assertEqual(false,
+        coordinator.OnFinishedEvents(finishedEntity, { Events = { finishedEvent } }, "created"),
+        "invalid event owner rejected")
+    assertEqual(specialist, finishedEvent.Roller, "Lua does not rewrite an invalid event owner")
+    local observed = findRecord(records, "native_finished_event_owner_invalid")
+    assertEqual("Error", observed.level, "ownership violation diagnosed")
+    assertEqual(specialist.guid, observed.fields.roller_before, "specialist owner observed")
+    assertEqual(specialist.guid, observed.fields.roller_after, "invalid owner remains unchanged")
+end)
+
+test("native implementation preserves ownership and authoritative roll results", function()
+    local file = assert(io.open(BEST_OF_HANDS_ROOT .. "/native/src/BestOfHandsNative.cpp", "rb"))
+    local source = file:read("*a")
+    file:close()
+    local hookBlock = assert(source:match(
+        "constexpr std::string_view kReportedHooks =%s*(.-);"
+    ), "native reported-hook declaration")
+    local nativeHookParts = {}
+    for part in hookBlock:gmatch('"([^"]*)"') do
+        nativeHookParts[#nativeHookParts + 1] = part
+    end
+    assertEqual(
+        NativeBridge.REQUIRED_HOOKS,
+        table.concat(nativeHookParts),
+        "Lua and DLL handshake hook lists remain identical"
+    )
+    assertContains(source, 'ProfileUiMidHook', "native UI profile hook")
+    assertContains(source, 'ProfileMathMidHook', "native calculation profile hook")
+    assertContains(source, 'ClientRollPresentationMidHook',
+        "native client presentation hook")
+    assertContains(source, 'ClientRollStartMidHook',
+        "native client roll-start hook")
+    assertContains(source, 'ClientRollPayloadReadyMidHook',
+        "native successful payload-ready hook")
+    assertContains(source, 'ClientRollPostDispatchMidHook',
+        "native success-gated post-dispatch hook")
+    assertContains(source, 'ClientRollAggregateMidHook',
+        "native client modifier-aggregate hook")
+    assertContains(source, 'ClientRollResultMidHook',
+        "native client roll-result hook")
+    assertContains(source, 'ClientRollBonusReconcileStartMidHook',
+        "native resolved-bonus reconciliation start hook")
+    assertContains(source, 'ClientRollBonusReconcileViewModelMidHook',
+        "native resolved-bonus viewmodel observation hook")
+    assertContains(source, 'ClientRollBonusPreserveMatchedMidHook',
+        "native matched roll-bonus disable guard")
+    assertContains(source, 'ClientRollBonusPreserveMissingMidHook',
+        "native missing-identity roll-bonus disable guard")
+    assertContains(source, 'ClientRollBonusKeepSelectedDetour',
+        "native selected-bonus continuity guard")
+    assertContains(source, 'SetDynamicModifierRollBonusPresentationType',
+        "selected bonus is given BG3's result-facing roll-bonus type")
+    assertContains(source, 'SetDynamicModifierSourceVm',
+        "selected bonus source viewmodel is transferred through BG3's retained setter")
+    assertContains(source, 'SetDynamicModifierNameFromPresentation',
+        "selected bonus localized name is copied from its actual presentation viewmodel")
+    assertContains(source, 'FindNoesisProperty',
+        "selected bonus name is resolved through its concrete Noesis source class")
+    assertContains(source, 'targetNameProperty.contentType',
+        "source and target modifier names require the same reflected value type")
+    assertContains(source, 'name_binding_result=',
+        "reflection name-binding failures remain diagnosable from trace")
+    assertContains(source, 'name_binding_value=',
+        "the exact selected localized-name payload is traced")
+    local selectedNameOffset = assert(source:find(
+        "viewModel, selectedViewModel", 1, true
+    ), "selected viewmodel name lookup")
+    local sourceNameOffset = assert(source:find(
+        "viewModel, sourceVm", selectedNameOffset + 1, true
+    ), "source viewmodel name fallback")
+    assertEqual(true, selectedNameOffset < sourceNameOffset,
+        "the visibly labeled selected row is the primary name source")
+    assertEqual(nil, source:find('targetName == sourceName', 1, true),
+        "localized string assignment is not rejected for using a canonicalized backing allocation")
+    assertEqual(nil, source:find('translated_name_validation_failed', 1, true),
+        "the invalid raw-byte localized string validation is removed")
+    assertEqual(nil, source:find('kSourceVmNameValueOffset', 1, true),
+        "modifier presentation does not assume a VMStatus-specific Name offset")
+    assertContains(source,
+        'kClientVmRollModifierSourceVmPropertySetterSignature',
+        "native SourceVM setter is signature guarded")
+    assertContains(source,
+        'kClientVmRollModifierNameValueAssignSignature',
+        "native localized-name assignment is signature guarded")
+    assertContains(source, 'ClientRollBonusRendererAddMidHook',
+        "persistent bonus icons are bound before their first native collection add")
+    assertContains(source,
+        'ArmSelectedRollBonusPresentationAfterPayload',
+        "selected-wrapper continuity is armed only after BG3 materializes the roll command payload")
+    assertContains(source,
+        'binding_timing=after_request_payload_before_dispatch',
+        "payload-safe selected-wrapper timing is traced")
+    assertContains(source, 'pre_roll_synthetic_rows=0',
+        "directly selected bonuses never add a placeholder result row before animation")
+    assertContains(source, 'request_payload_unchanged=1',
+        "selected-wrapper preparation preserves BG3's detached request payload")
+    assertContains(source, 'RestoreSelectedRollBonusList',
+        "the exact selected boost wrapper is restored for vanilla selected-bonus UI")
+    assertContains(source, 'native_client_roll_selected_bonus_restored',
+        "selected-wrapper restoration is traced at both lifecycle guards")
+    assertContains(source,
+        'native_client_roll_selected_bonus_removal_suppressed',
+        "selected-wrapper continuity is traced across roll dispatch")
+    assertContains(source, 'selected_removal_guard_armed=',
+        "selected-wrapper removal suppression is armed only after payload validation")
+    assertContains(source, '"post_dispatch"',
+        "selected wrapper is restored after request dispatch")
+    assertContains(source, '"pre_reconcile"',
+        "selected wrapper is reasserted before the selected-bonus animation sequence")
+    assertContains(source, 'native_client_roll_bonus_renderer_source_bound',
+        "persistent bonus SourceVM binding timing is traced")
+    assertContains(source, 'source_vm_transferred_count=',
+        "presentation transfer traces source viewmodel completeness")
+    assertEqual(nil, source:find('ReplayClientRollBonusNativeRenderer', 1, true),
+        "late native renderer replay is not retained")
+    assertContains(source, 'ClientRollBonusReconcileEndMidHook',
+        "native resolved-bonus reconciliation completion hook")
+    assertContains(source, 'ClientRollFinalizeMidHook',
+        "native client roll-finalization hook")
+    assertContains(source, 'context.r15 =', "UI redirects a local pointer")
+    assertContains(source, 'context.r8 =', "math redirects a local pointer")
+    assertContains(source, 'component_owner_unchanged=1', "ownership invariant traced")
+    assertContains(source, 'requested_roll_owner_mutation=0', "ownership mutation disabled")
+    assertContains(source,
+        '"client_roll_aggregate,client_roll_start,"',
+        "all verified hooks reported")
+    assertContains(source,
+        '"client_roll_payload_ready,client_roll_post_dispatch,"',
+        "payload-ready and post-dispatch hooks are required by the native handshake")
+    assertContains(source, 'kClientRollPayloadReadySignature',
+        "successful payload-ready boundary is signature guarded")
+    assertContains(source, 'kClientRollPostDispatchSignature',
+        "post-dispatch presentation boundary is signature guarded")
+    assertContains(source, 'kClientRollPresentationSignature',
+        "client presentation signature guard")
+    assertContains(source, 'context.rax =',
+        "client presentation replaces only the local advantage value")
+    assertContains(source, 'native_client_roll_presentation_selected',
+        "client presentation selection is traced")
+    assertContains(source, 'native_client_roll_start_boundary',
+        "click-to-roll presentation state is traced")
+    assertContains(source, 'native_client_roll_aggregate_guard',
+        "modifier-aggregate presentation state is traced")
+    assertContains(source, 'native_client_roll_result_consistency',
+        "roll-result presentation consistency is traced")
+    assertContains(source, 'native_client_roll_finalize_consistency',
+        "resolved bonus presentation consistency is traced")
+    assertContains(source, 'native_client_roll_bonus_viewmodel_restored',
+        "retargeted resolved-bonus viewmodel restoration is traced")
+    assertContains(source, 'native_client_roll_bonus_disable_suppressed',
+        "pre-refresh roll-bonus preservation is traced")
+    assertContains(source, 'kClientRollBonusPreserveMatchedSignature',
+        "matched roll-bonus preservation signature guard")
+    assertContains(source, 'kClientRollBonusPreserveMissingSignature',
+        "missing-identity roll-bonus preservation signature guard")
+    assertContains(source, 'authoritative_result_unchanged=1',
+        "resolved-bonus repair leaves authoritative math untouched")
+    assertContains(source, 'result_numeric_values_unchanged=1',
+        "roll-result numeric values remain untouched")
+    assertContains(source, 'kActiveRollFallbackOffset',
+        "delegated result clears the presentation fallback before publication")
+    assertContains(source, 'FreezeClientPresentationAdvantage',
+        "presentation profile freezes when rolling begins")
+    assertContains(source, 'kAdvantageVmDisabledOffset = 0x88',
+        "advantage-source presentation uses VMAdvantage's distinct layout")
+    assertContains(source, 'ClientAdvantagePreserveMatchedMidHook',
+        "matched advantage-source disable decisions are guarded")
+    assertContains(source, 'ClientAdvantagePreserveMissingMidHook',
+        "missing advantage-source disable decisions are guarded")
+    assertContains(source, 'ShouldPreserveAdvantageModifierPresentation',
+        "advantage-source preservation requires the specialist's expected type")
+    assertContains(source, 'native_client_advantage_disable_suppressed',
+        "advantage-source presentation preservation remains traceable")
+    assertContains(source, 'MatchDelegatedAdvantageSourceModifier',
+        "the icon-bearing advantage modifier is retained separately")
+    assertContains(source, 'native_client_advantage_source_modifier_preserved',
+        "advantage source icon retention remains traceable")
+    assertContains(source, 'native_client_advantage_source_modifier_binding',
+        "icon-bearing modifier SourceVM bindings are traced")
+    assertContains(source, 'native_client_advantage_viewmodel_binding',
+        "dedicated advantage SourceVM bindings are traced")
+    assertContains(source, 'source_icon_binding_preserved=1',
+        "the native advantage SourceVM remains the icon source")
+    assertContains(source, 'roll_bonus_path_unchanged=1',
+        "advantage-source preservation remains isolated from roll bonuses")
+    assertContains(source, 'MatchClientPresentationLease',
+        "destroyed RequestedRoll presentation survives by exact roll UUID")
+    assertContains(source, 'native_client_roll_phase',
+        "post-result phase commands are traced")
+    assertContains(source, 'native_client_modifier_animation',
+        "modifier animation deltas are traced")
+    assertContains(source, 'kMaximumClientPresentationLeases = 64',
+        "client presentation lease cache is bounded")
+    assertContains(source, 'kSelectedBoostVmDiceTypeSetOffset = 0xe0',
+        "selected boost DiceTypeSet uses its reflected VMBoostModifier layout")
+    assertContains(source, 'kSelectedBoostVmIdentityOffset = 0x110',
+        "selected boost identity remains separate from its DiceTypeSet")
+    assertContains(source, 'kSelectedBoostVmSourceVmOffset = 0x48',
+        "selected boost retains its pre-roll label and icon source viewmodel")
+    assertContains(source, 'CreateVmRollModifierViewModel',
+        "missing immediate bonus presentation uses a real VMRoll modifier")
+    assertContains(source, 'SetDynamicModifierResolvedValue',
+        "the result row receives BG3's authoritative resolved dice value")
+    assertContains(source, 'SetSelectedRollBonusResolvedValue',
+        "the visible selected row can receive BG3's authoritative resolved dice value")
+    assertContains(source, 'kSelectedModifierResolvedValueOffset = 0xb0',
+        "the selected-row value matches BG3's modifier-animation callback branch")
+    assertContains(source, 'clientSelectedModifierValueRva',
+        "the selected-row object is resolved through BG3's own guarded helper")
+    assertContains(source, 'selected_authoritative_direct:',
+        "a successful transfer records the direct single visible selected-row path")
+    assertContains(source, 'single_numeric_presentation_path=',
+        "the result trace distinguishes the single-path handoff from its fail-open fallback")
+    assertContains(source, 'bonuses[index].value > 0',
+        "unresolved sentinel values can never become visible modifier rows")
+    assertContains(source, 'resolved_value_transferred=',
+        "resolved value transfer is explicit in the presentation trace")
+    assertContains(source, 'kClientVmRollModifierFactorySignature',
+        "VMRoll modifier factory is guarded by the executable signature")
+    assertContains(source, 'kClientVmDiceTypeSetPropertySetterSignature',
+        "DiceTypeSet property setter is guarded by the executable signature")
+    assertContains(source, 'source_vm_property_setter=native_noesis',
+        "binding trace identifies the retained native SourceVM setter")
+    assertContains(source, 'factory_class=VMRollModifier_size_1f0',
+        "factory trace identifies the result-facing VMRollModifier class")
+    assertContains(source, 'selected_wrapper_inserted=0',
+        "a selected action wrapper is never inserted as a result wrapper")
+    assertEqual(nil,
+        source:find('prepared_row_role=transitional_until_resolution', 1, true),
+        "the visible placeholder-producing transitional row has been removed")
+    assertEqual(nil, source:find('TrackPreparedRollBonusViewModel', 1, true),
+        "pre-roll placeholder rows are not tracked or inserted")
+    assertContains(source, 'sameShapeBonusCount != 1',
+        "cached presentation repair fails open on ambiguous dice bonuses")
+    assertContains(source, 'kProfileUiSignature', "UI signature guard")
+    assertContains(source, 'kProfileMathSignature', "math signature guard")
+    assertEqual(nil, source:find('PatchRequestedRoll', 1, true),
+        "no component-wide roller patch remains")
+    assertEqual(nil, source:find('RouteFinishedEvent', 1, true),
+        "no finished-event rewriting remains")
+end)
+
+test("v2 bootstrap has no custom roll, completion, tool, or UseFinished path", function()
+    local file = assert(io.open(luaRoot .. "Init.lua", "rb"))
+    local source = file:read("*a")
+    file:close()
+    assertContains(source, 'listen("RequestCanLockpick"', "lockpick listener")
+    assertContains(source, 'listen("RequestCanDisarmTrap"', "disarm listener")
+    assertContains(source, 'listen("RequestProcessed"', "request result trace listener")
+    assertContains(source, 'local function emitStatus(', "automatic status snapshot helper")
+    assertContains(source, 'emitStatus("roll_result"', "handled roll emits an automatic status snapshot")
+    assertContains(source, 'value == nil', "trace command without an argument enables tracing")
+    assertEqual(nil, source:find('OnChange("ServerRollFinishedEvent"', 1, true), "no invalid change observer")
+    local commandOffset = assert(source:find('Ext.RegisterConsoleCommand("best_of_hands_status"', 1, true))
+    local observerOffset = assert(source:find("interaction.Subscribe()", 1, true))
+    assertEqual(true, commandOffset < observerOffset, "diagnostic commands precede observers")
+    assertEqual(nil, source:find("RequestActiveRoll", 1, true), "no custom active roll")
+    assertEqual(nil, source:find("UseFinished", 1, true), "no custom left-click completion path")
+    assertEqual(nil, source:find("TemplateRemove", 1, true), "no custom tool path")
+    assertEqual(nil, source:find("Unlock(", 1, true), "no custom success path")
+
+    local settingsFile = assert(io.open(luaRoot .. "Settings.lua", "rb"))
+    local settingsSource = settingsFile:read("*a")
+    settingsFile:close()
+    assertContains(settingsSource, "TRACE_EVENTS = true",
+        "development sessions start with tracing enabled")
 end)
 
 if failed > 0 then
     error(string.format("%d Lua tests failed; %d passed", failed, passed))
 end
 
-print(string.format("Lua behavior tests passed: %d", passed))
+print(string.format("All %d Lua tests passed", passed))

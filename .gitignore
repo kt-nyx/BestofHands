@@ -1,4 +1,5 @@
 dist/
+build/
 tools/ExportTool/
 *.pak
 *.zip

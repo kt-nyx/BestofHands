@@ -15,6 +15,10 @@ $versionPath = Join-Path $root 'VERSION'
 $licensePath = Join-Path $root 'LICENSE'
 $readmePath = Join-Path $root 'README.md'
 $developmentPath = Join-Path $root 'DEVELOPMENT.md'
+$noticesPath = Join-Path $root 'THIRD_PARTY_NOTICES.txt'
+$nativeCmakePath = Join-Path $root 'native\CMakeLists.txt'
+$nativeHeaderPath = Join-Path $root 'native\include\BridgeProtocol.h'
+$nativeSourcePath = Join-Path $root 'native\src\BestOfHandsNative.cpp'
 
 $requiredFiles = @(
     $metaPath,
@@ -25,7 +29,11 @@ $requiredFiles = @(
     $versionPath,
     $licensePath,
     $readmePath,
-    $developmentPath
+    $developmentPath,
+    $noticesPath,
+    $nativeCmakePath,
+    $nativeHeaderPath,
+    $nativeSourcePath
 )
 foreach ($path in $requiredFiles) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
@@ -37,6 +45,10 @@ foreach ($path in $requiredFiles) {
 $moduleInfo = $meta.SelectSingleNode("//node[@id='ModuleInfo']")
 if ($null -eq $moduleInfo) {
     throw 'meta.lsx does not contain ModuleInfo.'
+}
+$declaredDependencies = @($meta.SelectNodes("//node[@id='Dependencies']/children/node"))
+if ($declaredDependencies.Count -ne 0) {
+    throw 'Best of Hands optional integrations must not add metadata dependencies.'
 }
 
 function Get-MetaValue {
@@ -87,6 +99,11 @@ $toolVersions = Get-Content -LiteralPath $toolVersionsPath -Raw | ConvertFrom-Js
 if ($toolVersions.bg3ScriptExtender.requiredApiVersion -ne $config.RequiredVersion) {
     throw 'tools/tool-versions.json and Config.json disagree on the Script Extender API floor.'
 }
+if ($toolVersions.nativeBuildDependencies.safetyHook -ne '0.7.0' -or
+    $toolVersions.nativeBuildDependencies.zydis -ne '4.1.0' -or
+    $toolVersions.nativeBuildDependencies.zycore -ne '1.5.0') {
+    throw 'Native dependency versions are missing or differ from the reviewed build set.'
+}
 
 $semanticVersion = (Get-Content -LiteralPath $versionPath -Raw).Trim()
 $semanticMatch = [regex]::Match(
@@ -116,13 +133,17 @@ if ($version -ne $expectedVersion64) {
 $expectedPackageFiles = @(
     'Mods/BestOfHands/meta.lsx',
     'Mods/BestOfHands/ScriptExtender/Config.json',
+    'Mods/BestOfHands/ScriptExtender/Lua/BootstrapClient.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/BootstrapServer.lua',
+    'Mods/BestOfHands/ScriptExtender/Lua/Client/NativePresentationBridge.lua',
+    'Mods/BestOfHands/ScriptExtender/Lua/Client/UiRollDiagnostics.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/LegacyAssistanceCleanup.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/Diagnostics.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/Init.lua',
-    'Mods/BestOfHands/ScriptExtender/Lua/Server/InteractionCoordinator.lua',
+    'Mods/BestOfHands/ScriptExtender/Lua/Server/NativeBridge.lua',
+    'Mods/BestOfHands/ScriptExtender/Lua/Server/NativeInteractionCoordinator.lua',
+    'Mods/BestOfHands/ScriptExtender/Lua/Server/NativeRuntimeApi.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/PartySkillResolver.lua',
-    'Mods/BestOfHands/ScriptExtender/Lua/Server/RuntimeApi.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/Settings.lua'
 ) | Sort-Object
 
@@ -151,12 +172,30 @@ $commentCapableSource = @(
         Where-Object { $_.Extension -in @('.ps1', '.py') }
     Get-ChildItem -LiteralPath (Join-Path $root 'tests') -File -Recurse |
         Where-Object { $_.Extension -eq '.lua' }
+    Get-ChildItem -LiteralPath (Join-Path $root 'native') -File -Recurse |
+        Where-Object { $_.Extension -in @('.cpp', '.h') }
+    Get-Item -LiteralPath $nativeCmakePath
     Get-Item -LiteralPath (Join-Path $root '.github\workflows\ci.yml')
 )
 foreach ($sourceFile in $commentCapableSource) {
     $content = Get-Content -LiteralPath $sourceFile.FullName -Raw
-    if ($content -notmatch '(?m)^(#|--)\s*SPDX-License-Identifier: Unlicense\s*$') {
+    if ($content -notmatch '(?m)^(#|--|//)\s*SPDX-License-Identifier: Unlicense\s*$') {
         throw "Source is missing the Unlicense SPDX header: $($sourceFile.FullName)"
+    }
+}
+
+$powershellFiles = Get-ChildItem -LiteralPath (Join-Path $root 'scripts') -File -Filter '*.ps1'
+foreach ($powershellFile in $powershellFiles) {
+    $parserTokens = $null
+    $parserErrors = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseFile(
+        $powershellFile.FullName,
+        [ref]$parserTokens,
+        [ref]$parserErrors
+    )
+    if ($parserErrors.Count -ne 0) {
+        $details = ($parserErrors | ForEach-Object { $_.Message }) -join [Environment]::NewLine
+        throw "PowerShell syntax failed for $($powershellFile.FullName):`n$details"
     }
 }
 
@@ -173,9 +212,211 @@ foreach ($marker in $forbiddenCleanRoomMarkers) {
     }
 }
 
+$forbiddenOptionalIntegrationMarkers = @(
+    'TemplateAddTo(',
+    'TemplateRemoveFromParty(',
+    'AddExplorationExperience(',
+    'GAMEPLAY_LockPicking',
+    '"Disarm Trap"'
+)
+foreach ($marker in $forbiddenOptionalIntegrationMarkers) {
+    if ($sourceText.Contains($marker)) {
+        throw "Optional integration boundary rejected owned Eternal behavior '$marker'."
+    }
+}
+$forbiddenV1ExecutionMarkers = @(
+    'RequestActiveRoll(',
+    'PROC_ProcessLockpickItem(',
+    'PROC_ProcessDisarmTrap(',
+    'TemplateRemoveFrom(',
+    'Osi.Unlock('
+)
+foreach ($marker in $forbiddenV1ExecutionMarkers) {
+    if ($sourceText.Contains($marker)) {
+        throw "V2 native boundary rejected legacy custom execution marker '$marker'."
+    }
+}
+
+$initText = Get-Content -LiteralPath $initPath -Raw
+foreach ($requiredNativeSurface in @(
+    'Server/NativeBridge.lua',
+    'Server/NativeInteractionCoordinator.lua',
+    'listen("RequestCanLockpick"',
+    'listen("RequestCanDisarmTrap"',
+    'listen("RequestProcessed"'
+)) {
+    if (-not $initText.Contains($requiredNativeSurface)) {
+        throw "V2 native bootstrap surface is missing '$requiredNativeSurface'."
+    }
+}
+if ($initText.Contains('UseFinished')) {
+    throw 'V2 must not retain the custom UseFinished roll path.'
+}
+
+$coordinatorPath = Join-Path $moduleRoot 'ScriptExtender\Lua\Server\NativeInteractionCoordinator.lua'
+$coordinatorText = Get-Content -LiteralPath $coordinatorPath -Raw
+foreach ($requiredDiagnosticSurface in @(
+    'OnRequestedRollChanged',
+    'OnRequestedRollDestroyed',
+    'ServerRollStartSpellRequest',
+    'native_requested_roll_state',
+    'discarded_dice_total',
+    'native_roll_bonus_spell_request',
+    'native_roll_canceled',
+    'native_tool_unavailable',
+    'native_reference_roll_correlated',
+    'native_delegation_retained_after_roll_destroy'
+)) {
+    if (-not $coordinatorText.Contains($requiredDiagnosticSurface)) {
+        throw "Native diagnostic/lifecycle surface is missing '$requiredDiagnosticSurface'."
+    }
+}
+if ($coordinatorText.Contains('native_roll_component_canceled')) {
+    throw 'RequestedRoll.Canceled must not own native mapping cleanup.'
+}
+
+$clientBootstrapPath = Join-Path $moduleRoot 'ScriptExtender\Lua\BootstrapClient.lua'
+$clientPresentationPath = Join-Path $moduleRoot 'ScriptExtender\Lua\Client\NativePresentationBridge.lua'
+$clientDiagnosticsPath = Join-Path $moduleRoot 'ScriptExtender\Lua\Client\UiRollDiagnostics.lua'
+$clientBootstrapText = Get-Content -LiteralPath $clientBootstrapPath -Raw
+$clientPresentationText = Get-Content -LiteralPath $clientPresentationPath -Raw
+$clientDiagnosticsText = Get-Content -LiteralPath $clientDiagnosticsPath -Raw
+foreach ($requiredClientBootstrap in @(
+    'Client/NativePresentationBridge.lua',
+    'Client/UiRollDiagnostics.lua'
+)) {
+    if (-not $clientBootstrapText.Contains($requiredClientBootstrap)) {
+        throw "Client bootstrap is missing '$requiredClientBootstrap'."
+    }
+}
+foreach ($requiredClientPresentationSurface in @(
+    'BestOfHandsNative.client',
+    'client_profile_mapping_written',
+    'client_profile_mapping_removed',
+    'dc_active_roll_trace',
+    'rollUuid',
+    'specialistHandle'
+)) {
+    if (-not $clientPresentationText.Contains($requiredClientPresentationSurface)) {
+        throw "Client native presentation bridge is missing '$requiredClientPresentationSurface'."
+    }
+}
+foreach ($requiredClientDiagnosticSurface in @(
+    'client_requested_roll_state',
+    'client_roll_modifiers',
+    'metadata_roll_bonus',
+    'profile_matches_specialist',
+    'result_discarded_dice_total',
+    'native_client_roll_presentation',
+    'native_client_roll_start',
+    'native_client_roll_aggregate',
+    'native_client_roll_result',
+    'native_client_roll_finalize',
+    'native_client_roll_phase',
+    'native_client_modifier_animation'
+)) {
+    if (-not $clientDiagnosticsText.Contains($requiredClientDiagnosticSurface)) {
+        throw "Client roll UI diagnostic surface is missing '$requiredClientDiagnosticSurface'."
+    }
+}
+if ($clientPresentationText.Contains('component.AdvantageType =')) {
+    throw 'Client presentation bridge must not mutate replicated RequestedRoll advantage state.'
+}
+
+$runtimeApiPath = Join-Path $moduleRoot 'ScriptExtender\Lua\Server\NativeRuntimeApi.lua'
+$runtimeApiText = Get-Content -LiteralPath $runtimeApiPath -Raw
+if (-not $runtimeApiText.Contains('GetItemByTemplateInPartyInventory')) {
+    throw 'Native runtime must use BG3 party inventory for the no-tool delegation precheck.'
+}
+foreach ($requiredMissingToolSurface in @(
+    'DB_CustomLockpickItemResponse',
+    'DB_CustomDisarmTrapResponse',
+    'ShowError',
+    'CannotUse'
+)) {
+    if (-not $runtimeApiText.Contains($requiredMissingToolSurface)) {
+        throw "The no-tool rejection path is missing '$requiredMissingToolSurface'."
+    }
+}
+
+$nativeHeader = Get-Content -LiteralPath $nativeHeaderPath -Raw
+if ($nativeHeader -notmatch ('kPluginVersion\s*=\s*"' + [regex]::Escape($semanticVersion) + '"')) {
+    throw "Native bridge protocol does not expose version $semanticVersion."
+}
+$nativeCmake = Get-Content -LiteralPath $nativeCmakePath -Raw
+if ($nativeCmake -notmatch ('project\(BestOfHandsNative VERSION ' + [regex]::Escape($semanticVersion))) {
+    throw "Native CMake project does not expose version $semanticVersion."
+}
+$nativeSource = Get-Content -LiteralPath $nativeSourcePath -Raw
+foreach ($requiredNativeMarker in @(
+    'ProfileUiMidHook',
+    'ProfileMathMidHook',
+    'ClientRollPresentationMidHook',
+    'ClientRollAggregateMidHook',
+    'ClientRollStartMidHook',
+    'ClientRollResultMidHook',
+    'ClientRollFinalizeMidHook',
+    'ClientRollPhaseMidHook',
+    'ClientModifierAnimationStartMidHook',
+    'ClientModifierAnimationEndMidHook',
+    'kProfileUiSignature',
+    'kProfileMathSignature',
+    'kClientRollPresentationSignature',
+    'kClientRollAggregateSignature',
+    'kClientRollStartSignature',
+    'kClientRollPayloadReadySignature',
+    'kClientRollPostDispatchSignature',
+    'kClientRollResultSignature',
+    'kClientRollFinalizeSignature',
+    'kClientRollPhaseSignature',
+    'kClientModifierAnimationStartSignature',
+    'kClientModifierAnimationEndSignature',
+    'native_profile_source_selected',
+    'native_client_roll_presentation_selected',
+    'native_client_roll_aggregate_guard',
+    'native_client_roll_start_boundary',
+    'native_client_roll_bonus_direct_handoff_armed',
+    'pre_roll_synthetic_rows=0',
+    'native_client_roll_selected_bonus_restored',
+    'native_client_roll_result_consistency',
+    'native_client_roll_finalize_consistency',
+    'native_client_roll_phase',
+    'native_client_modifier_animation',
+    'MatchClientPresentationLease',
+    'kMaximumClientPresentationLeases',
+    'client_roll_aggregate,client_roll_start,',
+    'client_roll_payload_ready,client_roll_post_dispatch,',
+    'client_roll_finalize,client_roll_phase',
+    'client_modifier_animation_start,client_modifier_animation_end',
+    'result_numeric_values_unchanged=1',
+    'kActiveRollFallbackOffset',
+    'FreezeClientPresentationAdvantage',
+    'ProfileScope::Client',
+    'component_owner_unchanged=1',
+    'requested_roll_owner_mutation=0',
+    'unsupported_game_build'
+)) {
+    if (-not $nativeSource.Contains($requiredNativeMarker)) {
+        throw "Native source is missing required fail-closed marker '$requiredNativeMarker'."
+    }
+}
+if ($nativeSource -match 'PatchDisarm|PatchLockpick|PatchRequestedRoll|RouteFinishedEvent') {
+    throw 'Native v2 must not mutate action-specific disarm or lockpick ownership state.'
+}
+if ($nativeSource -notmatch 'safetyhook::create_mid') {
+    throw 'Native v2 must install validated mid-function profile hooks.'
+}
+
 $license = Get-Content -LiteralPath $licensePath -Raw
 if ($license -notmatch 'This is free and unencumbered software released into the public domain') {
     throw 'LICENSE is not the canonical Unlicense text expected by the release checks.'
+}
+$thirdPartyNotices = Get-Content -LiteralPath $noticesPath -Raw
+foreach ($requiredNotice in @('SafetyHook 0.7.0', 'Boost Software License',
+    'Zydis 4.1.0', 'Zycore 1.5.0', 'The MIT License')) {
+    if (-not $thirdPartyNotices.Contains($requiredNotice)) {
+        throw "THIRD_PARTY_NOTICES.txt is missing '$requiredNotice'."
+    }
 }
 
 $creditSurfaces = @($readmePath)
@@ -185,7 +426,10 @@ $requiredCredits = @(
     'Use Best Sleight of Hand',
     'JonHinkerton',
     'Best in Party Skills',
-    'imCioco'
+    'imCioco',
+    'Eternal Lockpick',
+    'Eternal Trap Disarm Kit',
+    'SwissFred'
 )
 foreach ($surface in $creditSurfaces) {
     $content = Get-Content -LiteralPath $surface -Raw

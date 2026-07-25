@@ -3,7 +3,8 @@
 [CmdletBinding()]
 param(
     [string]$DivinePath = $env:DIVINE_PATH,
-    [switch]$Install
+    [switch]$Install,
+    [string]$GameBinPath = $env:BG3_BIN
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,6 +15,10 @@ $pakName = 'BestofHands.pak'
 $destination = Join-Path $dist $pakName
 
 & (Join-Path $PSScriptRoot 'validate.ps1')
+& (Join-Path $PSScriptRoot 'build-native.ps1') `
+    -Configuration Release `
+    -Install:$Install `
+    -GameBinPath $GameBinPath
 
 $candidates = @(
     $DivinePath,
@@ -57,13 +62,17 @@ $manifestOutput | ForEach-Object { Write-Host $_ }
 $expectedPackageFiles = @(
     'Mods/BestOfHands/meta.lsx',
     'Mods/BestOfHands/ScriptExtender/Config.json',
+    'Mods/BestOfHands/ScriptExtender/Lua/BootstrapClient.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/BootstrapServer.lua',
+    'Mods/BestOfHands/ScriptExtender/Lua/Client/NativePresentationBridge.lua',
+    'Mods/BestOfHands/ScriptExtender/Lua/Client/UiRollDiagnostics.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/LegacyAssistanceCleanup.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/Diagnostics.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/Init.lua',
-    'Mods/BestOfHands/ScriptExtender/Lua/Server/InteractionCoordinator.lua',
+    'Mods/BestOfHands/ScriptExtender/Lua/Server/NativeBridge.lua',
+    'Mods/BestOfHands/ScriptExtender/Lua/Server/NativeInteractionCoordinator.lua',
+    'Mods/BestOfHands/ScriptExtender/Lua/Server/NativeRuntimeApi.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/PartySkillResolver.lua',
-    'Mods/BestOfHands/ScriptExtender/Lua/Server/RuntimeApi.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/Settings.lua'
 ) | Sort-Object
 $actualPackageFiles = $manifestOutput |

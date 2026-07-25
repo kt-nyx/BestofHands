@@ -2,10 +2,11 @@
 
 local Settings = Ext.Require("Server/Settings.lua")
 local Diagnostics = Ext.Require("Server/Diagnostics.lua")
-local RuntimeApi = Ext.Require("Server/RuntimeApi.lua")
+local NativeRuntimeApi = Ext.Require("Server/NativeRuntimeApi.lua")
 local PartySkillResolver = Ext.Require("Server/PartySkillResolver.lua")
 local LegacyAssistanceCleanup = Ext.Require("Server/LegacyAssistanceCleanup.lua")
-local InteractionCoordinator = Ext.Require("Server/InteractionCoordinator.lua")
+local NativeBridge = Ext.Require("Server/NativeBridge.lua")
+local NativeInteractionCoordinator = Ext.Require("Server/NativeInteractionCoordinator.lua")
 
 Ext.Vars.RegisterModVariable(Settings.MODULE_UUID, Settings.ACTIVE_ASSISTANCE_VAR, {
     Server = true,
@@ -13,20 +14,75 @@ Ext.Vars.RegisterModVariable(Settings.MODULE_UUID, Settings.ACTIVE_ASSISTANCE_VA
 })
 
 local diagnostics = Diagnostics.Create(Settings)
-local api = RuntimeApi.Create(Settings, diagnostics)
+local api = NativeRuntimeApi.Create(Settings, diagnostics)
 local resolver = PartySkillResolver.Create(api, diagnostics)
--- Compatibility cleanup for older boost-based builds. Current rolls never add
--- a boost to the initiating character.
 local legacyCleanup = LegacyAssistanceCleanup.Create(api, diagnostics)
-local interaction = InteractionCoordinator.Create(Settings, api, resolver, diagnostics)
+local bridge = NativeBridge.Create(Settings, api, diagnostics)
+local interaction = NativeInteractionCoordinator.Create(
+    Settings,
+    api,
+    resolver,
+    bridge,
+    diagnostics
+)
+local rollRouterAvailable = false
+
+local function statusFields()
+    local status = bridge.GetStatus()
+    return {
+        bridge_detail = status.detail,
+        bridge_state = status.state,
+        native_ready = status.ready and 1 or 0,
+        native_session = status.nativeSession,
+        pending_delegations = interaction.Count(),
+        roll_router = rollRouterAvailable and 1 or 0,
+        version = Settings.VERSION,
+    }
+end
+
+local function emitStatus(reason, extraFields)
+    local fields = statusFields()
+    fields.legacy_assistance_cleanup = legacyCleanup.Count()
+    fields.reason = reason
+    fields.trace = diagnostics.IsTraceEnabled()
+    for key, value in pairs(extraFields or {}) do
+        fields[key] = value
+    end
+    diagnostics.Info("status", fields)
+end
+
+-- Register recovery/diagnostic commands before any optional engine observer.
+-- A future API mismatch must remain inspectable from the server console.
+Ext.RegisterConsoleCommand("best_of_hands_trace", function(_, value)
+    -- With no argument this command now means "enable", matching its normal
+    -- development use. "off", "0", or "false" still disable explicitly.
+    local enabled = value == nil
+        or value == ""
+        or value == "on"
+        or value == "1"
+        or value == "true"
+    diagnostics.SetTrace(enabled)
+    bridge.SetTrace(enabled)
+    if enabled then
+        local fields = statusFields()
+        fields.extender_version = api.GetExtenderVersion()
+        fields.game_version = api.GetGameVersion()
+        fields.legacy_assistance_cleanup = legacyCleanup.Count()
+        diagnostics.Info("trace_context", fields)
+    end
+end)
+
+Ext.RegisterConsoleCommand("best_of_hands_status", function()
+    emitStatus("console")
+end)
 
 local function listen(name, arity, timing, handler)
     Ext.Osiris.RegisterListener(name, arity, timing, function(...)
-        local ok, err = xpcall(handler, debug.traceback, ...)
+        local ok, errorMessage = xpcall(handler, debug.traceback, ...)
         if not ok then
             diagnostics.Error("listener_failed", {
+                error = errorMessage,
                 event = name,
-                error = err,
             })
         end
     end)
@@ -35,8 +91,8 @@ end
 listen("RequestCanLockpick", 3, "before", function(character, item, requestId)
     diagnostics.Trace("request_can_lockpick", {
         actor = character,
-        target = item,
         request_id = requestId,
+        target = item,
     })
     interaction.OnNativeRequest("lockpick", character, item, requestId)
 end)
@@ -44,119 +100,87 @@ end)
 listen("RequestCanDisarmTrap", 3, "before", function(character, item, requestId)
     diagnostics.Trace("request_can_disarm", {
         actor = character,
-        target = item,
         request_id = requestId,
+        target = item,
     })
     interaction.OnNativeRequest("disarm", character, item, requestId)
 end)
 
-listen("RequestCanUse", 3, "before", function(character, item, requestId)
-    diagnostics.Trace("request_can_use", {
-        actor = character,
-        target = item,
-        request_id = requestId,
-    })
-    -- A use attempt on a target with an in-flight delegated permission marks
-    -- that delegation as contended so a concurrency-induced rejection can be
-    -- re-driven instead of aborted.
-    interaction.OnCompetingUse(item)
-end)
-
-listen("RequestProcessed", 3, "after", function(character, requestId, accepted)
+listen("RequestProcessed", 3, "after", function(character, requestId, result)
     diagnostics.Trace("request_processed", {
-        accepted = accepted,
         actor = character,
         request_id = requestId,
+        result = result,
     })
-    interaction.OnRequestProcessed(character, requestId, accepted)
 end)
 
 listen("StartedLockpicking", 2, "after", function(character, item)
-    diagnostics.Trace("started_lockpicking", { actor = character, target = item })
     interaction.OnNativeStarted("lockpick", character, item)
 end)
 
 listen("StoppedLockpicking", 2, "after", function(character, item)
-    diagnostics.Trace("stopped_lockpicking", { actor = character, target = item })
     interaction.OnNativeStopped("lockpick", character, item)
 end)
 
 listen("StartedDisarmingTrap", 2, "after", function(character, item)
-    diagnostics.Trace("started_disarming", { actor = character, target = item })
     interaction.OnNativeStarted("disarm", character, item)
 end)
 
 listen("StoppedDisarmingTrap", 2, "after", function(character, item)
-    diagnostics.Trace("stopped_disarming", { actor = character, target = item })
     interaction.OnNativeStopped("disarm", character, item)
 end)
 
 listen("RollResult", 6, "after", function(eventName, character, subject, result, isActive, criticality)
-    diagnostics.Trace("roll_result", {
-        actor = character,
-        criticality = criticality,
-        event_name = eventName,
-        is_active = isActive,
-        result = result,
-        target = subject,
-    })
-
-    interaction.OnRollResult(eventName, character, subject, result)
+    local handled = interaction.OnRollResult(
+        eventName,
+        character,
+        subject,
+        result,
+        isActive,
+        criticality
+    )
+    if handled then
+        if diagnostics.IsTraceEnabled() then
+            -- The coordinator may schedule terminal cleanup on the next tick.
+            -- Queue the diagnostic snapshot afterward so pending counts
+            -- reflect post-roll state rather than callback-local state.
+            api.Schedule(0, function()
+                emitStatus("roll_result", {
+                    criticality = criticality,
+                    event_name = eventName,
+                    is_active = isActive,
+                    result = result,
+                })
+            end)
+        end
+    end
 end)
 
-listen("EnteredForceTurnBased", 1, "after", function(object)
-    interaction.OnEnteredForceTurnBased(object)
-    diagnostics.Trace("entered_forced_turn_based", { actor = object })
-end)
-
-listen("LeftForceTurnBased", 1, "after", function(object)
-    interaction.OnLeftForceTurnBased(object)
-    diagnostics.Trace("left_forced_turn_based", { actor = object })
-end)
-
-listen("UseStarted", 2, "before", function(character, item)
-    diagnostics.Trace("use_started", { actor = character, target = item })
-end)
-
--- Capture the exact actor and locked target before vanilla's remaining
--- UseFinished handlers. The coordinator deliberately defers its permission
--- procedures until this callback stack has unwound.
-listen("UseFinished", 3, "before", function(character, item, success)
-    diagnostics.Trace("use_finished", {
-        actor = character,
-        target = item,
-        success = success,
-    })
-    interaction.OnUseFinished(character, item, success)
-end)
+rollRouterAvailable = interaction.Subscribe()
 
 Ext.Events.SessionLoaded:Subscribe(function()
     legacyCleanup.RecoverPersisted()
+    interaction.Clear("session_loaded")
+    bridge.BeginHandshake()
     diagnostics.Info("loaded", {
-        version = Settings.VERSION,
-        game_version = api.GetGameVersion(),
         extender_version = api.GetExtenderVersion(),
+        game_version = api.GetGameVersion(),
+        implementation = "native_local_profile_substitution",
+        version = Settings.VERSION,
     })
+    emitStatus("session_loaded")
 end)
 
 Ext.Events.ResetCompleted:Subscribe(function()
     legacyCleanup.RecoverPersisted()
+    interaction.Clear("lua_reset")
+    bridge.BeginHandshake()
     diagnostics.Info("lua_reset_completed", {})
-end)
-
-Ext.RegisterConsoleCommand("best_of_hands_trace", function(_, value)
-    diagnostics.SetTrace(value == "on" or value == "1" or value == "true")
-end)
-
-Ext.RegisterConsoleCommand("best_of_hands_status", function()
-    diagnostics.Info("status", {
-        legacy_assistance_cleanup = legacyCleanup.Count(),
-        pending_delegations = interaction.Count(),
-        trace = diagnostics.IsTraceEnabled(),
-    })
+    emitStatus("lua_reset_completed")
 end)
 
 return {
+    Bridge = bridge,
     Diagnostics = diagnostics,
     Interaction = interaction,
     LegacyCleanup = legacyCleanup,
