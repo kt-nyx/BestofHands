@@ -13,7 +13,7 @@ Closes:
 ## Verification
 
 - [ ] `pwsh -NoProfile -File .\scripts\test.ps1`
-- [ ] Clean package build and ten-file allowlist
+- [ ] Clean package build and validated PAK allowlist
 - [ ] Relevant manual matrix cases recorded
 - [ ] Rapid-click/cancellation/cleanup cases considered
 - [ ] Multiplayer/actor correlation considered or explicitly not applicable

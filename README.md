@@ -10,78 +10,82 @@ Now you can leave it in the ***Best of Hands***.
 
 ## Description
 
-Best of Hands is a simple, focused QoL mod for lockpicking and trap disarming:
+Best of Hands is a focused QoL mod for lockpicking and trap disarming:
 
-- Simply **left-click any locked chest or door** and you will attempt a lockpick. *No more lockpicking from the dropdown menu!*
-- Every lockpick and disarm check will now roll using the stats of the character in your party with the **highest Sleight of Hand** skill. *No more switching to Astarion just to open a box!*
+- Lockpick and disarm checks use the complete native modifier profile of the eligible active-party character with the **highest Sleight of Hand**.
 
-If your party has the key for the door or chest, **the key will still be used** rather than starting the lockpick.
+If your party has the key for a door or chest, the key is still used instead of starting a lockpick.
 
-Visibility and crime permission remain attached to the character who initiates the lockpick/disarm. So if they see you trying to steal, ***you*** **still get caught** (not Astarion, even though he does the roll).
+The character who starts the interaction remains responsible for movement, visibility, ownership, permission, and crime. The selected specialist supplies the roll profile only. The initiator's bonuses are not added to it.
 
-This mod *only* affects lockpicking and trap disarming. It does *not* share best-in-party skills for dialogue or any other ability checks. It does *not* change the target DC, create extra thief/trap tools, let you fail the check without using tools, bypass the roll, or force success. In other words, you won't feel like you're cheating.
+Version 2 uses BG3's original action and roll pipelines. This preserves one visible roll, Inspiration retries, lockpick **Try Again**, trap activation on failure, success callbacks, and ordinary tool consumption. The mod does not copy a hand-picked list of bonuses, so equipment, statuses, advantage, consumables, and mod-added native roll modifiers can participate normally.
+
+For delegated advantage or disadvantage, the native plugin supplies the specialist's aggregate roll mode at BG3's own active-roll viewmodel boundary and retains that local presentation value through the click-to-roll transition. BG3 still constructs the dice, modifier rows, and animations; the mod does not replace the roll UI or change replicated gameplay state.
+
+Bonuses selected from the roll UI use the normal caster and initiator-based availability/range check, then apply their effect to the specialist's delegated profile. If the party has no appropriate thieves' tools or trap disarm toolkit, Best of Hands blocks the roll and uses BG3's native non-modal error notification.
+
+This mod affects only lockpicking and trap disarming. It does not share best-in-party skills for dialogue or other checks, change the DC, create tools, make tools reusable, bypass the roll, or force success.
 
 ## Requirements
 
-- [BG3 Script Extender](https://github.com/Norbyte/bg3se/releases/latest)
+- [BG3 Script Extender](https://github.com/Norbyte/bg3se/releases/latest), API v29 or newer
+- [Native Mod Loader](https://www.nexusmods.com/baldursgate3/mods/944)
+
+Both are required for version 2. If the native DLL is missing, incompatible, or invalidated by a game update, Best of Hands disables its delegation behavior for that session and displays an in-game warning. The original unmodified lockpick/disarm behavior remains available.
 
 ## Installation
 
-Before you do anything, install [BG3 Script Extender.](https://github.com/Norbyte/bg3se/releases/latest)
+The download contains both parts of the mod:
 
-### BG3 Mod Manager
+```text
+BestofHands.pak
+THIRD_PARTY_NOTICES.txt
+bin\NativeMods\BestOfHandsNative.dll
+```
 
-1. In BG3 Mod Manager, select File > Import Mod and choose the downloaded `BestofHands.zip`.
-2. Move *Best of Hands - Quick Lockpick & Disarm* to the Active Mods side.
-3. Export the load order to the game.
-4. Profit!
+Install BG3 Script Extender and Native Mod Loader first, then:
 
-### Vortex
+1. Import `BestofHands.zip` into BG3 Mod Manager, move *Best of Hands - Quick Lockpick & Disarm* to Active Mods, and export the load order.
+2. Open the same ZIP and copy `bin\NativeMods\BestOfHandsNative.dll` to your game's `Baldurs Gate 3\bin\NativeMods` folder.
+3. Start or reload a game. A visible warning means the native half did not load correctly.
 
-1. Click Download with Manager on the Files page.
-2. Enable and deploy the mod.
-3. Profit!
-
-[**Manual Install (for my freaks <3)**](https://bg3.wiki/wiki/Modding:Installing_mods#Manually)
+BG3 Mod Manager handles the PAK but should not be assumed to install the DLL. Vortex users may install and deploy the combined archive normally, then confirm that the DLL reached the folder above and that the PAK is active.
 
 ## Compatibility
 
-Best of Hands should be compatible with pretty much everything, so long as it doesn't overlap directly with lockpick/disarm behaviour (e.g. [Auto Lockpicking](https://www.nexusmods.com/baldursgate3/mods/6188), [Use Best Sleight of Hand](https://www.nexusmods.com/baldursgate3/mods/5036)) or mods that alter *all* ability checks (e.g. [Best in Party Skills](https://www.nexusmods.com/baldursgate3/mods/20091)).
+Best of Hands leaves BG3's native permission, task, roll, result, and resource paths in control. Mods that merely observe those paths should therefore continue to receive one normal action and one normal result. Mods that directly replace lockpick/disarm behavior or alter all ability checks may conflict.
 
-It works with party limit mods; so long as the character you want for lockpick/disarm checks is *in your active party*, their stats will be used for the roll.
+Party-limit mods are supported: the specialist may be any eligible character in the initiator's active party and loaded region. The initiator wins a tie.
+
+Compatibility with [Eternal Lockpick](https://www.nexusmods.com/baldursgate3/mods/15080) and [Eternal Trap Disarm Kit](https://www.nexusmods.com/baldursgate3/mods/15085) is deliberately deferred until the native v2 path is validated. Best of Hands does not reproduce, create, remove, consolidate, or regrant their items. Formal support should be added on top of the stable native event path so those mods continue to own their behavior.
+
+## Game updates
+
+The DLL supports only executable builds whose native layouts were validated. A BG3 patch may require an updated Best of Hands DLL even when the PAK still loads. An unknown build is not patched: the mod warns once and leaves vanilla behavior untouched.
 
 ## Uninstallation
 
-Best of Hands should be safe to remove from an existing playthrough. It doesn't add items, spells, passives, statuses, world objects, permanent character bonuses, etc. so removing it should just stop the new lockpick/disarm script from running.
+Finish or cancel any active lockpick/disarm roll, exit the game, deactivate the PAK, and remove `BestOfHandsNative.dll` from `Baldurs Gate 3\bin\NativeMods`. Best of Hands adds no items, spells, passives, statuses, world objects, or permanent character bonuses.
 
-If you want to be *super* safe though:
+For an extra check before removal, enable the Script Extender console and run `!best_of_hands_status`. An idle session reports `pending_delegations=0` and `legacy_assistance_cleanup=0`.
 
-1. Finish or cancel every active lockpick or trap-disarm roll.
-2. [Enable and open the Script Extender server console](https://www.nexusmods.com/baldursgate3/articles/169) and run `!best_of_hands_status`. Confirm `pending_delegations=0` and `legacy_assistance_cleanup=0`. This guarantees the active part of the script is not running.
-3. Make a new manual save in a new slot, then exit the game completely.
-4. Disable Best of Hands in your preferred mod manager (or delete the `.pak` from your BG3 AppData folder and manually remove it from your load order, if you're a freak <3).
-5. Export the updated load order, launch BG3, and load the new save.
-6. ...un-profit?
+## Why not the other mods?
 
-## Why Not The *Other* Mods?
-
-Other mods have fixed these issues separately before, namely [Auto Lockpicking](https://www.nexusmods.com/baldursgate3/mods/6188) and [Use Best Sleight of Hand](https://www.nexusmods.com/baldursgate3/mods/5036), but:
-
-- *Auto Lockpicking*'s implementation is, in Volitio's own words, "shitty" (sorry) and works very inconsistently, or not at all for some people (me) on the latest patch.
-- *Use Best Sleight of Hand* currently crashes my game, and before it crashes it sometimes stacks the ability modifiers from both my own character and the character with the highest Sleight of Hand. This makes me feel like I'm cheating and that makes me sad. :(
-
-[Best in Party Skills](https://www.nexusmods.com/baldursgate3/mods/20091) also technically works, but it mandatorily uses the best-in-party rolls for dialogue checks, which also makes me feel like I'm cheating and also makes me sad. :(
-
-It's up to you what you use, but this is why I initially created this mod for my own playthrough.
+Other mods solve related problems with different scopes and tradeoffs, including [Auto Lockpicking](https://www.nexusmods.com/baldursgate3/mods/6188), [Use Best Sleight of Hand](https://www.nexusmods.com/baldursgate3/mods/5036), and [Best in Party Skills](https://www.nexusmods.com/baldursgate3/mods/20091). Best of Hands is intentionally limited to locks and traps while keeping the initiating character's world interaction intact.
 
 ## Thanks <3
 
-Thank you so much to the following mod authors for making these mods, which inspired and informed the development of Best of Hands:
+Thank you to the following authors and projects, which inspired or informed Best of Hands:
 
-- [BG3 Script Extender](https://www.nexusmods.com/baldursgate3/mods/2172) by the marvelous Norbyte
+- [BG3 Script Extender](https://www.nexusmods.com/baldursgate3/mods/2172) by Norbyte
+- [Native Mod Loader](https://www.nexusmods.com/baldursgate3/mods/944) by ShinyHobo
+- [SafetyHook](https://github.com/cursey/safetyhook) by cursey
+- [Zydis](https://github.com/zyantific/zydis) by zyantific
 - [Auto Lockpicking](https://www.nexusmods.com/baldursgate3/mods/6188) by Volitio
 - [Use Best Sleight of Hand](https://www.nexusmods.com/baldursgate3/mods/5036) by JonHinkerton
 - [Best in Party Skills](https://www.nexusmods.com/baldursgate3/mods/20091) by imCioco
+- [Eternal Lockpick](https://www.nexusmods.com/baldursgate3/mods/15080) by SwissFred
+- [Eternal Trap Disarm Kit](https://www.nexusmods.com/baldursgate3/mods/15085) by SwissFred
 
 ## License
 

@@ -2,7 +2,8 @@
 
 [CmdletBinding()]
 param(
-    [string]$PakPath
+    [string]$PakPath,
+    [string]$NativeDllPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,13 +12,18 @@ $dist = Join-Path $root 'dist'
 $pakName = 'BestofHands.pak'
 $zipName = 'BestofHands.zip'
 $metadataPath = Join-Path $root 'src\BestOfHands\Mods\BestOfHands\meta.lsx'
+$noticesPath = Join-Path $root 'THIRD_PARTY_NOTICES.txt'
 $infoGroup = '8aff5b5f-603d-4e22-8ae2-8510b2164a9b'
 $created = '2026-07-15T01:30:22.2092206-04:00'
 
 if ([string]::IsNullOrWhiteSpace($PakPath)) {
     $PakPath = Join-Path $dist $pakName
 }
+if ([string]::IsNullOrWhiteSpace($NativeDllPath)) {
+    $NativeDllPath = Join-Path $root 'build\native\bin\NativeMods\BestOfHandsNative.dll'
+}
 $PakPath = [IO.Path]::GetFullPath($PakPath)
+$NativeDllPath = [IO.Path]::GetFullPath($NativeDllPath)
 $destination = [IO.Path]::GetFullPath((Join-Path $dist $zipName))
 
 if (-not (Test-Path -LiteralPath $PakPath -PathType Leaf)) {
@@ -26,8 +32,17 @@ if (-not (Test-Path -LiteralPath $PakPath -PathType Leaf)) {
 if ([IO.Path]::GetFileName($PakPath) -cne $pakName) {
     throw "Release input must be named exactly ${pakName}: $PakPath"
 }
+if (-not (Test-Path -LiteralPath $NativeDllPath -PathType Leaf)) {
+    throw "Verified native DLL not found: $NativeDllPath. Run scripts\build.ps1 first."
+}
+if ([IO.Path]::GetFileName($NativeDllPath) -cne 'BestOfHandsNative.dll') {
+    throw "Native input must be named exactly BestOfHandsNative.dll: $NativeDllPath"
+}
 if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
     throw "Module metadata not found: $metadataPath"
+}
+if (-not (Test-Path -LiteralPath $noticesPath -PathType Leaf)) {
+    throw "Third-party notices not found: $noticesPath"
 }
 
 [xml]$metadata = Get-Content -LiteralPath $metadataPath -Raw
@@ -80,6 +95,10 @@ foreach ($path in @($staging, $verification)) {
 try {
     New-Item -ItemType Directory -Path $staging -Force | Out-Null
     Copy-Item -LiteralPath $PakPath -Destination (Join-Path $staging $pakName)
+    $nativeStage = Join-Path $staging 'bin\NativeMods'
+    New-Item -ItemType Directory -Path $nativeStage -Force | Out-Null
+    Copy-Item -LiteralPath $NativeDllPath -Destination (Join-Path $nativeStage 'BestOfHandsNative.dll')
+    Copy-Item -LiteralPath $noticesPath -Destination (Join-Path $staging 'THIRD_PARTY_NOTICES.txt')
 
     $infoPath = Join-Path $staging 'info.json'
     $infoJson = $info | ConvertTo-Json -Depth 8 -Compress
@@ -90,6 +109,8 @@ try {
     )
     $releaseTimestamp = [DateTimeOffset]::Parse($created).UtcDateTime
     (Get-Item -LiteralPath (Join-Path $staging $pakName)).LastWriteTimeUtc = $releaseTimestamp
+    (Get-Item -LiteralPath (Join-Path $nativeStage 'BestOfHandsNative.dll')).LastWriteTimeUtc = $releaseTimestamp
+    (Get-Item -LiteralPath (Join-Path $staging 'THIRD_PARTY_NOTICES.txt')).LastWriteTimeUtc = $releaseTimestamp
     (Get-Item -LiteralPath $infoPath).LastWriteTimeUtc = $releaseTimestamp
 
     New-Item -ItemType Directory -Path $dist -Force | Out-Null
@@ -103,10 +124,15 @@ try {
     $actualFiles = Get-ChildItem -LiteralPath $verification -File -Recurse |
         ForEach-Object { $_.FullName.Substring($verification.Length + 1).Replace('\', '/') } |
         Sort-Object
-    $expectedFiles = @('BestofHands.pak', 'info.json') | Sort-Object
+    $expectedFiles = @(
+        'BestofHands.pak',
+        'THIRD_PARTY_NOTICES.txt',
+        'bin/NativeMods/BestOfHandsNative.dll',
+        'info.json'
+    ) | Sort-Object
     $difference = Compare-Object -ReferenceObject $expectedFiles -DifferenceObject $actualFiles
     if ($difference) {
-        throw "Release archive content differs from the two-file allowlist:`n$($difference | Out-String)"
+        throw "Release archive content differs from the release allowlist:`n$($difference | Out-String)"
     }
 
     $extractedPak = Join-Path $verification $pakName
@@ -114,6 +140,18 @@ try {
     $extractedPakHash = (Get-FileHash -LiteralPath $extractedPak -Algorithm SHA256).Hash
     if ($sourcePakHash -ne $extractedPakHash) {
         throw 'The PAK in the release archive differs from the verified build.'
+    }
+    $extractedDll = Join-Path $verification 'bin\NativeMods\BestOfHandsNative.dll'
+    $sourceDllHash = (Get-FileHash -LiteralPath $NativeDllPath -Algorithm SHA256).Hash
+    $extractedDllHash = (Get-FileHash -LiteralPath $extractedDll -Algorithm SHA256).Hash
+    if ($sourceDllHash -ne $extractedDllHash) {
+        throw 'The native DLL in the release archive differs from the verified build.'
+    }
+    $extractedNotices = Join-Path $verification 'THIRD_PARTY_NOTICES.txt'
+    $sourceNoticesHash = (Get-FileHash -LiteralPath $noticesPath -Algorithm SHA256).Hash
+    $extractedNoticesHash = (Get-FileHash -LiteralPath $extractedNotices -Algorithm SHA256).Hash
+    if ($sourceNoticesHash -ne $extractedNoticesHash) {
+        throw 'The third-party notices in the release archive differ from source.'
     }
 
     $extractedInfo = Get-Content -LiteralPath (Join-Path $verification 'info.json') -Raw |
@@ -147,6 +185,6 @@ finally {
 
 $zipHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
 Write-Host "Created $destination" -ForegroundColor Green
-Write-Host 'Verified release archive allowlist: BestofHands.pak, info.json' -ForegroundColor Green
-Write-Host 'Verified archived PAK byte-for-byte and info.json identity/MD5 against source.' -ForegroundColor Green
+Write-Host 'Verified release archive allowlist: PAK, native DLL, notices, and info.json.' -ForegroundColor Green
+Write-Host 'Verified archived PAK, native DLL, and notices byte-for-byte and info.json identity/MD5 against source.' -ForegroundColor Green
 Write-Host "SHA-256: $zipHash"
