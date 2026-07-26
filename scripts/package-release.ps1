@@ -3,18 +3,37 @@
 [CmdletBinding()]
 param(
     [string]$PakPath,
-    [string]$NativeDllPath
+    [string]$NativeDllPath,
+    [string]$ReleaseTag
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $dist = Join-Path $root 'dist'
 $pakName = 'BestofHands.pak'
-$zipName = 'BestofHands.zip'
+$versionPath = Join-Path $root 'VERSION'
 $metadataPath = Join-Path $root 'src\BestOfHands\Mods\BestOfHands\meta.lsx'
 $noticesPath = Join-Path $root 'THIRD_PARTY_NOTICES.txt'
 $infoGroup = '8aff5b5f-603d-4e22-8ae2-8510b2164a9b'
 $created = '2026-07-15T01:30:22.2092206-04:00'
+
+if (-not (Test-Path -LiteralPath $versionPath -PathType Leaf)) {
+    throw "Version file not found: $versionPath"
+}
+$version = (Get-Content -LiteralPath $versionPath -Raw).Trim()
+if ($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+    throw "VERSION must contain a stable MAJOR.MINOR.PATCH value: '$version'"
+}
+$expectedTag = "v$version"
+if ([string]::IsNullOrWhiteSpace($ReleaseTag)) {
+    $ReleaseTag = $expectedTag
+}
+if ($ReleaseTag -cne $expectedTag) {
+    throw "Release tag '$ReleaseTag' does not match VERSION '$version'. Expected '$expectedTag'."
+}
+$zipName = "BestofHands-$ReleaseTag.zip"
+$checksumName = "$zipName.sha256"
+$legacyDestination = [IO.Path]::GetFullPath((Join-Path $dist 'BestofHands.zip'))
 
 if ([string]::IsNullOrWhiteSpace($PakPath)) {
     $PakPath = Join-Path $dist $pakName
@@ -25,6 +44,7 @@ if ([string]::IsNullOrWhiteSpace($NativeDllPath)) {
 $PakPath = [IO.Path]::GetFullPath($PakPath)
 $NativeDllPath = [IO.Path]::GetFullPath($NativeDllPath)
 $destination = [IO.Path]::GetFullPath((Join-Path $dist $zipName))
+$checksumDestination = [IO.Path]::GetFullPath((Join-Path $dist $checksumName))
 
 if (-not (Test-Path -LiteralPath $PakPath -PathType Leaf)) {
     throw "Verified package not found: $PakPath. Run scripts\build.ps1 first."
@@ -114,8 +134,10 @@ try {
     (Get-Item -LiteralPath $infoPath).LastWriteTimeUtc = $releaseTimestamp
 
     New-Item -ItemType Directory -Path $dist -Force | Out-Null
-    if (Test-Path -LiteralPath $destination) {
-        Remove-Item -LiteralPath $destination -Force
+    foreach ($outputPath in @($destination, $checksumDestination, $legacyDestination)) {
+        if (Test-Path -LiteralPath $outputPath) {
+            Remove-Item -LiteralPath $outputPath -Force
+        }
     }
     Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $destination -CompressionLevel Optimal
 
@@ -164,10 +186,24 @@ try {
         $extractedInfo.Mods[0].Folder -cne (Get-ModuleAttribute -Id 'Folder')) {
         throw 'info.json identity does not match meta.lsx.'
     }
+
+    $zipHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+    $checksumLine = "$zipHash *$zipName"
+    [IO.File]::WriteAllText(
+        $checksumDestination,
+        $checksumLine + [Environment]::NewLine,
+        [Text.UTF8Encoding]::new($false)
+    )
+    $recordedChecksum = (Get-Content -LiteralPath $checksumDestination -Raw).Trim()
+    if ($recordedChecksum -cne $checksumLine) {
+        throw 'Release archive checksum sidecar could not be verified after writing.'
+    }
 }
 catch {
-    if (Test-Path -LiteralPath $destination -PathType Leaf) {
-        Remove-Item -LiteralPath $destination -Force
+    foreach ($outputPath in @($destination, $checksumDestination)) {
+        if (Test-Path -LiteralPath $outputPath -PathType Leaf) {
+            Remove-Item -LiteralPath $outputPath -Force
+        }
     }
     throw
 }
@@ -183,8 +219,8 @@ finally {
     }
 }
 
-$zipHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
 Write-Host "Created $destination" -ForegroundColor Green
+Write-Host "Created $checksumDestination" -ForegroundColor Green
 Write-Host 'Verified release archive allowlist: PAK, native DLL, notices, and info.json.' -ForegroundColor Green
 Write-Host 'Verified archived PAK, native DLL, and notices byte-for-byte and info.json identity/MD5 against source.' -ForegroundColor Green
 Write-Host "SHA-256: $zipHash"
