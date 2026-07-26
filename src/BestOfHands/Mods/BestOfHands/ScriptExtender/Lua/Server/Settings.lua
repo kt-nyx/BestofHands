@@ -11,9 +11,7 @@ return {
     NATIVE_REFERENCE_TRACE_TIMEOUT_MS = 30000,
     NATIVE_HANDSHAKE_ATTEMPTS = 40,
     NATIVE_HANDSHAKE_POLL_MS = 250,
-    -- Development default: keep the complete Lua, client, and native trace
-    -- enabled until the delegated-roll presentation work is finalized.
-    TRACE_EVENTS = true,
+    TRACE_EVENTS = false,
 
     -- Base-game tool roots. These are used only as a conservative delegation
     -- precondition; BG3 remains responsible for choosing and consuming tools.

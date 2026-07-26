@@ -1,15 +1,117 @@
 // SPDX-License-Identifier: Unlicense
 #include "BridgeProtocol.h"
+#include "FixedSnapshot.h"
 #include "ProfileRouting.h"
+#include "SafeMemory.h"
 
 #include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <vector>
+
+#ifdef NDEBUG
+#error Native regression assertions must remain enabled in Release builds.
+#endif
 
 using namespace best_of_hands;
 
 int main()
 {
+    std::uint64_t readableValue = 0x123456789abcdef0ULL;
+    std::uint64_t observedValue{};
+    assert(SafeRead(&readableValue, observedValue));
+    assert(observedValue == readableValue);
+    std::uint64_t replacementValue = 0x0fedcba987654321ULL;
+    assert(SafeWrite(&readableValue, replacementValue));
+    assert(readableValue == replacementValue);
+    assert(!SafeRead(nullptr, observedValue));
+    assert(!SafeWrite(nullptr, replacementValue));
+
+    auto* inaccessible = VirtualAlloc(
+        nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
+    assert(inaccessible != nullptr);
+    observedValue = 0x1122334455667788ULL;
+    assert(!SafeRead(inaccessible, observedValue));
+    assert(observedValue == 0x1122334455667788ULL);
+    assert(!SafeWrite(inaccessible, replacementValue));
+    assert(VirtualFree(inaccessible, 0, MEM_RELEASE) != FALSE);
+
+    auto* splitRegion = static_cast<std::byte*>(VirtualAlloc(
+        nullptr, 8192, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    assert(splitRegion != nullptr);
+    std::uint32_t readablePrefix = 0xa1b2c3d4U;
+    std::memcpy(splitRegion + 4092,
+        &readablePrefix, sizeof(readablePrefix));
+    DWORD splitPreviousProtection{};
+    assert(VirtualProtect(splitRegion + 4096, 4096, PAGE_NOACCESS,
+        &splitPreviousProtection) != FALSE);
+    observedValue = 0x8877665544332211ULL;
+    assert(!SafeRead(splitRegion + 4092, observedValue));
+    assert(observedValue == 0x8877665544332211ULL);
+    assert(VirtualFree(splitRegion, 0, MEM_RELEASE) != FALSE);
+
+    auto* readOnly = VirtualAlloc(
+        nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    assert(readOnly != nullptr);
+    assert(SafeWrite(readOnly, replacementValue));
+    DWORD previousProtection{};
+    assert(VirtualProtect(
+        readOnly, 4096, PAGE_READONLY, &previousProtection) != FALSE);
+    assert(SafeRead(readOnly, observedValue));
+    assert(observedValue == replacementValue);
+    assert(!SafeWrite(readOnly, readableValue));
+    assert(VirtualFree(readOnly, 0, MEM_RELEASE) != FALSE);
+
+    FixedSnapshot<int, 3> snapshot;
+    assert(snapshot.empty());
+    assert(snapshot.capacity() == 3);
+    assert(snapshot.push_back(10));
+    assert(snapshot.push_back(20));
+    assert(snapshot.push_back(30));
+    assert(!snapshot.push_back(40));
+    assert(snapshot.size() == 3);
+    assert(snapshot[0] == 10);
+    assert(snapshot[2] == 30);
+    int snapshotTotal{};
+    for (auto const value : snapshot) {
+        snapshotTotal += value;
+    }
+    assert(snapshotTotal == 60);
+    snapshot.clear();
+    assert(snapshot.empty());
+    assert(snapshot.push_back(50));
+    assert(snapshot.size() == 1);
+    assert(snapshot[0] == 50);
+    FixedSnapshot<int, 0> emptySnapshot;
+    assert(emptySnapshot.empty());
+    assert(emptySnapshot.capacity() == 0);
+    assert(!emptySnapshot.push_back(1));
+
+    auto const exactFields = SplitExact<3>("alpha\tbeta\tgamma", '\t');
+    assert(exactFields.has_value());
+    assert((*exactFields)[0] == "alpha");
+    assert((*exactFields)[2] == "gamma");
+    assert(!SplitExact<2>("alpha\tbeta\tgamma", '\t').has_value());
+    assert(!SplitExact<4>("alpha\tbeta\tgamma", '\t').has_value());
+    auto const emptyField = SplitExact<3>("alpha\t\tgamma", '\t');
+    assert(emptyField.has_value());
+    assert((*emptyField)[1].empty());
+    auto const trailingField = SplitExact<3>("alpha\tbeta\t", '\t');
+    assert(trailingField.has_value());
+    assert((*trailingField)[2].empty());
+
+    std::uint64_t unsignedValue{};
+    assert(ParseUnsigned("18446744073709551615", 10, unsignedValue));
+    assert(unsignedValue == UINT64_MAX);
+    assert(ParseUnsigned("ABCDEF", 16, unsignedValue));
+    assert(unsignedValue == 0xabcdefULL);
+    assert(!ParseUnsigned("", 10, unsignedValue));
+    assert(!ParseUnsigned("-1", 10, unsignedValue));
+    assert(!ParseUnsigned("1x", 10, unsignedValue));
+    assert(!ParseUnsigned("18446744073709551616", 10, unsignedValue));
+
     auto const valid = ParseBridgeDocument(
         "protocol=5\n"
         "pak_version=2.0.0\n"
@@ -42,10 +144,32 @@ int main()
         "protocol=1\npak_version=2.0.0\nprobe=x\nend=1\n").valid);
     assert(!ParseBridgeDocument(
         "protocol=5\npak_version=2.0.0\nprobe=x\n"
-        "record=1\tlockpick\tbad\t2\t3\t0\t0\t0\ta\tb\tc\t-1\nend=1\n").valid);
+        "record=1\tlockpick\tnot-hex\t2\t3\t0\t0\t0\ta\tb\tc\t-1\nend=1\n").valid);
+    assert(!ParseBridgeDocument(
+        "protocol=5\npak_version=2.0.0\nprobe=x\n"
+        "record=0\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t-1\nend=1\n").valid);
     assert(!ParseBridgeDocument(
         "protocol=5\npak_version=2.0.0\nprobe=x\n"
         "record=1\tlockpick\t1\t2\t3\nend=1\n").valid);
+    assert(!ParseBridgeDocument(
+        "protocol=5\npak_version=2.0.0\nprobe=x\n"
+        "record=1\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t0\textra\n"
+        "end=1\n").valid);
+    assert(!ParseBridgeDocument(
+        "protocol=5\npak_version=2.0.0\nprobe=x\n"
+        "record=1\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t3\n"
+        "end=1\n").valid);
+    assert(!ParseBridgeDocument(
+        "protocol=5\npak_version=2.0.0\nprobe=x\n"
+        "record=1\tunknown\t1\t2\t3\t0\t0\t0\ta\tb\tc\t-1\n"
+        "end=1\n").valid);
+    assert(!ParseBridgeDocument(
+        "protocol=5\npak_version=2.0.0\nprobe=x\n"
+        "record=1\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t-2\n"
+        "end=1\n").valid);
+    assert(!ParseBridgeDocument(
+        "protocol=5\npak_version=2.0.0\nprobe=x\n"
+        "record=1\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t-1\n").valid);
 
     RequestedRollIdentity identity{
         .roll = 0x0200000200000100ULL,
@@ -77,6 +201,21 @@ int main()
     assert(client.trace);
     assert(client.nativeSession == "44-55");
     assert(client.records.size() == 1);
+    assert(!ParseClientBridgeDocument(
+        "protocol=5\npak_version=2.0.0\n"
+        "record=7\tuuid\t1\t2\t3\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=5\npak_version=2.0.0\nnative_session=x\n"
+        "record=0\tuuid\t1\t2\t3\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=5\npak_version=2.0.0\nnative_session=x\n"
+        "record=7\tuuid\t1\t0\t3\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=5\npak_version=2.0.0\nnative_session=x\n"
+        "record=7\tuuid\t1\t2\tnot-hex\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=5\npak_version=2.0.0\nnative_session=x\n"
+        "record=7\tuuid\t1\t2\t3\textra\nend=1\n").valid);
 
     RequestedRollIdentity clientIdentity{
         .roll = 0x01c0000200000100ULL,
@@ -93,6 +232,12 @@ int main()
     assert(clientProfile->specialist == 0x01c00001000000d4ULL);
     assert(ClientPresentationAdvantage(*clientProfile).has_value());
     assert(*ClientPresentationAdvantage(*clientProfile) == 1);
+    auto duplicateClientRecords = client.records;
+    duplicateClientRecords.push_back(client.records[0]);
+    assert(!MatchProfileSelection(
+        valid.records,
+        duplicateClientRecords,
+        clientIdentity).has_value());
     assert(MatchesClientPresentationLease(
         clientIdentity,
         clientProfile->record.rollUuid,
@@ -183,6 +328,69 @@ int main()
         1, 3, 0, 3, true));
     assert(!ShouldPreserveAdvantageSourceModifier(
         1, 3, 0, 0, false));
+    for (int exact = 0; exact <= 1; ++exact) {
+        for (int enabled = 0; enabled <= 1; ++enabled) {
+            for (int selected = 0; selected <= 1; ++selected) {
+                for (int dice = 0; dice <= 1; ++dice) {
+                    for (int primary = 0; primary <= 1; ++primary) {
+                        for (int selectedSet = 0;
+                             selectedSet <= 1; ++selectedSet) {
+                            auto const expected = exact && enabled
+                                && selected && dice && primary
+                                && selectedSet;
+                            assert(ShouldPreserveTransientRollBonus(
+                                exact != 0, enabled != 0, selected != 0,
+                                static_cast<std::uint8_t>(dice),
+                                primary != 0, selectedSet != 0)
+                                == expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (int exact = 0; exact <= 1; ++exact) {
+        for (int invisible = 0; invisible <= 1; ++invisible) {
+            for (int enabled = 0; enabled <= 1; ++enabled) {
+                for (int selected = 0; selected <= 1; ++selected) {
+                    for (int dice = 0; dice <= 1; ++dice) {
+                        for (int missing = 0; missing <= 1; ++missing) {
+                            auto const expected = exact && invisible
+                                && enabled && selected && dice && missing;
+                            assert(ShouldPromoteMissingSelectedRollBonus(
+                                exact != 0, invisible != 0, enabled != 0,
+                                selected != 0,
+                                static_cast<std::uint8_t>(dice),
+                                missing != 0) == expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (std::uint8_t expected = 0; expected <= 3; ++expected) {
+        for (std::uint8_t observed = 0; observed <= 3; ++observed) {
+            for (std::uint8_t disabled = 0; disabled <= 1; ++disabled) {
+                for (std::uint8_t state = 0; state <= 3; ++state) {
+                    auto const preserveExpected = expected >= 1
+                        && expected <= 2 && observed == expected
+                        && disabled == 0 && state != 3;
+                    assert(ShouldPreserveAdvantageModifierPresentation(
+                        expected, observed, disabled, state)
+                        == preserveExpected);
+                    for (int hasSource = 0; hasSource <= 1; ++hasSource) {
+                        auto const sourceExpected = expected >= 1
+                            && expected <= 2 && observed == 3
+                            && disabled == 0 && state != 3
+                            && hasSource != 0;
+                        assert(ShouldPreserveAdvantageSourceModifier(
+                            expected, observed, disabled, state,
+                            hasSource != 0) == sourceExpected);
+                    }
+                }
+            }
+        }
+    }
     auto serverProfile = MatchProfileSelection(
         valid.records,
         std::span<ClientActionRecord const>{},

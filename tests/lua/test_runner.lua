@@ -11,11 +11,6 @@ local NativePresentationBridge = dofile(
         .. "/src/BestOfHands/Mods/BestOfHands/ScriptExtender/Lua/Client/"
         .. "NativePresentationBridge.lua"
 )
-local UiRollDiagnostics = dofile(
-    BEST_OF_HANDS_ROOT
-        .. "/src/BestOfHands/Mods/BestOfHands/ScriptExtender/Lua/Client/"
-        .. "UiRollDiagnostics.lua"
-)
 
 local passed = 0
 local failed = 0
@@ -48,7 +43,7 @@ local function test(name, callback)
     end
 end
 
-local function recordingDiagnostics()
+local function recordingDiagnostics(traceEnabled)
     local records = {}
     local instance = {}
     for _, level in ipairs({ "Info", "Warn", "Error", "Trace" }) do
@@ -56,7 +51,7 @@ local function recordingDiagnostics()
             records[#records + 1] = { event = event, fields = fields, level = level }
         end
     end
-    instance.IsTraceEnabled = function() return true end
+    instance.IsTraceEnabled = function() return traceEnabled ~= false end
     return instance, records
 end
 
@@ -165,11 +160,20 @@ end
 test("native bridge requires a live matching challenge acknowledgement", function()
     installEntityMock()
     local files = {}
+    local loads = {}
+    local saves = {}
     local scheduled = {}
     local warnings = 0
     Ext.IO = {
-        LoadFile = function(path) return files[path] end,
-        SaveFile = function(path, value) files[path] = value return true end,
+        LoadFile = function(path)
+            loads[path] = (loads[path] or 0) + 1
+            return files[path]
+        end,
+        SaveFile = function(path, value)
+            saves[path] = (saves[path] or 0) + 1
+            files[path] = value
+            return true
+        end,
     }
     Ext.Utils = { MonotonicTime = function() return 42 end }
     Osi = {
@@ -225,6 +229,18 @@ test("native bridge requires a live matching challenge acknowledgement", functio
     assertContains(files["BestOfHandsNative.actions"],
         "record=9\tlockpick\t0200000100000001\t0200000100000002\t0200000100000003\t0200000200000009\t0",
         "correlated roll record")
+    local loadsAfterRoll = loads["BestOfHandsNative.status"]
+    local savesAfterRoll = saves["BestOfHandsNative.actions"]
+    local duplicateRoll, duplicateRollReason = bridge.SetRoll(
+        9,
+        roll,
+        "00000000-0000-0000-0000-000000000009"
+    )
+    assertEqual(true, duplicateRoll, duplicateRollReason or "duplicate roll accepted")
+    assertEqual(loadsAfterRoll, loads["BestOfHandsNative.status"],
+        "unchanged roll correlation does not reread native status")
+    assertEqual(savesAfterRoll, saves["BestOfHandsNative.actions"],
+        "unchanged roll correlation does not rewrite actions")
     local finished = entity("00000000-0000-0000-0000-000000000010", "0200000200000010")
     local finishedCorrelated, finishedReason = bridge.SetFinishedEvent(9, finished)
     assertEqual(true, finishedCorrelated, finishedReason or "finished event correlated")
@@ -241,7 +257,43 @@ test("native bridge requires a live matching challenge acknowledgement", functio
             .. "\t00000000-0000-0000-0000-000000000003\t1",
         "stable client correlation and presentation state"
     )
+    local loadsAfterPresentation = loads["BestOfHandsNative.status"]
+    local savesAfterPresentation = saves["BestOfHandsNative.actions"]
+    local duplicatePresentation, duplicatePresentationReason =
+        bridge.SetPresentation(9, 1)
+    assertEqual(true, duplicatePresentation,
+        duplicatePresentationReason or "duplicate presentation accepted")
+    assertEqual(loadsAfterPresentation, loads["BestOfHandsNative.status"],
+        "unchanged presentation does not reread native status")
+    assertEqual(savesAfterPresentation, saves["BestOfHandsNative.actions"],
+        "unchanged presentation does not rewrite actions")
+    local invalidPresentation, invalidPresentationReason =
+        bridge.SetPresentation(9, 3)
+    assertEqual(false, invalidPresentation, "invalid presentation rejected")
+    assertEqual("presentation_advantage_invalid", invalidPresentationReason,
+        "invalid presentation reason")
+    assertEqual(loadsAfterPresentation, loads["BestOfHandsNative.status"],
+        "invalid presentation does not reread native status")
+    assertEqual(savesAfterPresentation, saves["BestOfHandsNative.actions"],
+        "invalid presentation does not rewrite actions")
+    local changedPresentation, changedPresentationReason =
+        bridge.SetPresentation(9, 2)
+    assertEqual(true, changedPresentation,
+        changedPresentationReason or "changed presentation accepted")
+    assertEqual(loadsAfterPresentation + 1, loads["BestOfHandsNative.status"],
+        "changed presentation revalidates native status exactly once")
+    assertEqual(savesAfterPresentation + 1, saves["BestOfHandsNative.actions"],
+        "changed presentation rewrites actions exactly once")
+    assertContains(files["BestOfHandsNative.actions"], "\t2\nend=1",
+        "changed presentation is published")
     assertEqual(0, warnings, "no warning")
+end)
+
+test("production handshake omits the retired observation-only hook", function()
+    assertEqual(nil,
+        NativeBridge.REQUIRED_HOOKS:find(
+            "client_roll_bonus_preserve_selected", 1, true),
+        "trace-only selected-modifier hook is not installed in production")
 end)
 
 test("native bridge fails closed and warns once when the DLL is unavailable", function()
@@ -334,13 +386,16 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
         [target.guid] = clientTarget,
     }
     local callbacks = {}
+    local entityGets = 0
+    local printCalls = 0
+    local saveCalls = 0
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
             "protocol=5",
             "pak_version=2.0.0",
             "probe=test",
             "native_session=44-55",
-            "trace=1",
+            "trace=0",
             "record=7\tdisarm\t0200000100000001\t0200000100000002"
                 .. "\t0200000100000003\t0200000200000004\t0"
                 .. "\t00000000-0000-0000-0000-000000000004"
@@ -355,6 +410,7 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
     Ext = {
         Entity = {
             Get = function(value)
+                entityGets = entityGets + 1
                 return entities[value] or (type(value) == "table" and value or nil)
             end,
             OnCreate = function(componentName, callback)
@@ -372,13 +428,17 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
         },
         IO = {
             LoadFile = function(path) return files[path] end,
-            SaveFile = function(path, value) files[path] = value return true end,
+            SaveFile = function(path, value)
+                saveCalls = saveCalls + 1
+                files[path] = value
+                return true
+            end,
         },
         Timer = { WaitFor = function() end },
-        Utils = { Print = function() end },
+        Utils = { Print = function() printCalls = printCalls + 1 end },
     }
     local bridge = NativePresentationBridge.Start({
-        TRACE_EVENTS = true,
+        TRACE_EVENTS = false,
         VERSION = "2.0.0",
     })
     local component = {
@@ -395,6 +455,15 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
     assertEqual(clientSpecialist.handle, record.specialistHandle, "client specialist mapped")
     assertEqual(1, record.presentationAdvantage, "specialist advantage retained for diagnostics")
     assertEqual("None", component.AdvantageType, "client roll component remains untouched")
+    assertEqual(1, saveCalls, "initial mapping written exactly once")
+    local entityGetsBeforeChanges = entityGets
+    for _ = 1, 100 do
+        callbacks.RequestedRollChange(clientRoll)
+    end
+    assertEqual(1, saveCalls, "stable roll changes do not rewrite the client bridge")
+    assertEqual(100, entityGets - entityGetsBeforeChanges,
+        "stable roll changes only resolve the changed roll entity")
+    assertEqual(0, printCalls, "trace-disabled client bridge emits no diagnostics")
     files["BestOfHandsNative.actions"] = files["BestOfHandsNative.actions"]:gsub(
         "\t1\nend=1",
         "\t2\nend=1"
@@ -413,122 +482,7 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
     assertEqual(nil,
         files["BestOfHandsNative.client"]:find("record=7", 1, true),
         "destroyed client mapping removed")
-end)
-
-test("client diagnostics leave active-roll presentation to the native hook", function()
-    local callbacks = {}
-    local output = {}
-    local rollEntity = entity(
-        "00000000-0000-0000-0000-000000000034",
-        "01c0000200000034"
-    )
-    local requestedRoll = {
-        AdvantageType = "None",
-        RollContext = 5,
-        Roller = actor,
-        Subject = target,
-    }
-    rollEntity.RequestedRoll = requestedRoll
-    local advantageEntry = {
-        AdvantageType = "Advantage",
-        IsAdvantage = true,
-        IsDisabled = false,
-        Name = "Cat's Grace",
-        Type = "gui::VMRollModifier",
-    }
-    local modifierEntry = {
-        IsAdvantage = false,
-        IsDisabled = false,
-        Name = "Dexterity",
-        Value = 5,
-        Type = "gui::VMRollModifier",
-    }
-    local rollViewModel = {
-        Advantages = { advantageEntry },
-        Modifiers = { modifierEntry },
-        RollAdvantageType = "None",
-        Type = "gui::VMActiveRoll",
-    }
-    local dataContext = {
-        FinalResult = 28,
-        Roll = rollViewModel,
-        RollState = "WaitForStart",
-        SelectedBoostModifierList = {},
-        Type = "gui::DCActiveRoll",
-    }
-    local widget = {
-        DataContext = dataContext,
-        Find = function() return nil end,
-        Name = "ActiveRoll",
-        Type = "ls::UIWidget",
-        VisualChildrenCount = 0,
-    }
-    local layer = {
-        Type = "Noesis::Grid",
-        VisualChildrenCount = 1,
-        VisualChild = function(_, index)
-            return index == 0 and widget or nil
-        end,
-    }
-    local root = {
-        Find = function() return nil end,
-        Type = "Noesis::FrameworkElement",
-        VisualChildrenCount = 1,
-        VisualChild = function(_, index)
-            return index == 0 and layer or nil
-        end,
-    }
-    Ext = {
-        Entity = {
-            Get = function(value)
-                return value == rollEntity and rollEntity
-                    or (type(value) == "table" and value or nil)
-            end,
-            OnChange = function(componentName, callback)
-                callbacks[componentName .. "Change"] = callback
-                return 2
-            end,
-            OnCreate = function(componentName, callback)
-                callbacks[componentName .. "Create"] = callback
-                return 1
-            end,
-            OnDestroy = function(componentName, callback)
-                callbacks[componentName .. "Destroy"] = callback
-                return 3
-            end,
-        },
-        IO = { LoadFile = function() return nil end },
-        Timer = { WaitFor = function(_, callback) callback() end },
-        UI = { GetRoot = function() return root end },
-        Utils = {
-            MonotonicTime = function() return 42 end,
-            Print = function(line) output[#output + 1] = line end,
-        },
-    }
-    UiRollDiagnostics.Start({ TRACE_EVENTS = true }, {
-        GetRecord = function()
-            return {
-                action = "disarm",
-                delegationId = "17",
-                initiatorHandle = actor.handle,
-                presentationAdvantage = 1,
-                profileMode = "delegated",
-                specialistHandle = specialist.handle,
-                targetHandle = target.handle,
-            }
-        end,
-        RefreshRecord = function(record) return record end,
-    })
-    callbacks.RequestedRollCreate(rollEntity, nil, requestedRoll)
-    local trace = table.concat(output, "\n")
-    assertContains(trace, "client_requested_roll_state", "ECS roll diagnostics retained")
-    assertEqual(nil, trace:find("client_active_roll_visual_tree", 1, true),
-        "inaccessible visual tree is not traversed")
-    assertEqual(nil, trace:find("client_presentation_advantage_sync", 1, true),
-        "Lua does not mutate client presentation")
-    assertEqual("None", rollViewModel.RollAdvantageType,
-        "Lua leaves the viewmodel untouched")
-    assertEqual("None", requestedRoll.AdvantageType, "requested roll remains unmodified")
+    assertEqual(2, saveCalls, "destroyed mapping written exactly once")
 end)
 
 test("runtime tool precheck uses BG3 party inventory without consuming anything", function()
@@ -636,7 +590,7 @@ local function makeCoordinator(options)
         end,
     }
     local timers = {}
-    local diagnostics, records = recordingDiagnostics()
+    local diagnostics, records = recordingDiagnostics(options.trace)
     local coordinator = NativeInteractionCoordinator.Create({
         NATIVE_ACTION_TIMEOUT_MS = 100,
     }, {
@@ -771,6 +725,77 @@ test("specialist advantage state is published for client presentation", function
         },
     }, "changed")
     assertEqual(0, presentationStates[2].advantageType, "opposed states cancel")
+end)
+
+test("trace suppression never stops functional presentation updates", function()
+    local coordinator, _, _, _, records, _, _, presentationStates =
+        makeCoordinator({ trace = false })
+    coordinator.OnNativeRequest("disarm", "actor", "target", 21)
+    local rollEntity = entity(
+        "00000000-0000-0000-0000-000000000036",
+        "0200000200000036"
+    )
+    local requestedRoll = {
+        FixedRollBonuses = {},
+        ResolvedRollBonuses = {},
+        RollUuid = "00000000-0000-0000-0000-000000000037",
+        Roller = actor,
+        Subject = target,
+    }
+    rollEntity.RequestedRoll = requestedRoll
+    coordinator.OnRequestedRoll(rollEntity, requestedRoll)
+    for index = 1, 20 do
+        coordinator.OnRollModifiers(rollEntity, {
+            StaticModifiers = index == 20 and {
+                {
+                    Disabled = false,
+                    Modifier = { AdvantageType = "Advantage" },
+                },
+            } or {},
+        }, "changed")
+    end
+    assertEqual(20, #presentationStates,
+        "all modifier changes reach the functional bridge")
+    assertEqual(1, presentationStates[20].advantageType,
+        "late advantage changes remain functional")
+    assertEqual(nil, findRecord(records, "native_modifier_trace_suppressed"),
+        "trace-disabled runs do not maintain suppression diagnostics")
+end)
+
+test("trace-enabled suppression remains observational after its limit", function()
+    local coordinator, _, _, _, records, _, _, presentationStates =
+        makeCoordinator({ trace = true })
+    coordinator.OnNativeRequest("lockpick", "actor", "target", 22)
+    local rollEntity = entity(
+        "00000000-0000-0000-0000-000000000038",
+        "0200000200000038"
+    )
+    local requestedRoll = {
+        FixedRollBonuses = {},
+        ResolvedRollBonuses = {},
+        RollUuid = "00000000-0000-0000-0000-000000000039",
+        Roller = actor,
+        Subject = target,
+    }
+    rollEntity.RequestedRoll = requestedRoll
+    coordinator.OnRequestedRoll(rollEntity, requestedRoll)
+    for index = 1, 20 do
+        coordinator.OnRollModifiers(rollEntity, {
+            StaticModifiers = index == 20 and {
+                {
+                    Disabled = false,
+                    Modifier = { AdvantageType = "Disadvantage" },
+                },
+            } or {},
+        }, "changed")
+    end
+    assertEqual(20, #presentationStates,
+        "trace limit never suppresses functional bridge updates")
+    assertEqual(2, presentationStates[20].advantageType,
+        "late disadvantage remains functional with tracing enabled")
+    local suppressed = findRecord(records, "native_modifier_trace_suppressed")
+    assertEqual("Trace", suppressed.level, "diagnostic suppression is reported")
+    assertEqual(16, suppressed.fields.limit, "diagnostic limit")
 end)
 
 test("a specialist-owned requested roll is rejected without rewriting it", function()
@@ -1258,12 +1283,14 @@ test("native implementation preserves ownership and authoritative roll results",
         "selected bonus localized name is copied from its actual presentation viewmodel")
     assertContains(source, 'FindNoesisProperty',
         "selected bonus name is resolved through its concrete Noesis source class")
-    assertContains(source, 'targetNameProperty.contentType',
-        "source and target modifier names require the same reflected value type")
-    assertContains(source, 'name_binding_result=',
-        "reflection name-binding failures remain diagnosable from trace")
-    assertContains(source, 'name_binding_value=',
-        "the exact selected localized-name payload is traced")
+    assertContains(source, 'FindVmRollModifierNameProperty',
+        "the target modifier name property is cached by reflected class")
+    assertContains(source, 'FindSourceNameProperty',
+        "source modifier name properties are cached by reflected class")
+    assertEqual(nil, source:find('name_binding_result=', 1, true),
+        "hot-path name binding no longer constructs diagnostic result strings")
+    assertEqual(nil, source:find('name_binding_value=', 1, true),
+        "hot-path localized names are not hex-encoded for diagnostics")
     local selectedNameOffset = assert(source:find(
         "viewModel, selectedViewModel", 1, true
     ), "selected viewmodel name lookup")
@@ -1387,10 +1414,12 @@ test("native implementation preserves ownership and authoritative roll results",
         "advantage-source preservation remains isolated from roll bonuses")
     assertContains(source, 'MatchClientPresentationLease',
         "destroyed RequestedRoll presentation survives by exact roll UUID")
-    assertContains(source, 'native_client_roll_phase',
-        "post-result phase commands are traced")
-    assertContains(source, 'native_client_modifier_animation',
-        "modifier animation deltas are traced")
+    assertEqual(nil, source:find('ClientRollPhaseMidHook', 1, true),
+        "production does not install the trace-only phase detour")
+    assertEqual(nil, source:find('ClientModifierAnimationStartMidHook', 1, true),
+        "production does not install the trace-only animation-start detour")
+    assertEqual(nil, source:find('ClientModifierAnimationEndMidHook', 1, true),
+        "production does not install the trace-only animation-end detour")
     assertContains(source, 'kMaximumClientPresentationLeases = 64',
         "client presentation lease cache is bounded")
     assertContains(source, 'kSelectedBoostVmDiceTypeSetOffset = 0xe0',
@@ -1464,8 +1493,8 @@ test("v2 bootstrap has no custom roll, completion, tool, or UseFinished path", f
     local settingsFile = assert(io.open(luaRoot .. "Settings.lua", "rb"))
     local settingsSource = settingsFile:read("*a")
     settingsFile:close()
-    assertContains(settingsSource, "TRACE_EVENTS = true",
-        "development sessions start with tracing enabled")
+    assertContains(settingsSource, "TRACE_EVENTS = false",
+        "production sessions start with tracing disabled")
 end)
 
 if failed > 0 then

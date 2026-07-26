@@ -219,6 +219,13 @@ function NativePresentationBridge.Start(settings)
         if record == nil or record.rollUuid == nil then
             return nil
         end
+        local previous = clientRecords[record.delegationId]
+        if previous ~= nil and previous.rollUuid == record.rollUuid then
+            record.initiatorHandle = previous.initiatorHandle
+            record.specialistHandle = previous.specialistHandle
+            record.targetHandle = previous.targetHandle
+            return record
+        end
         local initiatorHandle = entityHandle(safeField(component, "Roller"))
         local targetHandle = entityHandle(safeField(component, "Subject"))
         local specialistHandle = entityHandle(record.specialistUuid)
@@ -245,7 +252,6 @@ function NativePresentationBridge.Start(settings)
             specialistHandle = specialistHandle:lower(),
             targetHandle = targetHandle:lower(),
         }
-        local previous = clientRecords[record.delegationId]
         clientRecords[record.delegationId] = mapped
         if previous == nil
             or previous.rollUuid ~= mapped.rollUuid
@@ -334,10 +340,8 @@ function NativePresentationBridge.Start(settings)
 
     local function protected(event, callback)
         return function(...)
-            local arguments = { ... }
-            local ok, errorMessage = xpcall(function()
-                callback(table.unpack(arguments))
-            end, debug.traceback)
+            local ok, errorMessage = xpcall(
+                callback, debug.traceback, ...)
             if not ok then
                 write(event, { error = errorMessage })
             end

@@ -19,6 +19,7 @@ $noticesPath = Join-Path $root 'THIRD_PARTY_NOTICES.txt'
 $nativeCmakePath = Join-Path $root 'native\CMakeLists.txt'
 $nativeHeaderPath = Join-Path $root 'native\include\BridgeProtocol.h'
 $nativeSourcePath = Join-Path $root 'native\src\BestOfHandsNative.cpp'
+$nativeBridgePath = Join-Path $moduleRoot 'ScriptExtender\Lua\Server\NativeBridge.lua'
 
 $requiredFiles = @(
     $metaPath,
@@ -33,7 +34,8 @@ $requiredFiles = @(
     $noticesPath,
     $nativeCmakePath,
     $nativeHeaderPath,
-    $nativeSourcePath
+    $nativeSourcePath,
+    $nativeBridgePath
 )
 foreach ($path in $requiredFiles) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
@@ -136,7 +138,6 @@ $expectedPackageFiles = @(
     'Mods/BestOfHands/ScriptExtender/Lua/BootstrapClient.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/BootstrapServer.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Client/NativePresentationBridge.lua',
-    'Mods/BestOfHands/ScriptExtender/Lua/Client/UiRollDiagnostics.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/LegacyAssistanceCleanup.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/Diagnostics.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/Init.lua',
@@ -277,13 +278,10 @@ if ($coordinatorText.Contains('native_roll_component_canceled')) {
 
 $clientBootstrapPath = Join-Path $moduleRoot 'ScriptExtender\Lua\BootstrapClient.lua'
 $clientPresentationPath = Join-Path $moduleRoot 'ScriptExtender\Lua\Client\NativePresentationBridge.lua'
-$clientDiagnosticsPath = Join-Path $moduleRoot 'ScriptExtender\Lua\Client\UiRollDiagnostics.lua'
 $clientBootstrapText = Get-Content -LiteralPath $clientBootstrapPath -Raw
 $clientPresentationText = Get-Content -LiteralPath $clientPresentationPath -Raw
-$clientDiagnosticsText = Get-Content -LiteralPath $clientDiagnosticsPath -Raw
 foreach ($requiredClientBootstrap in @(
-    'Client/NativePresentationBridge.lua',
-    'Client/UiRollDiagnostics.lua'
+    'Client/NativePresentationBridge.lua'
 )) {
     if (-not $clientBootstrapText.Contains($requiredClientBootstrap)) {
         throw "Client bootstrap is missing '$requiredClientBootstrap'."
@@ -299,24 +297,6 @@ foreach ($requiredClientPresentationSurface in @(
 )) {
     if (-not $clientPresentationText.Contains($requiredClientPresentationSurface)) {
         throw "Client native presentation bridge is missing '$requiredClientPresentationSurface'."
-    }
-}
-foreach ($requiredClientDiagnosticSurface in @(
-    'client_requested_roll_state',
-    'client_roll_modifiers',
-    'metadata_roll_bonus',
-    'profile_matches_specialist',
-    'result_discarded_dice_total',
-    'native_client_roll_presentation',
-    'native_client_roll_start',
-    'native_client_roll_aggregate',
-    'native_client_roll_result',
-    'native_client_roll_finalize',
-    'native_client_roll_phase',
-    'native_client_modifier_animation'
-)) {
-    if (-not $clientDiagnosticsText.Contains($requiredClientDiagnosticSurface)) {
-        throw "Client roll UI diagnostic surface is missing '$requiredClientDiagnosticSurface'."
     }
 }
 if ($clientPresentationText.Contains('component.AdvantageType =')) {
@@ -356,9 +336,6 @@ foreach ($requiredNativeMarker in @(
     'ClientRollStartMidHook',
     'ClientRollResultMidHook',
     'ClientRollFinalizeMidHook',
-    'ClientRollPhaseMidHook',
-    'ClientModifierAnimationStartMidHook',
-    'ClientModifierAnimationEndMidHook',
     'kProfileUiSignature',
     'kProfileMathSignature',
     'kClientRollPresentationSignature',
@@ -368,9 +345,6 @@ foreach ($requiredNativeMarker in @(
     'kClientRollPostDispatchSignature',
     'kClientRollResultSignature',
     'kClientRollFinalizeSignature',
-    'kClientRollPhaseSignature',
-    'kClientModifierAnimationStartSignature',
-    'kClientModifierAnimationEndSignature',
     'native_profile_source_selected',
     'native_client_roll_presentation_selected',
     'native_client_roll_aggregate_guard',
@@ -380,14 +354,11 @@ foreach ($requiredNativeMarker in @(
     'native_client_roll_selected_bonus_restored',
     'native_client_roll_result_consistency',
     'native_client_roll_finalize_consistency',
-    'native_client_roll_phase',
-    'native_client_modifier_animation',
     'MatchClientPresentationLease',
     'kMaximumClientPresentationLeases',
     'client_roll_aggregate,client_roll_start,',
     'client_roll_payload_ready,client_roll_post_dispatch,',
-    'client_roll_finalize,client_roll_phase',
-    'client_modifier_animation_start,client_modifier_animation_end',
+    'client_roll_finalize',
     'result_numeric_values_unchanged=1',
     'kActiveRollFallbackOffset',
     'FreezeClientPresentationAdvantage',
@@ -400,11 +371,50 @@ foreach ($requiredNativeMarker in @(
         throw "Native source is missing required fail-closed marker '$requiredNativeMarker'."
     }
 }
+foreach ($removedProductionTraceHook in @(
+    'ClientRollPhaseMidHook',
+    'ClientModifierAnimationStartMidHook',
+    'ClientModifierAnimationEndMidHook'
+)) {
+    if ($nativeSource.Contains($removedProductionTraceHook)) {
+        throw "Production native source retains trace-only hook '$removedProductionTraceHook'."
+    }
+}
+if ($nativeSource -notmatch 'constexpr bool TraceEnabled\(\) noexcept\s*\{\s*return false;') {
+    throw 'Production native tracing must be compile-time disabled.'
+}
 if ($nativeSource -match 'PatchDisarm|PatchLockpick|PatchRequestedRoll|RouteFinishedEvent') {
     throw 'Native v2 must not mutate action-specific disarm or lockpick ownership state.'
 }
 if ($nativeSource -notmatch 'safetyhook::create_mid') {
     throw 'Native v2 must install validated mid-function profile hooks.'
+}
+
+$reportedHooksMatch = [regex]::Match(
+    $nativeSource,
+    'constexpr std::string_view kReportedHooks\s*=\s*(?<body>[\s\S]*?);'
+)
+$requiredHooksSource = Get-Content -LiteralPath $nativeBridgePath -Raw
+$requiredHooksMatch = [regex]::Match(
+    $requiredHooksSource,
+    'local REQUIRED_HOOKS\s*=\s*(?<body>[\s\S]*?)\r?\n\r?\nNativeBridge'
+)
+if (-not $reportedHooksMatch.Success -or -not $requiredHooksMatch.Success) {
+    throw 'Could not parse the native/Lua hook handshake manifests.'
+}
+$reportedHooks = ([regex]::Matches(
+    $reportedHooksMatch.Groups['body'].Value,
+    '"([^"]*)"'
+) | ForEach-Object { $_.Groups[1].Value }) -join ''
+$requiredHooks = ([regex]::Matches(
+    $requiredHooksMatch.Groups['body'].Value,
+    '"([^"]*)"'
+) | ForEach-Object { $_.Groups[1].Value }) -join ''
+if ($reportedHooks -ne $requiredHooks) {
+    throw "Native and Lua hook handshake manifests differ.`nNative: $reportedHooks`nLua: $requiredHooks"
+}
+if ($reportedHooks.Contains('client_roll_bonus_preserve_selected')) {
+    throw 'Production hook manifest retains the retired observation-only selected-modifier hook.'
 }
 
 $license = Get-Content -LiteralPath $licensePath -Raw

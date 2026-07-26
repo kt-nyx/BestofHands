@@ -60,7 +60,6 @@ PAK / server Lua
 
 PAK / client Lua
   NativePresentationBridge.lua -> roll UUID -> client specialist handle
-  UiRollDiagnostics.lua        -> replicated RequestedRoll/RollModifiers trace
 
 Native DLL
   build guard -> exact server UI/math, client builder, and roll-start signatures
@@ -74,7 +73,7 @@ Native DLL
               -> client DCActiveRoll builder
                               -> transient AdvantageType source = specialist
                               -> bounded exact-UUID presentation lease
-                              -> roll-start boundary reassertion and trace
+                              -> roll-start boundary reassertion
                               -> vanilla viewmodel and animation construction
                               -> scoped client presentation fields only
 ```
@@ -94,6 +93,7 @@ The native log is `%LOCALAPPDATA%\Larian Studios\Baldur's Gate 3\Script Extender
 native/
   CMakeLists.txt
   include/BridgeProtocol.h
+  include/FixedSnapshot.h
   src/BestOfHandsNative.cpp
   tests/BridgeProtocolTests.cpp
 src/BestOfHands/Mods/BestOfHands/
@@ -105,7 +105,6 @@ src/BestOfHands/Mods/BestOfHands/
       BootstrapServer.lua
       Client/
         NativePresentationBridge.lua
-        UiRollDiagnostics.lua
       Server/
         Diagnostics.lua
         Init.lua
@@ -137,7 +136,7 @@ Do not change the module UUID during ordinary development.
 - Keep native mutation guarded by a complete executable signature set.
 - Treat uncertain state as no delegation. Vanilla behavior must remain available.
 - Keep Eternal behavior out of Best of Hands. Compatibility work may observe or cooperate with their stable contracts but must not reproduce their ownership logic.
-- Keep trace collection observational and bounded so logging cannot become part of gameplay timing. Any presentation-only synchronization must remain separately guarded and must never write replicated gameplay state.
+- Keep production diagnostics outside the click-to-roll hot path. Any presentation-only synchronization must remain separately guarded and must never write replicated gameplay state.
 
 ## Prerequisites
 
@@ -205,51 +204,21 @@ The scripts enforce exact allowlists, extract and byte-verify the PAK, verify th
 
 ## Diagnostics
 
-Detailed tracing is disabled by default so its snapshots and formatting do not
-affect normal roll latency. Enable Script Extender console/runtime logging in
-`bin\ScriptExtenderSettings.json`, then use:
+Production builds compile native hook tracing out entirely and do not load the
+replicated-roll UI observer. This guarantees that enabling a console setting
+cannot accidentally restore native trace work on the click-to-roll path.
+`!best_of_hands_status` and the normal INFO/WARN/ERROR records remain
+available. `!best_of_hands_trace on` enables the lighter Script Extender
+server/client bridge traces only.
 
-```text
-!best_of_hands_trace on
-!best_of_hands_status
-!best_of_hands_trace off
-```
+The full native/UI instrumentation is preserved on
+`dev/native-hook-tracing`. Use that branch for a diagnostic build when a
+runtime investigation needs hook-level snapshots, phase events, modifier
+animation deltas, or the replicated `RequestedRoll` observer. Rebase or merge
+the production fix under investigation into that branch before building it;
+do not publish that branch as the normal release.
 
-With trace enabled, each delegated attempt has a `delegation_id` across both logs. Useful expected records are:
-
-```text
-[best_of_hands]|INFO|native_bridge_ready|...
-[best_of_hands]|INFO|native_delegation_armed|...
-[best_of_hands]|INFO|native_roll_correlated|...
-[best_of_hands_client]|TRACE|client_profile_mapping_written|...
-[best_of_hands_native]|TRACE|native_profile_source_selected|stage=ui|profile_scope=server|...|component_owner_unchanged=1
-[best_of_hands_native]|TRACE|native_profile_source_selected|stage=math|...|component_owner_unchanged=1
-[best_of_hands_native]|TRACE|native_client_roll_presentation_selected|profile_scope=client|...|requested_advantage=0|presentation_advantage=1|corrected=1|component_owner_unchanged=1
-[best_of_hands_native]|TRACE|native_client_roll_aggregate_guard|...|computed_advantage=...|expected_advantage=1|vanilla_notification_preserved=1|component_owner_unchanged=1
-[best_of_hands_native]|TRACE|native_client_roll_start_boundary|...|roll_state=1|observed_advantage=...|expected_advantage=1|presentation_frozen=1|advantage_after=1|component_owner_unchanged=1
-[best_of_hands_native]|TRACE|native_client_roll_result_consistency|...|result_natural=...|result_discarded=...|result_modifier=...|fallback_before=...|fallback_after=0|displayed_value_before=...|result_numeric_values_unchanged=1|component_owner_unchanged=1
-[best_of_hands_native]|TRACE|native_client_roll_bonus_viewmodels_retained|...|collection_entries=...|eligible_dice_viewmodels=...|newly_retained=...|retention_source=selected_boost_modifier_list|component_owner_unchanged=1
-[best_of_hands_native]|TRACE|native_client_roll_bonus_direct_handoff_armed|...|selected_present_count=...|direct_handoff_ready=1|pre_roll_synthetic_rows=0|binding_timing=after_request_payload_before_dispatch|request_payload_unchanged=1
-[best_of_hands_native]|TRACE|native_client_roll_selected_bonus_restored|...|stage=post_dispatch|restored_count=...|selected_wrapper_identity_preserved=1|request_already_dispatched=1
-[best_of_hands_native]|TRACE|native_client_roll_selected_bonus_restored|...|stage=pre_reconcile|restored_count=...|selected_wrapper_identity_preserved=1|request_already_dispatched=1
-[best_of_hands_native]|TRACE|native_client_roll_bonus_presentation_bound|...|authoritative_dice_bonus_count=...|direct_selected_targets=...|selected_authoritative_count=...|pre_roll_synthetic_rows=0|authoritative_result_unchanged=1
-[best_of_hands_native]|TRACE|native_client_roll_bonus_reconcile_started|...|resolved_bonus_count=...|component_owner_unchanged=1
-[best_of_hands_native]|TRACE|native_client_roll_bonus_reconcile_completed|...|already_represented=...|restored=...|unresolved=...
-[best_of_hands_native]|TRACE|native_client_roll_finalize_consistency|...|modifiers_matched_before=...|fallback_before_finalize=0|displayed_value_before_finalize=...|immediate_total=...|normal_animation_after=1|replicated_result_validated=1|result_numeric_values_unchanged=1
-[best_of_hands_native]|TRACE|native_client_roll_phase|...|phase=...|roll_state_before=...|displayed_value_before=...|fallback_before=...|immediate_total=...
-[best_of_hands_native]|TRACE|native_client_modifier_animation|...|displayed_value_before=...|displayed_value_after=...|displayed_delta=...|fallback_before=...|fallback_after=...
-[best_of_hands]|INFO|native_modifiers_observed|...
-[best_of_hands]|TRACE|native_requested_roll_state|...|natural_roll=...|discarded_dice_total=...
-[best_of_hands_client]|TRACE|client_requested_roll_state|...|profile_mode=...
-[best_of_hands_client]|TRACE|client_roll_modifiers|...|profile_mode=...
-[best_of_hands]|TRACE|native_roll_bonus_spell_request|...|target_matches_initiator=...|target_matches_specialist=...
-[best_of_hands]|INFO|native_delegated_roll_result|...
-[best_of_hands]|TRACE|native_finished_event_correlated|...|advantage=...|disadvantage=...|natural_roll=...|owner_matches_initiator=1
-```
-
-Each native server UI/math selection is capped at eight trace records per stage and delegation; client presentation selections are capped at twelve, aggregate guards at sixteen, and presentation leases at 64 exact roll UUIDs per native session. `native_finished_event_owner_invalid`, `native_roll_correlation_failed`, `native_bridge_lost`, a native signature/hook failure, or a visible disabled warning means the attempt was rejected or the session failed closed. No custom fallback should run.
-
-Requested-roll state is captured at creation, replicated changes, and destruction. Modifier snapshots are captured at creation and replicated changes, including their outer spell/item/source groups. Client Lua records the correlated replicated `RequestedRoll`, roll results, modifier groups, and bridge lifecycle but deliberately does not traverse or mutate the Noesis visual tree. The native client trace records the requested and specialist presentation advantage, whether correction was required, whether the active bridge or retained lease supplied it, client component and viewmodel addresses, and the unchanged ownership invariant. `native_client_roll_aggregate_guard` records the later value reconstructed by BG3's modifier-viewmodel pass; `native_client_roll_start_boundary` freezes the final selected specialist presentation when the user starts the roll; `native_client_roll_result_consistency` records both dice and the modifier total at the exact result-handler branch which selects vanilla animation versus fallback presentation. When tracing is enabled, a direct specialist action is recorded as `profile_mode=vanilla_reference`; a delegated action is `profile_mode=delegated`. Both include roll metadata, advantage/disadvantage state, discarded dice, reroll arrays, and modifier groups for an exact comparison.
+## Native presentation notes
 
 `native_client_roll_presentation_selected` is a presentation-only substitution. It runs only at the signature-validated instruction where `DCActiveRoll` copies the replicated advantage byte into `Roll.RollAdvantageType`, and only for a correlated client-scope delegated roll with a concrete specialist advantage value. It replaces the low byte of the local register before BG3's existing change notification and viewmodel construction. `native_client_roll_aggregate_guard` covers the later shared modifier aggregation that otherwise overwrites that value; it replaces the aggregate's local result before the same vanilla compare/store/notification sequence. `native_client_roll_start_boundary` freezes the final selected specialist presentation when the user starts the roll. `native_client_roll_result_consistency` runs before BG3 chooses whether to publish the natural die or the already-summed result to the visible-value property. For an exact delegated lease with a valid result, it clears only the client `DCActiveRoll` fallback flag, supplies the frozen specialist advantage to the local comparison and client presentation fields, and leaves every numeric result value unchanged.
 
@@ -257,9 +226,9 @@ The three `native_client_roll_bonus_reconcile_*` hooks bracket BG3's own dynamic
 
 `DCActiveRoll.SelectedBoostModifierList` contains `VMBoostModifier` objects, not the `VMRollModifier` objects stored in `Roll.Modifiers`; their reflected layouts and roles are different. `VMBoostModifier` exposes the selected source viewmodel at `+0x48`, its `DiceTypeSet` at `+0xE0`, `Owner` at `+0x100`, and dynamic identity at `+0x110`. `VMRollModifier` stores `DiceTypeSet` at `+0x110`, `BoostType` at `+0x130`, `SourceType` at `+0x148`, and the retained `SourceVM` that supplies the native label/icon at `+0x1C8`. The function-entry click hook retains the selected wrapper for one roll. Once the detached request payload is complete, a signature-guarded inline hook suppresses only BG3's attempted removal of that exact wrapper from that exact active-roll collection, preventing the pre-roll card from flickering out while the authoritative result is in flight. No result-facing placeholder is added to `Roll.Modifiers`. Once the authoritative dice value arrives, the reconciler writes it directly to the exact selected-wrapper value object read by BG3's own modifier-animation callback (`+0xB0`). The selected card therefore remains the single visible and numeric animation path from selection through resolution. If that direct handoff cannot be proven, the code removes the selected wrapper before falling back to an authoritative result-facing `VMRollModifier`, so presentation may degrade but the bonus cannot double-apply.
 
-BG3's unmodified result reconciler still owns the authoritative `ResolvedRollBonus` and its already-resolved value. The direct handoff accepts only a positive authoritative result and does not roll or recalculate a bonus. Fixed modifiers, advantage sources, ordinary rolls, pre-roll deselection, early dispatch exits, and non-dice modifiers remain untouched. Multiple same-shaped cached bonuses fail open rather than risk an incorrect presentation. The completion trace records `direct_selected_targets`, `selected_authoritative_count`, `pre_roll_synthetic_rows`, `selected_path_fallbacks`, and `single_numeric_presentation_path`, in addition to the authoritative-value and source-viewmodel bindings. None of these hooks changes the result payload, server modifier component, roller, subject, caster, resource owner, or success/failure outcome. `native_client_roll_finalize_consistency` prevents other initiator-owned presentation mismatches from re-enabling the immediate-total fallback. Direct specialist rolls, persistent ownership, and server math remain untouched.
+BG3's unmodified result reconciler still owns the authoritative `ResolvedRollBonus` and its already-resolved value. The direct handoff accepts only a positive authoritative result and does not roll or recalculate a bonus. Fixed modifiers, advantage sources, ordinary rolls, pre-roll deselection, early dispatch exits, and non-dice modifiers remain untouched. Multiple same-shaped cached bonuses fail open rather than risk an incorrect presentation. The diagnostic branch can record `direct_selected_targets`, `selected_authoritative_count`, `pre_roll_synthetic_rows`, `selected_path_fallbacks`, and `single_numeric_presentation_path`, in addition to the authoritative-value and source-viewmodel bindings. None of these hooks changes the result payload, server modifier component, roller, subject, caster, resource owner, or success/failure outcome. The roll-finalization consistency hook prevents other initiator-owned presentation mismatches from re-enabling the immediate-total fallback. Direct specialist rolls, persistent ownership, and server math remain untouched.
 
-Server destruction is observational because it precedes BG3's later `RollResult` and post-roll UI path. `RequestedRoll.Canceled` is also observed on ordinary completed outcomes and never owns server cleanup. Client Lua removes its file mapping when the replicated `RequestedRoll` is destroyed, but the DLL retains the already-validated presentation selection by exact roll UUID for the remainder of the native session; its 64-entry least-recently-used bound prevents unbounded growth, and a different roll UUID, initiator, or target cannot match it. A canceled `RollResult` (`result=2`) removes the authoritative server profile mapping on the next tick; ordinary failures (`result=0`) remain mapped for native Inspiration and lockpick Try Again. Lifecycle and modifier traces are bounded per roll.
+Server destruction is observational because it precedes BG3's later `RollResult` and post-roll UI path. `RequestedRoll.Canceled` is also observed on ordinary completed outcomes and never owns server cleanup. Client Lua removes its file mapping when the replicated `RequestedRoll` is destroyed, but the DLL retains the already-validated presentation selection by exact roll UUID for the remainder of the native session; its 64-entry least-recently-used bound prevents unbounded growth, and a different roll UUID, initiator, or target cannot match it. A canceled `RollResult` (`result=2`) removes the authoritative server profile mapping on the next tick; ordinary failures (`result=0`) remain mapped for native Inspiration and lockpick Try Again. Diagnostic-branch lifecycle and modifier traces are bounded per roll.
 
 `native_roll_bonus_spell_request` records the spell request, caster/source, targets, and whether the accepted request targeted the initiator or specialist. An initiator-targeted delegated bonus is rewritten once to the specialist and emits `native_roll_bonus_retargeted`; caster, originator, spell identity, and resource ownership are unchanged.
 

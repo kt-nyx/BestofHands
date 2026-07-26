@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Unlicense
 #pragma once
 
+#include <array>
 #include <charconv>
 #include <cstdint>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -64,20 +66,28 @@ inline bool ParseUnsigned(std::string_view text, int base, std::uint64_t& value)
     return result.ec == std::errc{} && result.ptr == text.data() + text.size();
 }
 
-inline std::vector<std::string_view> Split(std::string_view value, char delimiter)
+template <std::size_t Count>
+inline std::optional<std::array<std::string_view, Count>> SplitExact(
+    std::string_view value, char delimiter)
 {
-    std::vector<std::string_view> parts;
+    std::array<std::string_view, Count> parts{};
+    std::size_t index = 0;
     std::size_t start = 0;
     while (start <= value.size()) {
+        if (index == Count) {
+            return {};
+        }
         auto const end = value.find(delimiter, start);
         if (end == std::string_view::npos) {
-            parts.emplace_back(value.substr(start));
-            break;
+            parts[index++] = value.substr(start);
+            return index == Count
+                ? std::optional{parts}
+                : std::nullopt;
         }
-        parts.emplace_back(value.substr(start, end - start));
+        parts[index++] = value.substr(start, end - start);
         start = end + 1;
     }
-    return parts;
+    return {};
 }
 
 inline BridgeDocument ParseBridgeDocument(std::string_view text)
@@ -106,12 +116,15 @@ inline BridgeDocument ParseBridgeDocument(std::string_view text)
         } else if (line.starts_with("trace=")) {
             document.trace = line.substr(6) == "1";
         } else if (line.starts_with("record=")) {
-            auto const fields = Split(line.substr(7), '\t');
-            if (fields.size() != 12) {
+            auto const parsedFields =
+                SplitExact<12>(line.substr(7), '\t');
+            if (!parsedFields.has_value()) {
                 return {};
             }
+            auto const& fields = *parsedFields;
             ActionRecord record;
-            if (!ParseUnsigned(fields[0], 10, record.id)) {
+            if (!ParseUnsigned(fields[0], 10, record.id)
+                || record.id == 0) {
                 return {};
             }
             if (fields[1] == "lockpick") {
@@ -186,10 +199,12 @@ inline ClientBridgeDocument ParseClientBridgeDocument(std::string_view text)
         } else if (line.starts_with("trace=")) {
             document.trace = line.substr(6) == "1";
         } else if (line.starts_with("record=")) {
-            auto const fields = Split(line.substr(7), '\t');
-            if (fields.size() != 5) {
+            auto const parsedFields =
+                SplitExact<5>(line.substr(7), '\t');
+            if (!parsedFields.has_value()) {
                 return {};
             }
+            auto const& fields = *parsedFields;
             ClientActionRecord record;
             if (!ParseUnsigned(fields[0], 10, record.id)
                 || fields[1].empty()

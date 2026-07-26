@@ -6,6 +6,9 @@ project(BestOfHandsNative VERSION 2.0.0 LANGUAGES CXX)
 
 option(BEST_OF_HANDS_BUILD_TESTS "Build native unit tests" ON)
 
+include(CheckIPOSupported)
+check_ipo_supported(RESULT BEST_OF_HANDS_IPO_SUPPORTED)
+
 set(BUILD_SHARED_LIBS OFF)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
@@ -43,6 +46,7 @@ if(MSVC)
 endif()
 
 set_target_properties(BestOfHandsNative PROPERTIES
+    INTERPROCEDURAL_OPTIMIZATION_RELEASE "${BEST_OF_HANDS_IPO_SUPPORTED}"
     OUTPUT_NAME "BestOfHandsNative"
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/NativeMods"
@@ -60,7 +64,11 @@ if(BEST_OF_HANDS_BUILD_TESTS)
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
     )
     if(MSVC)
-        target_compile_options(BestOfHandsNativeTests PRIVATE /W4 /WX /permissive- /utf-8 /EHsc)
+        # Release builds define NDEBUG by default. Keep the assertion-based
+        # protocol tests active in the same Release configuration we ship.
+        target_compile_options(BestOfHandsNativeTests PRIVATE /UNDEBUG /W4 /WX /permissive- /utf-8 /EHsc)
+    else()
+        target_compile_options(BestOfHandsNativeTests PRIVATE -UNDEBUG)
     endif()
     add_test(NAME BestOfHandsNativeTests COMMAND BestOfHandsNativeTests)
 endif()

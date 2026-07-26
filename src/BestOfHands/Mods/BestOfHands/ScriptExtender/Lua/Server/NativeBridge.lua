@@ -16,14 +16,12 @@ local REQUIRED_HOOKS =
     .. ",client_roll_bonus_preserve_missing"
     .. ",client_advantage_preserve_matched"
     .. ",client_advantage_preserve_missing"
-    .. ",client_roll_bonus_preserve_selected"
     .. ",client_roll_bonus_keep_selected"
     .. ",client_roll_bonus_renderer_add"
     .. ",client_roll_bonus_retain_selected"
     .. ",client_roll_bonus_presentation_transfer"
     .. ",client_roll_bonus_reconcile_end"
-    .. ",client_roll_finalize,client_roll_phase"
-    .. ",client_modifier_animation_start,client_modifier_animation_end"
+    .. ",client_roll_finalize"
 
 NativeBridge.REQUIRED_HOOKS = REQUIRED_HOOKS
 
@@ -297,19 +295,29 @@ function NativeBridge.Create(settings, api, diagnostics)
     end
 
     function instance.SetRoll(id, roll, rollUuid)
-        if not ready or not nativeStatusIsCurrent() then
+        if not ready then
             return false, "native_bridge_not_ready"
         end
         local record = records[id]
         if record == nil then
             return false, "native_record_unavailable"
         end
+        local stableRollUuid = tostring(rollUuid or "0")
+        if stableRollUuid ~= "0"
+            and record.rollUuid == stableRollUuid
+            and record.rollHandle ~= nil
+            and record.rollHandle ~= "0" then
+            return true, nil, record.rollHandle
+        end
+        if not nativeStatusIsCurrent() then
+            return false, "native_bridge_not_ready"
+        end
         local rollHandle = entityHandle(roll)
         if rollHandle == nil then
             return false, "roll_handle_unavailable"
         end
         record.rollHandle = rollHandle
-        record.rollUuid = tostring(rollUuid or "0")
+        record.rollUuid = stableRollUuid
         if not save() then
             return false, "native_bridge_write_failed"
         end
@@ -317,7 +325,7 @@ function NativeBridge.Create(settings, api, diagnostics)
     end
 
     function instance.SetPresentation(id, advantageType)
-        if not ready or not nativeStatusIsCurrent() then
+        if not ready then
             return false, "native_bridge_not_ready"
         end
         local record = records[id]
@@ -330,6 +338,9 @@ function NativeBridge.Create(settings, api, diagnostics)
         end
         if record.presentationAdvantage == value then
             return true, nil
+        end
+        if not nativeStatusIsCurrent() then
+            return false, "native_bridge_not_ready"
         end
         record.presentationAdvantage = value
         if not save() then

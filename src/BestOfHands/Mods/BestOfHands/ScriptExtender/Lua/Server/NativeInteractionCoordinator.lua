@@ -853,26 +853,34 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
         if record == nil then
             return false
         end
-        record.modifierTraceCount = (record.modifierTraceCount or 0) + 1
-        if record.modifierTraceCount > 16 then
-            if record.modifierTraceCount == 17 then
-                diagnostics.Trace("native_modifier_trace_suppressed", {
-                    action = record.action,
-                    delegation_id = record.delegationId,
-                    limit = 16,
-                    roll_entity = tostring(entity),
-                })
+        local tracing = traceEnabled()
+        local traceThisChange = tracing
+        if tracing then
+            record.modifierTraceCount = (record.modifierTraceCount or 0) + 1
+            if record.modifierTraceCount > 16 then
+                if record.modifierTraceCount == 17 then
+                    diagnostics.Trace("native_modifier_trace_suppressed", {
+                        action = record.action,
+                        delegation_id = record.delegationId,
+                        limit = 16,
+                        roll_entity = tostring(entity),
+                    })
+                end
+                traceThisChange = false
             end
-            return true
         end
         local requestedRoll = nil
-        pcall(function()
-            local rollEntity = Ext.Entity.Get(entity)
-            requestedRoll = rollEntity and rollEntity.RequestedRoll or nil
-        end)
-        local observedActor = requestedRoll and entityGuid(requestedRoll.Roller) or nil
-        local observedDuringNativeCall = sameObject(observedActor, record.specialist)
-            or sameObject(observedActor, entityGuid(record.specialist))
+        local observedActor = nil
+        local observedDuringNativeCall = false
+        if traceThisChange or not record.modifiersObservedLogged then
+            pcall(function()
+                local rollEntity = Ext.Entity.Get(entity)
+                requestedRoll = rollEntity and rollEntity.RequestedRoll or nil
+            end)
+            observedActor = requestedRoll and entityGuid(requestedRoll.Roller) or nil
+            observedDuringNativeCall = sameObject(observedActor, record.specialist)
+                or sameObject(observedActor, entityGuid(record.specialist))
+        end
         local presentationAdvantage = aggregateAdvantageType(component)
         if not record.isReference then
             local written, reason = bridge.SetPresentation(
@@ -914,7 +922,7 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
                 target = record.target,
             })
         end
-        if traceEnabled() then
+        if traceThisChange then
             for index, bonus in pairs(
                 requestedRoll and requestedRoll.FixedRollBonuses or {}
             ) do

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Unlicense
 #include "BridgeProtocol.h"
+#include "FixedSnapshot.h"
 #include "ProfileRouting.h"
+#include "SafeMemory.h"
 
 #include <Windows.h>
 #include <ShlObj.h>
@@ -15,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
@@ -31,6 +34,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
+using boh::FixedSnapshot;
 using SystemUpdateProc = void (*)(void* system, void* world, void* gameTime);
 using ClientModifierCollectionAddProc = void (*)(void*, void*);
 using ClientModifierCollectionRemoveProc = bool (*)(void*, void*);
@@ -156,14 +160,12 @@ constexpr std::string_view kReportedHooks =
     "client_roll_bonus_preserve_missing,"
     "client_advantage_preserve_matched,"
     "client_advantage_preserve_missing,"
-    "client_roll_bonus_preserve_selected,"
     "client_roll_bonus_keep_selected,"
     "client_roll_bonus_renderer_add,"
     "client_roll_bonus_retain_selected,"
     "client_roll_bonus_presentation_transfer,"
     "client_roll_bonus_reconcile_end,"
-    "client_roll_finalize,client_roll_phase,"
-    "client_modifier_animation_start,client_modifier_animation_end";
+    "client_roll_finalize";
 
 constexpr std::array<std::byte, 11> kProfileUiSignature{
     std::byte{0x4c}, std::byte{0x89}, std::byte{0x7d}, std::byte{0x10},
@@ -326,27 +328,6 @@ kClientAdvantagePreserveMissingSignature{
 };
 // A roll-UI-selected modifier is represented by BG3's original icon-bearing
 // dynamic viewmodel. After the server retargets the modifier spell from the
-// initiator to the specialist, an intermediate replicated ModifiersComponent
-// can omit that original identity from DynamicModifiers2. DCActiveRoll treats
-// the omission leaves the original icon-bearing viewmodel hidden in its nested
-// source group, so it never reaches the active modifier collection before the
-// authoritative ResolvedRollBonus arrives. This site is the nested promotion
-// path immediately before BG3 searches DynamicModifiers2:
-//   rbx = hidden nested dynamic modifier viewmodel
-//   r15 = DCActiveRoll + b98h, its active viewmodel collection
-//   r13 = incoming ModifiersComponent
-// For an exact delegated roll, promoting an enabled selected dice viewmodel
-// whose original identity is absent uses BG3's own visibility notification and
-// collection-add routine. The real component remains untouched, while the
-// result reconciler can bind the authoritative bonus to the original viewmodel.
-constexpr std::array<std::byte, 15>
-kClientRollBonusPreserveSelectedSignature{
-    std::byte{0x4d}, std::byte{0x8b}, std::byte{0x45},
-    std::byte{0x30}, std::byte{0x4d}, std::byte{0x85},
-    std::byte{0xc0}, std::byte{0x74}, std::byte{0x6c},
-    std::byte{0x49}, std::byte{0x63}, std::byte{0x45},
-    std::byte{0x3c}, std::byte{0x48}, std::byte{0x8d},
-};
 // The native static-modifier renderer has completely populated one
 // VMRollModifier at this site and is about to append it to VMRoll.Modifiers:
 //   rsi = VMRollModifier
@@ -417,30 +398,6 @@ constexpr std::array<std::byte, 5> kClientRollSourceContextSignature{
     std::byte{0xe8}, std::byte{0x83}, std::byte{0xa0},
     std::byte{0xea}, std::byte{0xff},
 };
-// DCActiveRoll's post-result phase dispatcher receives the phase command in
-// R8D. Phase 2 is the path that enables immediate-total presentation, changes
-// the roll state to 5, and publishes the value at +0xd58 to +0x868.
-constexpr std::array<std::byte, 15> kClientRollPhaseSignature{
-    std::byte{0x48}, std::byte{0x89}, std::byte{0x5c}, std::byte{0x24},
-    std::byte{0x10}, std::byte{0x48}, std::byte{0x89}, std::byte{0x7c},
-    std::byte{0x24}, std::byte{0x18}, std::byte{0x55}, std::byte{0x48},
-    std::byte{0x8d}, std::byte{0x6c}, std::byte{0x24},
-};
-// This callback advances the visible total for one modifier animation. Its
-// single exit at the second signature retains the active roll in RBX, allowing
-// an exact before/after delta to be traced without changing the callback.
-constexpr std::array<std::byte, 15> kClientModifierAnimationStartSignature{
-    std::byte{0x48}, std::byte{0x89}, std::byte{0x5c}, std::byte{0x24},
-    std::byte{0x08}, std::byte{0x57}, std::byte{0x48}, std::byte{0x83},
-    std::byte{0xec}, std::byte{0x20}, std::byte{0x80}, std::byte{0xb9},
-    std::byte{0xf8}, std::byte{0x08}, std::byte{0x00},
-};
-constexpr std::array<std::byte, 15> kClientModifierAnimationEndSignature{
-    std::byte{0x48}, std::byte{0x8b}, std::byte{0x5c}, std::byte{0x24},
-    std::byte{0x30}, std::byte{0x48}, std::byte{0x83}, std::byte{0xc4},
-    std::byte{0x20}, std::byte{0x5f}, std::byte{0xc3}, std::byte{0xcc},
-    std::byte{0xcc}, std::byte{0xcc}, std::byte{0x0f},
-};
 constexpr std::array<std::byte, 9> kClientVmRollModifierFactorySignature{
     std::byte{0x48}, std::byte{0x83}, std::byte{0xec}, std::byte{0x28},
     std::byte{0xb9}, std::byte{0xf0}, std::byte{0x01}, std::byte{0x00},
@@ -499,9 +456,6 @@ struct BuildSpec {
     std::uintptr_t clientRollBonusRendererAddHookRva;
     std::uintptr_t clientRollBonusReconcileEndHookRva;
     std::uintptr_t clientRollFinalizeHookRva;
-    std::uintptr_t clientRollPhaseHookRva;
-    std::uintptr_t clientModifierAnimationStartHookRva;
-    std::uintptr_t clientModifierAnimationEndHookRva;
     std::uintptr_t clientPropertyChangedRva;
     std::uintptr_t clientModifierDisabledPropertyRva;
     std::uintptr_t clientModifierCollectionAddRva;
@@ -533,7 +487,6 @@ constexpr BuildSpec kBuilds[] = {
         0x01546c96, 0x01546cd0,
         0x0154694c, 0x01690292,
         0x01541f61, 0x01542128,
-        0x01542740, 0x01543920, 0x015439e2,
         0x020e6fb0, 0x05fee9e8, 0x015485c0,
         0x015486e0, 0x01548530, 0x0133ae40, 0x0133a790,
         0x01548420, 0x01549880, 0x01222c60,
@@ -551,7 +504,6 @@ constexpr BuildSpec kBuilds[] = {
         0x01547b96, 0x01547bd0,
         0x0154784c, 0x01691172,
         0x01542e61, 0x01543028,
-        0x01543640, 0x01544820, 0x015448e2,
         0x020e7c70, 0x062782a0, 0x015494c0,
         0x015495e0, 0x01549430, 0x0133bd50, 0x0133b6a0,
         0x01549320, 0x0154a780, 0x01223b70,
@@ -560,7 +512,7 @@ constexpr BuildSpec kBuilds[] = {
 };
 
 struct ClientPresentationLease {
-    boh::ProfileSelection selection;
+    std::shared_ptr<boh::ProfileSelection const> selection;
     std::uint64_t roller{};
     std::uint64_t subject{};
     std::uintptr_t vmRoll{};
@@ -573,6 +525,13 @@ struct ClientPresentationLease {
     std::uint64_t lastUsedTick{};
 };
 
+struct ClientPresentationLeaseSnapshot {
+    std::shared_ptr<boh::ProfileSelection const> selection;
+    std::uint8_t frozenAdvantage{ 0xff };
+    bool presentationFrozen{};
+    std::size_t retainedRollBonusViewModelCount{};
+};
+
 struct CachedRollBonusPresentation {
     std::uint64_t specialist{};
     std::uintptr_t selectedViewModel{};
@@ -583,17 +542,23 @@ struct CachedRollBonusPresentation {
     std::uint64_t lastUsedTick{};
 };
 
+using CachedRollBonusPresentationSnapshot =
+    FixedSnapshot<CachedRollBonusPresentation,
+        kMaximumCachedRollBonusPresentations>;
+using ClientModifierCollectionSnapshot =
+    FixedSnapshot<std::uintptr_t,
+        kMaximumObservedDynamicModifierViewModels>;
+
 HMODULE g_gameModule{};
 BuildSpec const* g_build{};
 std::atomic_bool g_stop{false};
 std::atomic_bool g_codeHooksReady{false};
 std::atomic_bool g_hooksReady{false};
-std::atomic_bool g_trace{false};
 std::atomic<void*> g_serverWorld{};
 
-bool TraceEnabled() noexcept
+constexpr bool TraceEnabled() noexcept
 {
-    return g_trace.load(std::memory_order_relaxed);
+    return false;
 }
 
 SystemUpdateProc g_modifierOriginal{};
@@ -615,14 +580,10 @@ safetyhook::MidHook g_clientRollBonusPreserveMatchedHook{};
 safetyhook::MidHook g_clientRollBonusPreserveMissingHook{};
 safetyhook::MidHook g_clientAdvantagePreserveMatchedHook{};
 safetyhook::MidHook g_clientAdvantagePreserveMissingHook{};
-safetyhook::MidHook g_clientRollBonusPreserveSelectedHook{};
 safetyhook::InlineHook g_clientRollBonusKeepSelectedHook{};
 safetyhook::MidHook g_clientRollBonusRendererAddHook{};
 safetyhook::MidHook g_clientRollBonusReconcileEndHook{};
 safetyhook::MidHook g_clientRollFinalizeHook{};
-safetyhook::MidHook g_clientRollPhaseHook{};
-safetyhook::MidHook g_clientModifierAnimationStartHook{};
-safetyhook::MidHook g_clientModifierAnimationEndHook{};
 
 struct ResolvedBonusObservation {
     std::uint8_t diceSize{};
@@ -634,7 +595,11 @@ struct ResolvedBonusObservation {
 struct DynamicModifierViewModelObservation {
     std::uintptr_t viewModel{};
     std::array<std::uint64_t, 2> guid{};
-    std::array<std::byte, kDynamicModifierVmTraceBytes> raw{};
+    // The tracing branch retains the full raw viewmodel snapshot. Production
+    // builds keep no bytes here, so every modifier no longer adds 512 bytes
+    // to the click-boundary reconciliation copy.
+    std::array<std::byte,
+        TraceEnabled() ? kDynamicModifierVmTraceBytes : 0> raw{};
     std::uint8_t disabledBefore{};
     std::uint8_t stateBefore{};
     std::uint8_t diceSize{};
@@ -642,6 +607,8 @@ struct DynamicModifierViewModelObservation {
     bool descriptorReadable{};
     bool rawReadable{};
 };
+static_assert(TraceEnabled()
+    || sizeof(DynamicModifierViewModelObservation) <= 40);
 
 struct DynamicModifierIdentity {
     std::array<std::uint64_t, 2> guid{};
@@ -664,36 +631,25 @@ struct RollBonusReconciliationObservation {
     std::size_t viewModelCount{};
     boh::ProfileSelection selection;
 };
-
-struct ModifierAnimationObservation {
-    bool active{};
-    std::uintptr_t activeRoll{};
-    std::uintptr_t event{};
-    std::uint8_t displayedBefore{};
-    std::uint8_t fallbackBefore{};
-    std::uint8_t immediateTotalBefore{};
-    std::uint32_t rollStateBefore{};
-    boh::ProfileSelection selection;
-};
+static_assert(TraceEnabled()
+    || sizeof(RollBonusReconciliationObservation) <= 4096);
 
 thread_local RollBonusReconciliationObservation
     g_rollBonusReconciliationObservation;
-thread_local ModifierAnimationObservation g_modifierAnimationObservation;
 thread_local std::uintptr_t g_pendingRollPayloadActiveRoll{};
 thread_local std::uintptr_t g_pendingRollPayloadVmRoll{};
 thread_local std::uintptr_t g_pendingRollPostDispatchActiveRoll{};
 thread_local std::uintptr_t g_pendingRollPostDispatchVmRoll{};
-thread_local std::string g_lastNameBindingResult{"not_attempted"};
-thread_local std::string g_lastNameBindingValue{"unavailable"};
-
 std::wstring g_session;
+std::string g_sessionUtf8;
 fs::path g_actionPath;
 fs::path g_clientActionPath;
 fs::path g_statusPath;
 fs::path g_logPath;
 std::mutex g_logMutex;
 std::mutex g_statusMutex;
-std::mutex g_refreshMutex;
+std::mutex g_documentRefreshMutex;
+std::mutex g_clientDocumentRefreshMutex;
 std::mutex g_hookFailureMutex;
 std::shared_mutex g_documentMutex;
 boh::BridgeDocument g_document;
@@ -707,22 +663,260 @@ std::unordered_map<std::uint64_t, std::uint64_t> g_profilePasses;
 std::mutex g_clientPresentationLeaseMutex;
 std::unordered_map<std::string, ClientPresentationLease>
     g_clientPresentationLeases;
+std::unordered_map<std::uintptr_t, std::string>
+    g_clientPresentationLeaseByVmRoll;
 std::vector<CachedRollBonusPresentation>
     g_cachedRollBonusPresentations;
 std::vector<std::uintptr_t> g_deferredClientViewModelReleases;
 
-std::wstring Widen(std::string_view value)
+// Temporary low-overhead profiler for the click-to-roll investigation. Hot
+// hooks only touch fixed atomic storage and QueryPerformanceCounter; the
+// worker thread formats and writes a single summary after the roll finishes.
+constexpr bool kPerfDiagnostics = true;
+
+enum class PerfMetric : std::size_t {
+    MemoryProbe,
+    LeaseLookup,
+    AdvantageLookup,
+    ProfileUi,
+    ProfileMath,
+    Aggregate,
+    RollStart,
+    DrainReleases,
+    CaptureSelected,
+    PayloadReady,
+    ArmSelected,
+    PostDispatch,
+    RestoreSelected,
+    Result,
+    ReconcileStart,
+    ReconcileViewModel,
+    PreserveMatched,
+    PreserveMissing,
+    AdvantageMatched,
+    AdvantageMissing,
+    RendererAdd,
+    ReconcileEnd,
+    Finalize,
+    SnapshotCollection,
+    BindPresentation,
+    SetDiceType,
+    SetByteProperty,
+    SetPresentationType,
+    SetSourceVm,
+    SetNameObject,
+    SetNamePresentation,
+    SetResolvedValue,
+    SetSelectedResolvedValue,
+    Count,
+};
+
+constexpr std::array<std::string_view,
+    static_cast<std::size_t>(PerfMetric::Count)> kPerfMetricNames{
+    "memory_probe",
+    "lease_lookup",
+    "advantage_lookup",
+    "profile_ui",
+    "profile_math",
+    "aggregate",
+    "roll_start",
+    "drain_releases",
+    "capture_selected",
+    "payload_ready",
+    "arm_selected",
+    "post_dispatch",
+    "restore_selected",
+    "result",
+    "reconcile_start",
+    "reconcile_view_model",
+    "preserve_matched",
+    "preserve_missing",
+    "advantage_matched",
+    "advantage_missing",
+    "renderer_add",
+    "reconcile_end",
+    "finalize",
+    "snapshot_collection",
+    "bind_presentation",
+    "set_dice_type",
+    "set_byte_property",
+    "set_presentation_type",
+    "set_source_vm",
+    "set_name_object",
+    "set_name_presentation",
+    "set_resolved_value",
+    "set_selected_resolved_value",
+};
+static_assert(kPerfMetricNames.size()
+    == static_cast<std::size_t>(PerfMetric::Count));
+
+struct PerfCounter {
+    std::atomic<std::uint32_t> calls{};
+    std::atomic<std::int64_t> ticks{};
+    std::atomic<std::int64_t> maxTicks{};
+    std::atomic<std::int64_t> firstQpc{};
+    std::atomic<std::int64_t> lastQpc{};
+};
+
+struct PerfRollRecord {
+    // 0 = free/flushed, 1 = active, 2 = ready for the worker, 3 = flushing.
+    std::atomic<std::uint8_t> state{};
+    std::uint64_t sequence{};
+    std::atomic<std::uint8_t> delegated{};
+    std::atomic<std::uint8_t> abandoned{};
+    std::atomic<std::uint8_t> action{ 0xff };
+    std::atomic<std::uint64_t> delegationId{};
+    std::atomic<std::uintptr_t> vmRoll{};
+    std::int64_t startQpc{};
+    std::atomic<std::int64_t> endQpc{};
+    std::array<PerfCounter,
+        static_cast<std::size_t>(PerfMetric::Count)> counters{};
+};
+
+constexpr std::size_t kPerfRollRecordCount = 16;
+std::array<PerfRollRecord, kPerfRollRecordCount> g_perfRollRecords{};
+std::atomic<std::uint64_t> g_perfNextSequence{ 1 };
+std::atomic<int> g_perfActiveRecord{ -1 };
+std::atomic<std::int64_t> g_perfQpcFrequency{};
+
+std::int64_t PerfNow() noexcept
 {
-    if (value.empty()) {
-        return {};
-    }
-    auto const length = MultiByteToWideChar(
-        CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
-    std::wstring result(static_cast<std::size_t>(length), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()),
-        result.data(), length);
-    return result;
+    LARGE_INTEGER value{};
+    QueryPerformanceCounter(&value);
+    return value.QuadPart;
 }
+
+PerfRollRecord* ActivePerfRecord() noexcept
+{
+    if constexpr (!kPerfDiagnostics) {
+        return nullptr;
+    }
+    auto const index = g_perfActiveRecord.load(std::memory_order_relaxed);
+    if (index < 0
+        || index >= static_cast<int>(g_perfRollRecords.size())) {
+        return nullptr;
+    }
+    auto& record = g_perfRollRecords[static_cast<std::size_t>(index)];
+    return record.state.load(std::memory_order_acquire) == 1
+        ? &record : nullptr;
+}
+
+class PerfScope {
+public:
+    explicit PerfScope(PerfMetric metric) noexcept
+        : metric_(metric), record_(ActivePerfRecord())
+    {
+        if (record_ != nullptr) {
+            start_ = PerfNow();
+        }
+    }
+
+    ~PerfScope() noexcept
+    {
+        if (record_ == nullptr
+            || record_->state.load(std::memory_order_relaxed) != 1) {
+            return;
+        }
+        auto const end = PerfNow();
+        auto const elapsed = end - start_;
+        auto& counter =
+            record_->counters[static_cast<std::size_t>(metric_)];
+        counter.calls.fetch_add(1, std::memory_order_relaxed);
+        counter.ticks.fetch_add(elapsed, std::memory_order_relaxed);
+        auto maximum = counter.maxTicks.load(std::memory_order_relaxed);
+        while (maximum < elapsed
+            && !counter.maxTicks.compare_exchange_weak(maximum, elapsed,
+                std::memory_order_relaxed, std::memory_order_relaxed)) {
+        }
+        std::int64_t unset{};
+        counter.firstQpc.compare_exchange_strong(unset, start_,
+            std::memory_order_relaxed, std::memory_order_relaxed);
+        counter.lastQpc.store(end, std::memory_order_relaxed);
+    }
+
+private:
+    PerfMetric metric_;
+    PerfRollRecord* record_{};
+    std::int64_t start_{};
+};
+
+void EndActivePerfRoll(bool abandoned = false) noexcept
+{
+    if constexpr (!kPerfDiagnostics) {
+        return;
+    }
+    auto const index = g_perfActiveRecord.exchange(
+        -1, std::memory_order_acq_rel);
+    if (index < 0
+        || index >= static_cast<int>(g_perfRollRecords.size())) {
+        return;
+    }
+    auto& record = g_perfRollRecords[static_cast<std::size_t>(index)];
+    if (record.state.load(std::memory_order_relaxed) != 1) {
+        return;
+    }
+    record.abandoned.store(abandoned ? 1 : 0,
+        std::memory_order_relaxed);
+    record.endQpc.store(PerfNow(), std::memory_order_relaxed);
+    record.state.store(2, std::memory_order_release);
+}
+
+void BeginPerfRoll() noexcept
+{
+    if constexpr (!kPerfDiagnostics) {
+        return;
+    }
+    EndActivePerfRoll(true);
+    auto const sequence =
+        g_perfNextSequence.fetch_add(1, std::memory_order_relaxed);
+    auto const index = static_cast<std::size_t>(
+        sequence % g_perfRollRecords.size());
+    auto& record = g_perfRollRecords[index];
+    record.state.store(0, std::memory_order_release);
+    record.sequence = sequence;
+    record.delegated.store(0, std::memory_order_relaxed);
+    record.abandoned.store(0, std::memory_order_relaxed);
+    record.action.store(0xff, std::memory_order_relaxed);
+    record.delegationId.store(0, std::memory_order_relaxed);
+    record.vmRoll.store(0, std::memory_order_relaxed);
+    record.startQpc = PerfNow();
+    record.endQpc.store(0, std::memory_order_relaxed);
+    for (auto& counter : record.counters) {
+        counter.calls.store(0, std::memory_order_relaxed);
+        counter.ticks.store(0, std::memory_order_relaxed);
+        counter.maxTicks.store(0, std::memory_order_relaxed);
+        counter.firstQpc.store(0, std::memory_order_relaxed);
+        counter.lastQpc.store(0, std::memory_order_relaxed);
+    }
+    record.state.store(1, std::memory_order_release);
+    g_perfActiveRecord.store(static_cast<int>(index),
+        std::memory_order_release);
+}
+
+void IdentifyActivePerfRoll(
+    std::uintptr_t vmRoll,
+    ClientPresentationLeaseSnapshot const& lease) noexcept
+{
+    auto* record = ActivePerfRecord();
+    if (record == nullptr || lease.selection == nullptr) {
+        return;
+    }
+    record->delegated.store(1, std::memory_order_relaxed);
+    record->action.store(
+        static_cast<std::uint8_t>(lease.selection->record.kind),
+        std::memory_order_relaxed);
+    record->delegationId.store(
+        lease.selection->record.id, std::memory_order_relaxed);
+    record->vmRoll.store(vmRoll, std::memory_order_relaxed);
+}
+
+class PerfRollCompletion {
+public:
+    ~PerfRollCompletion() noexcept
+    {
+        EndActivePerfRoll();
+    }
+};
 
 std::string Narrow(std::wstring_view value)
 {
@@ -760,7 +954,7 @@ std::string HexBytes(std::array<std::byte, Size> const& bytes)
 
 void Log(std::string_view level, std::string_view event, std::string_view fields = {})
 {
-    if (level == "TRACE" && !g_trace.load(std::memory_order_relaxed)) {
+    if (level == "TRACE") {
         return;
     }
     std::scoped_lock lock(g_logMutex);
@@ -775,8 +969,91 @@ void Log(std::string_view level, std::string_view event, std::string_view fields
     output << "\r\n";
 }
 
+double PerfMicroseconds(std::int64_t ticks) noexcept
+{
+    auto const frequency =
+        g_perfQpcFrequency.load(std::memory_order_relaxed);
+    return frequency > 0
+        ? static_cast<double>(ticks) * 1'000'000.0
+            / static_cast<double>(frequency)
+        : 0.0;
+}
+
+void FlushCompletedPerfRolls()
+{
+    if constexpr (!kPerfDiagnostics) {
+        return;
+    }
+    for (auto& record : g_perfRollRecords) {
+        std::uint8_t ready = 2;
+        if (!record.state.compare_exchange_strong(
+                ready, 3, std::memory_order_acq_rel,
+                std::memory_order_relaxed)) {
+            continue;
+        }
+
+        auto const end = record.endQpc.load(std::memory_order_relaxed);
+        std::ostringstream fields;
+        fields << std::fixed << std::setprecision(3)
+               << "sequence=" << record.sequence
+               << "|delegated="
+               << static_cast<unsigned>(
+                    record.delegated.load(std::memory_order_relaxed))
+               << "|abandoned="
+               << static_cast<unsigned>(
+                    record.abandoned.load(std::memory_order_relaxed))
+               << "|action=";
+        switch (record.action.load(std::memory_order_relaxed)) {
+        case static_cast<std::uint8_t>(boh::ActionKind::Lockpick):
+            fields << "lockpick";
+            break;
+        case static_cast<std::uint8_t>(boh::ActionKind::Disarm):
+            fields << "disarm";
+            break;
+        default:
+            fields << "unknown";
+            break;
+        }
+        fields << "|delegation_id="
+               << record.delegationId.load(std::memory_order_relaxed)
+               << "|vm_roll="
+               << Hex(record.vmRoll.load(std::memory_order_relaxed))
+               << "|wall_ms="
+               << PerfMicroseconds(end - record.startQpc) / 1'000.0
+               << "|qpc_start=" << record.startQpc
+               << "|qpc_end=" << end
+               << "|qpc_frequency="
+               << g_perfQpcFrequency.load(std::memory_order_relaxed);
+
+        for (std::size_t index = 0;
+             index < record.counters.size(); ++index) {
+            auto const& counter = record.counters[index];
+            auto const calls =
+                counter.calls.load(std::memory_order_relaxed);
+            if (calls == 0) {
+                continue;
+            }
+            auto const first =
+                counter.firstQpc.load(std::memory_order_relaxed);
+            auto const last =
+                counter.lastQpc.load(std::memory_order_relaxed);
+            fields << '|' << kPerfMetricNames[index]
+                   << '=' << calls
+                   << ',' << PerfMicroseconds(
+                        counter.ticks.load(std::memory_order_relaxed))
+                   << ',' << PerfMicroseconds(
+                        counter.maxTicks.load(std::memory_order_relaxed))
+                   << ',' << PerfMicroseconds(first - record.startQpc)
+                   << ',' << PerfMicroseconds(last - record.startQpc);
+        }
+        Log("PERF", "roll_profile", fields.str());
+        record.state.store(0, std::memory_order_release);
+    }
+}
+
 bool IsReadable(void const* pointer, std::size_t size = 1)
 {
+    PerfScope perf(PerfMetric::MemoryProbe);
     if (pointer == nullptr || size == 0) {
         return false;
     }
@@ -795,29 +1072,19 @@ bool IsReadable(void const* pointer, std::size_t size = 1)
 template <class T>
 bool Read(void const* pointer, T& value)
 {
-    if (!IsReadable(pointer, sizeof(T))) {
-        return false;
-    }
-    __try {
-        value = *static_cast<T const*>(pointer);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
+    return boh::SafeRead(pointer, value);
 }
 
 template <class T>
 bool Write(void* pointer, T const& value)
 {
+    // Writes are rare and can otherwise partially cross into an inaccessible
+    // region before SEH handles the fault. Preserve the original full-range
+    // preflight for mutations; the hot read-only path avoids VirtualQuery.
     if (!IsReadable(pointer, sizeof(T))) {
         return false;
     }
-    __try {
-        *static_cast<T*>(pointer) = value;
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
+    return boh::SafeWrite(pointer, value);
 }
 
 template <class T>
@@ -998,11 +1265,11 @@ bool RememberCachedRollBonusPresentation(
     return stored;
 }
 
-std::vector<CachedRollBonusPresentation>
+CachedRollBonusPresentationSnapshot
 FindCachedRollBonusPresentations(
     boh::ProfileSelection const& selection) noexcept
 {
-    std::vector<CachedRollBonusPresentation> result;
+    CachedRollBonusPresentationSnapshot result;
     std::scoped_lock lock(g_clientPresentationLeaseMutex);
     for (auto& entry : g_cachedRollBonusPresentations) {
         if (entry.specialist == selection.specialist) {
@@ -1015,13 +1282,24 @@ FindCachedRollBonusPresentations(
 
 void DrainDeferredClientViewModelReleases() noexcept
 {
-    std::vector<std::uintptr_t> pending;
-    {
-        std::scoped_lock lock(g_clientPresentationLeaseMutex);
-        pending.swap(g_deferredClientViewModelReleases);
-    }
-    for (auto const viewModel : pending) {
-        ReleaseClientViewModel(viewModel);
+    constexpr std::size_t batchCapacity = 256;
+    for (;;) {
+        FixedSnapshot<std::uintptr_t, batchCapacity> pending;
+        {
+            std::scoped_lock lock(g_clientPresentationLeaseMutex);
+            while (!g_deferredClientViewModelReleases.empty()
+                && pending.size() < pending.capacity()) {
+                pending.push_back(
+                    g_deferredClientViewModelReleases.back());
+                g_deferredClientViewModelReleases.pop_back();
+            }
+        }
+        for (auto const viewModel : pending) {
+            ReleaseClientViewModel(viewModel);
+        }
+        if (pending.size() < pending.capacity()) {
+            return;
+        }
     }
 }
 
@@ -1036,7 +1314,16 @@ void ClearClientPresentationLeases(std::string_view reason)
             queued += lease.retainedRollBonusViewModelCount;
             QueueClientViewModelReleases(lease);
         }
+        for (auto const& cached : g_cachedRollBonusPresentations) {
+            if (cached.selectedViewModel != 0) {
+                g_deferredClientViewModelReleases.push_back(
+                    cached.selectedViewModel);
+                ++queued;
+            }
+        }
+        g_cachedRollBonusPresentations.clear();
         g_clientPresentationLeases.clear();
+        g_clientPresentationLeaseByVmRoll.clear();
     }
     if (count != 0 && TraceEnabled()) {
         Log("TRACE", "native_client_presentation_leases_cleared",
@@ -1074,14 +1361,25 @@ void RememberClientPresentationLease(
                     oldest = current;
                 }
             }
-            if (oldest != g_clientPresentationLeases.end()) {
-                evicted = oldest->first;
-                QueueClientViewModelReleases(oldest->second);
-                g_clientPresentationLeases.erase(oldest);
+                if (oldest != g_clientPresentationLeases.end()) {
+                    evicted = oldest->first;
+                    if (oldest->second.vmRoll != 0) {
+                        g_clientPresentationLeaseByVmRoll.erase(
+                            oldest->second.vmRoll);
+                    }
+                    QueueClientViewModelReleases(oldest->second);
+                    g_clientPresentationLeases.erase(oldest);
             }
         }
         auto& lease = g_clientPresentationLeases[selection.record.rollUuid];
-        lease.selection = selection;
+        if (lease.selection == nullptr
+            || lease.selection->record.id != selection.record.id
+            || lease.selection->record.rollUuid
+                != selection.record.rollUuid
+            || lease.selection->specialist != selection.specialist) {
+            lease.selection =
+                std::make_shared<boh::ProfileSelection const>(selection);
+        }
         lease.roller = identity.roller;
         lease.subject = identity.subject;
         lease.lastUsedTick = GetTickCount64();
@@ -1107,16 +1405,17 @@ std::optional<boh::ProfileSelection> MatchClientPresentationLease(
     std::scoped_lock lock(g_clientPresentationLeaseMutex);
     auto const found = g_clientPresentationLeases.find(identity.rollUuid);
     if (found == g_clientPresentationLeases.end()
+        || found->second.selection == nullptr
         || !boh::MatchesClientPresentationLease(
             identity,
             found->first,
             found->second.roller,
             found->second.subject,
-            found->second.selection.specialist)) {
+            found->second.selection->specialist)) {
         return {};
     }
     found->second.lastUsedTick = GetTickCount64();
-    return found->second.selection;
+    return *found->second.selection;
 }
 
 void BindClientPresentationLease(
@@ -1128,42 +1427,71 @@ void BindClientPresentationLease(
         return;
     }
     std::scoped_lock lock(g_clientPresentationLeaseMutex);
-    for (auto& [rollUuid, lease] : g_clientPresentationLeases) {
-        if (rollUuid != selection.record.rollUuid
-            && lease.vmRoll == vmRoll) {
+    auto const collision = g_clientPresentationLeaseByVmRoll.find(vmRoll);
+    if (collision != g_clientPresentationLeaseByVmRoll.end()
+        && collision->second != selection.record.rollUuid) {
+        auto const previous =
+            g_clientPresentationLeases.find(collision->second);
+        if (previous != g_clientPresentationLeases.end()) {
             // DCActiveRoll may recycle its VMRoll object for a later action.
             // Keep click-boundary lookup one-to-one with the newest exact UUID.
-            QueueClientViewModelReleases(lease);
-            lease.vmRoll = 0;
+            QueueClientViewModelReleases(previous->second);
+            previous->second.vmRoll = 0;
         }
+        g_clientPresentationLeaseByVmRoll.erase(collision);
     }
     auto const found = g_clientPresentationLeases.find(
         selection.record.rollUuid);
     if (found != g_clientPresentationLeases.end()) {
+        if (found->second.vmRoll != 0
+            && found->second.vmRoll != vmRoll) {
+            g_clientPresentationLeaseByVmRoll.erase(
+                found->second.vmRoll);
+        }
         found->second.vmRoll = vmRoll;
         found->second.lastUsedTick = GetTickCount64();
+        g_clientPresentationLeaseByVmRoll[vmRoll] =
+            selection.record.rollUuid;
     }
 }
 
-std::optional<ClientPresentationLease> FindClientPresentationLeaseByVmRoll(
+std::optional<ClientPresentationLeaseSnapshot>
+FindClientPresentationLeaseByVmRoll(
     std::uintptr_t vmRoll)
 {
+    PerfScope perf(PerfMetric::LeaseLookup);
     if (vmRoll == 0) {
         return {};
     }
     std::scoped_lock lock(g_clientPresentationLeaseMutex);
-    for (auto& [_, lease] : g_clientPresentationLeases) {
-        if (lease.vmRoll == vmRoll) {
-            lease.lastUsedTick = GetTickCount64();
-            return lease;
-        }
+    auto const indexed = g_clientPresentationLeaseByVmRoll.find(vmRoll);
+    if (indexed == g_clientPresentationLeaseByVmRoll.end()) {
+        return {};
     }
-    return {};
+    auto const found = g_clientPresentationLeases.find(indexed->second);
+    if (found == g_clientPresentationLeases.end()
+        || found->second.vmRoll != vmRoll
+        || found->second.selection == nullptr) {
+        g_clientPresentationLeaseByVmRoll.erase(indexed);
+        return {};
+    }
+    found->second.lastUsedTick = GetTickCount64();
+    return ClientPresentationLeaseSnapshot{
+        .selection = found->second.selection,
+        .frozenAdvantage = found->second.frozenAdvantage,
+        .presentationFrozen = found->second.presentationFrozen,
+        .retainedRollBonusViewModelCount =
+            found->second.retainedRollBonusViewModelCount,
+    };
 }
 
 std::optional<std::uint8_t> CurrentClientPresentationAdvantage(
-    ClientPresentationLease const& lease)
+    ClientPresentationLeaseSnapshot const& lease)
 {
+    PerfScope perf(PerfMetric::AdvantageLookup);
+    if (lease.selection == nullptr) {
+        return {};
+    }
     if (lease.presentationFrozen && lease.frozenAdvantage <= 2) {
         return lease.frozenAdvantage;
     }
@@ -1173,17 +1501,18 @@ std::optional<std::uint8_t> CurrentClientPresentationAdvantage(
     // retain the last validated lease value through replicated destruction.
     {
         std::shared_lock lock(g_documentMutex);
-        if (g_document.valid && Widen(g_document.nativeSession) == g_session) {
+        if (g_document.valid
+            && g_document.nativeSession == g_sessionUtf8) {
             for (auto const& record : g_document.records) {
-                if (record.id == lease.selection.record.id
-                    && record.rollUuid == lease.selection.record.rollUuid
+                if (record.id == lease.selection->record.id
+                    && record.rollUuid == lease.selection->record.rollUuid
                     && record.presentationAdvantage <= 2) {
                     return record.presentationAdvantage;
                 }
             }
         }
     }
-    return boh::ClientPresentationAdvantage(lease.selection);
+    return boh::ClientPresentationAdvantage(*lease.selection);
 }
 
 bool FreezeClientPresentationAdvantage(
@@ -1193,18 +1522,23 @@ bool FreezeClientPresentationAdvantage(
         return false;
     }
     std::scoped_lock lock(g_clientPresentationLeaseMutex);
-    for (auto& [_, lease] : g_clientPresentationLeases) {
-        if (lease.vmRoll != vmRoll) {
-            continue;
-        }
-        if (!lease.presentationFrozen) {
-            lease.frozenAdvantage = advantage;
-            lease.presentationFrozen = true;
-        }
-        lease.lastUsedTick = GetTickCount64();
-        return lease.frozenAdvantage == advantage;
+    auto const indexed = g_clientPresentationLeaseByVmRoll.find(vmRoll);
+    if (indexed == g_clientPresentationLeaseByVmRoll.end()) {
+        return false;
     }
-    return false;
+    auto const found = g_clientPresentationLeases.find(indexed->second);
+    if (found == g_clientPresentationLeases.end()
+        || found->second.vmRoll != vmRoll) {
+        g_clientPresentationLeaseByVmRoll.erase(indexed);
+        return false;
+    }
+    auto& lease = found->second;
+    if (!lease.presentationFrozen) {
+        lease.frozenAdvantage = advantage;
+        lease.presentationFrozen = true;
+    }
+    lease.lastUsedTick = GetTickCount64();
+    return lease.frozenAdvantage == advantage;
 }
 
 std::optional<fs::file_time_type> LastWrite(fs::path const& path)
@@ -1216,11 +1550,22 @@ std::optional<fs::file_time_type> LastWrite(fs::path const& path)
 
 std::string ReadAll(fs::path const& path)
 {
-    std::ifstream input(path, std::ios::binary);
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
     if (!input) {
         return {};
     }
-    return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    auto const end = input.tellg();
+    if (end <= 0) {
+        return {};
+    }
+    std::string contents(static_cast<std::size_t>(end), '\0');
+    input.seekg(0, std::ios::beg);
+    input.read(contents.data(),
+        static_cast<std::streamsize>(contents.size()));
+    if (!input) {
+        return {};
+    }
+    return contents;
 }
 
 bool AtomicWrite(fs::path const& path, std::string const& contents)
@@ -1289,9 +1634,15 @@ void WriteCurrentStatus(std::string_view ack)
     }
 }
 
-void RefreshDocument(bool force)
+void RefreshDocument(bool force, bool waitForLock = true)
 {
-    std::scoped_lock refreshLock(g_refreshMutex);
+    std::unique_lock refreshLock(
+        g_documentRefreshMutex, std::defer_lock);
+    if (waitForLock) {
+        refreshLock.lock();
+    } else if (!refreshLock.try_lock()) {
+        return;
+    }
     auto const writeTime = LastWrite(g_actionPath);
     if (!force && writeTime == g_actionWriteTime) {
         return;
@@ -1304,7 +1655,6 @@ void RefreshDocument(bool force)
         return;
     }
 
-    g_trace.store(parsed.trace, std::memory_order_relaxed);
     auto const ack = parsed.probe;
     bool probeChanged = false;
     {
@@ -1313,18 +1663,14 @@ void RefreshDocument(bool force)
         g_document = std::move(parsed);
     }
     if (probeChanged) {
-        std::scoped_lock lock(g_profileTraceMutex);
-        g_profilePasses.clear();
-    }
-    if (probeChanged) {
         ClearClientPresentationLeases("bridge_probe_changed");
+        WriteCurrentStatus(ack);
     }
-    WriteCurrentStatus(ack);
 }
 
 void RefreshClientDocument(bool force)
 {
-    std::scoped_lock refreshLock(g_refreshMutex);
+    std::scoped_lock refreshLock(g_clientDocumentRefreshMutex);
     auto const writeTime = LastWrite(g_clientActionPath);
     if (!force && writeTime == g_clientActionWriteTime) {
         return;
@@ -1374,7 +1720,8 @@ std::optional<boh::ProfileSelection> FindProfileRecord(
     std::optional<boh::ProfileSelection> selection;
     {
         std::shared_lock serverLock(g_documentMutex);
-        if (!g_document.valid || Widen(g_document.nativeSession) != g_session) {
+        if (!g_document.valid
+            || g_document.nativeSession != g_sessionUtf8) {
             return {};
         }
         std::shared_lock clientLock(g_clientDocumentMutex);
@@ -1404,7 +1751,7 @@ void TraceProfileSelection(std::string_view stage,
     boh::ProfileSelection const& selection,
     void const* component)
 {
-    if (!g_trace.load(std::memory_order_relaxed)) {
+    if (!TraceEnabled()) {
         return;
     }
     auto const stageId = stage == "ui" ? 1ULL : 2ULL;
@@ -1440,6 +1787,7 @@ void TraceProfileSelection(std::string_view stage,
 
 void ProfileUiMidHook(safetyhook::Context& context) noexcept
 {
+    PerfScope perf(PerfMetric::ProfileUi);
     try {
         auto const component = reinterpret_cast<void const*>(context.r13);
         auto const selection = FindProfileRecord(component);
@@ -1460,6 +1808,7 @@ void ProfileUiMidHook(safetyhook::Context& context) noexcept
 
 void ProfileMathMidHook(safetyhook::Context& context) noexcept
 {
+    PerfScope perf(PerfMetric::ProfileMath);
     try {
         auto const component = reinterpret_cast<void const*>(context.r8);
         auto const selection = FindProfileRecord(component);
@@ -1482,7 +1831,8 @@ void ProfileMathMidHook(safetyhook::Context& context) noexcept
 
 void CaptureSelectedRollBonusViewModels(
     std::uintptr_t activeRoll, std::uintptr_t vmRoll,
-    std::uint32_t rollState) noexcept;
+    std::uint32_t rollState,
+    boh::ProfileSelection const& selection) noexcept;
 void ArmSelectedRollBonusPresentationAfterPayload(
     std::uintptr_t activeRoll, std::uintptr_t vmRoll,
     std::uint32_t rollState) noexcept;
@@ -1545,7 +1895,7 @@ void ClientRollPresentationMidHook(safetyhook::Context& context) noexcept
         }
         BindClientPresentationLease(*selection, context.rbx);
 
-        if (!g_trace.load(std::memory_order_relaxed)) {
+        if (!TraceEnabled()) {
             return;
         }
         auto const& record = selection->record;
@@ -1637,6 +1987,7 @@ void ClientRollSourceContextMidHook(safetyhook::Context& context) noexcept
 
 void ClientRollAggregateMidHook(safetyhook::Context& context) noexcept
 {
+    PerfScope perf(PerfMetric::Aggregate);
     try {
         // This is the final vanilla modifier-aggregation write before
         // DCActiveRoll notifies Noesis and enters result presentation:
@@ -1656,10 +2007,10 @@ void ClientRollAggregateMidHook(safetyhook::Context& context) noexcept
                 & ~static_cast<std::uintptr_t>(0xffU))
             | static_cast<std::uintptr_t>(*expected);
 
-        if (!g_trace.load(std::memory_order_relaxed)) {
+        if (!TraceEnabled()) {
             return;
         }
-        auto const& record = lease->selection.record;
+        auto const& record = lease->selection->record;
         auto const key = 0x8000000000000000ULL ^ record.id;
         std::uint64_t pass{};
         {
@@ -1707,6 +2058,8 @@ void ClientRollAggregateMidHook(safetyhook::Context& context) noexcept
 
 void ClientRollStartMidHook(safetyhook::Context& context) noexcept
 {
+    BeginPerfRoll();
+    PerfScope perf(PerfMetric::RollStart);
     try {
         // Every command invocation replaces any abandoned pending boundary
         // from the same UI thread.
@@ -1714,7 +2067,10 @@ void ClientRollStartMidHook(safetyhook::Context& context) noexcept
         g_pendingRollPayloadVmRoll = 0;
         g_pendingRollPostDispatchActiveRoll = 0;
         g_pendingRollPostDispatchVmRoll = 0;
-        DrainDeferredClientViewModelReleases();
+        {
+            PerfScope drainPerf(PerfMetric::DrainReleases);
+            DrainDeferredClientViewModelReleases();
+        }
         auto const activeRoll = reinterpret_cast<void*>(context.rcx);
         if (!IsReadable(activeRoll, kActiveRollVmRollOffset + sizeof(void*))) {
             return;
@@ -1734,11 +2090,13 @@ void ClientRollStartMidHook(safetyhook::Context& context) noexcept
         if (!lease.has_value()) {
             return;
         }
+        IdentifyActivePerfRoll(
+            reinterpret_cast<std::uintptr_t>(vmRoll), *lease);
         if (rollState == 1 || rollState == 2) {
             CaptureSelectedRollBonusViewModels(
                 context.rcx,
                 reinterpret_cast<std::uintptr_t>(vmRoll),
-                rollState);
+                rollState, *lease->selection);
         }
         if (rollState == 1) {
             // The successful WaitForStart branch later reuses DIL as a local
@@ -1777,10 +2135,10 @@ void ClientRollStartMidHook(safetyhook::Context& context) noexcept
             after = observed;
         }
 
-        if (!g_trace.load(std::memory_order_relaxed)) {
+        if (!TraceEnabled()) {
             return;
         }
-        auto const& record = lease->selection.record;
+        auto const& record = lease->selection->record;
         Log("TRACE", "native_client_roll_start_boundary",
             "action=" + boh::ActionName(record.kind)
             + "|delegation_id=" + std::to_string(record.id)
@@ -1807,6 +2165,7 @@ void ClientRollStartMidHook(safetyhook::Context& context) noexcept
 
 void ClientRollPayloadReadyMidHook(safetyhook::Context& context) noexcept
 {
+    PerfScope perf(PerfMetric::PayloadReady);
     try {
         // Reaching this hook proves the successful WaitForStart path has
         // completely materialized the detached command payload.
@@ -1848,6 +2207,7 @@ void ClientRollPayloadReadyMidHook(safetyhook::Context& context) noexcept
 
 void ClientRollPostDispatchMidHook(safetyhook::Context& context) noexcept
 {
+    PerfScope perf(PerfMetric::PostDispatch);
     try {
         // The epilogue is shared by early-exit paths, so only a pair armed by
         // the successful payload-ready hook may restore selected UI state.
@@ -1869,6 +2229,7 @@ void ClientRollPostDispatchMidHook(safetyhook::Context& context) noexcept
 
 void ClientRollResultMidHook(safetyhook::Context& context) noexcept
 {
+    PerfScope perf(PerfMetric::Result);
     try {
         // This is the result-consistency decision immediately after BG3 loads
         // VMRoll.RollAdvantageType into CL and before it publishes either the
@@ -1942,14 +2303,14 @@ void ClientRollResultMidHook(safetyhook::Context& context) noexcept
             componentCorrected = Write(componentAdvantage, *expected);
         }
 
-        if (!g_trace.load(std::memory_order_relaxed)) {
+        if (!TraceEnabled()) {
             return;
         }
         std::uint32_t rollState{};
         Read(At<std::uint32_t>(
             reinterpret_cast<void*>(context.rdi), kActiveRollStateOffset),
             rollState);
-        auto const& record = lease->selection.record;
+        auto const& record = lease->selection->record;
         Log("TRACE", "native_client_roll_result_consistency",
             "action=" + boh::ActionName(record.kind)
             + "|delegation_id=" + std::to_string(record.id)
@@ -2018,10 +2379,23 @@ using NoesisTypePropertyGetContentProc =
     void const* (*)(void const*, void const*);
 
 struct NoesisPropertyValue {
+    std::uintptr_t property{};
     std::uint32_t nameSymbol{};
     std::uintptr_t contentType{};
     std::uintptr_t value{};
 };
+
+struct CachedNoesisNameProperty {
+    std::uintptr_t classType{};
+    std::uintptr_t property{};
+    std::uint32_t nameSymbol{};
+    std::uintptr_t contentType{};
+};
+
+constexpr std::size_t kMaximumCachedNoesisNameSourceClasses = 16;
+thread_local CachedNoesisNameProperty g_cachedVmRollModifierNameProperty;
+thread_local FixedSnapshot<CachedNoesisNameProperty,
+    kMaximumCachedNoesisNameSourceClasses> g_cachedSourceNameProperties;
 
 std::uintptr_t GetNoesisClassType(std::uintptr_t object) noexcept
 {
@@ -2133,6 +2507,7 @@ bool FindNoesisProperty(std::uintptr_t object,
                 continue;
             }
             result = NoesisPropertyValue{
+                .property = property,
                 .nameSymbol = observedNameSymbol,
                 .contentType = observedContentType,
                 .value = value,
@@ -2150,6 +2525,84 @@ bool FindNoesisProperty(std::uintptr_t object,
         classType = baseClass;
     }
     return false;
+}
+
+bool FindVmRollModifierNameProperty(std::uintptr_t viewModel,
+    NoesisPropertyValue& result) noexcept
+{
+    result = {};
+    auto const classType = GetNoesisClassType(viewModel);
+    auto const expectedValue =
+        viewModel + kDynamicModifierVmNameValueOffset;
+    auto const& cached = g_cachedVmRollModifierNameProperty;
+    if (classType != 0 && cached.classType == classType
+        && cached.property != 0) {
+        auto const value = GetNoesisTypePropertyContent(
+            cached.property, viewModel);
+        if (value == expectedValue) {
+            result = NoesisPropertyValue{
+                .property = cached.property,
+                .nameSymbol = cached.nameSymbol,
+                .contentType = cached.contentType,
+                .value = value,
+            };
+            return true;
+        }
+    }
+
+    if (!FindNoesisProperty(viewModel, std::nullopt,
+            expectedValue, std::nullopt, result)) {
+        return false;
+    }
+    g_cachedVmRollModifierNameProperty = CachedNoesisNameProperty{
+        .classType = classType,
+        .property = result.property,
+        .nameSymbol = result.nameSymbol,
+        .contentType = result.contentType,
+    };
+    return true;
+}
+
+bool FindSourceNameProperty(std::uintptr_t source,
+    NoesisPropertyValue const& target,
+    NoesisPropertyValue& result) noexcept
+{
+    result = {};
+    auto const classType = GetNoesisClassType(source);
+    for (auto const& cached : g_cachedSourceNameProperties) {
+        if (cached.classType != classType
+            || cached.nameSymbol != target.nameSymbol
+            || cached.contentType != target.contentType
+            || cached.property == 0) {
+            continue;
+        }
+        auto const value = GetNoesisTypePropertyContent(
+            cached.property, source);
+        if (value != 0) {
+            result = NoesisPropertyValue{
+                .property = cached.property,
+                .nameSymbol = cached.nameSymbol,
+                .contentType = cached.contentType,
+                .value = value,
+            };
+            return true;
+        }
+    }
+
+    if (!FindNoesisProperty(source, target.nameSymbol,
+            std::nullopt, target.contentType, result)) {
+        return false;
+    }
+    if (g_cachedSourceNameProperties.size()
+        < kMaximumCachedNoesisNameSourceClasses) {
+        g_cachedSourceNameProperties.push_back(CachedNoesisNameProperty{
+            .classType = classType,
+            .property = result.property,
+            .nameSymbol = result.nameSymbol,
+            .contentType = result.contentType,
+        });
+    }
+    return true;
 }
 
 bool NotifyDynamicModifierProperty(std::uintptr_t viewModel,
@@ -2230,6 +2683,7 @@ bool SetDynamicModifierByteProperty(std::uintptr_t viewModel,
     std::size_t propertySourceOffset,
     std::size_t propertyMarkerOffset) noexcept
 {
+    PerfScope perf(PerfMetric::SetByteProperty);
     if (viewModel == 0) {
         return false;
     }
@@ -2250,6 +2704,7 @@ bool SetDynamicModifierByteProperty(std::uintptr_t viewModel,
 bool SetDynamicModifierRollBonusPresentationType(
     std::uintptr_t viewModel) noexcept
 {
+    PerfScope perf(PerfMetric::SetPresentationType);
     return SetDynamicModifierByteProperty(viewModel,
             kDynamicModifierVmBoostTypeOffset, kDynamicModifierRollBonusType,
             kDynamicModifierVmBoostTypePropertySourceOffset,
@@ -2294,8 +2749,6 @@ bool SetDynamicModifierSourceVm(std::uintptr_t viewModel,
 bool SetDynamicModifierNameFromPresentationObject(
     std::uintptr_t viewModel, std::uintptr_t presentationObject) noexcept
 {
-    g_lastNameBindingResult = "invalid_arguments";
-    g_lastNameBindingValue = "unavailable";
     if (g_gameModule == nullptr || g_build == nullptr
         || viewModel == 0 || presentationObject == 0) {
         return false;
@@ -2307,34 +2760,14 @@ bool SetDynamicModifierNameFromPresentationObject(
     // known VMRollModifier member, then resolve the same typed property on the
     // object that BG3 used to render the selected row.
     NoesisPropertyValue targetNameProperty;
-    if (!FindNoesisProperty(viewModel, std::nullopt,
-            viewModel + kDynamicModifierVmNameValueOffset,
-            std::nullopt, targetNameProperty)) {
-        g_lastNameBindingResult = "target_name_property_not_found";
+    if (!FindVmRollModifierNameProperty(
+            viewModel, targetNameProperty)) {
         return false;
     }
     NoesisPropertyValue sourceNameProperty;
-    if (!FindNoesisProperty(presentationObject,
-            targetNameProperty.nameSymbol,
-            std::nullopt, targetNameProperty.contentType,
-            sourceNameProperty)) {
-        g_lastNameBindingResult = "source_name_property_not_found";
+    if (!FindSourceNameProperty(presentationObject,
+            targetNameProperty, sourceNameProperty)) {
         return false;
-    }
-    std::array<std::byte, kDynamicModifierVmNameValueSize>
-        sourceNameBytes{};
-    if (!Read(reinterpret_cast<void const*>(sourceNameProperty.value),
-            sourceNameBytes)) {
-        g_lastNameBindingResult = "source_name_value_unreadable";
-        return false;
-    }
-    static constexpr char digits[] = "0123456789abcdef";
-    g_lastNameBindingValue.resize(sourceNameBytes.size() * 2);
-    for (std::size_t index = 0; index < sourceNameBytes.size(); ++index) {
-        auto const value =
-            std::to_integer<std::uint8_t>(sourceNameBytes[index]);
-        g_lastNameBindingValue[index * 2] = digits[value >> 4];
-        g_lastNameBindingValue[index * 2 + 1] = digits[value & 0x0f];
     }
 
     bool assigned{};
@@ -2362,7 +2795,6 @@ bool SetDynamicModifierNameFromPresentationObject(
                          kDynamicModifierVmNameValueOffset + 0x10),
                 flags);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        g_lastNameBindingResult = "native_name_assignment_exception";
         return false;
     }
 
@@ -2374,11 +2806,6 @@ bool SetDynamicModifierNameFromPresentationObject(
         && NotifyDynamicModifierProperty(viewModel,
             kDynamicModifierVmNamePropertySourceOffset,
             kDynamicModifierVmNamePropertyMarkerOffset);
-    g_lastNameBindingResult = !assigned
-        ? "translated_flags_copy_failed"
-        : !notified
-            ? "name_property_notification_failed"
-            : "success";
     return assigned && notified;
 }
 
@@ -2386,7 +2813,7 @@ bool SetDynamicModifierNameFromPresentation(
     std::uintptr_t viewModel, std::uintptr_t selectedViewModel,
     std::uintptr_t sourceVm) noexcept
 {
-    std::string selectedFailure{"not_attempted"};
+    PerfScope perf(PerfMetric::SetNamePresentation);
     // The selected VMBoostModifier is the exact object whose label is visible
     // before the user clicks the die. Its nested SourceVM supplies the icon,
     // but its reflected Name may describe a different source/caster object.
@@ -2395,30 +2822,20 @@ bool SetDynamicModifierNameFromPresentation(
     if (selectedViewModel != 0) {
         if (SetDynamicModifierNameFromPresentationObject(
                 viewModel, selectedViewModel)) {
-            g_lastNameBindingResult = "success:selected_viewmodel";
             return true;
         }
-        selectedFailure = g_lastNameBindingResult;
     }
     if (sourceVm != 0) {
-        if (SetDynamicModifierNameFromPresentationObject(
-                viewModel, sourceVm)) {
-            g_lastNameBindingResult = "success:source_vm_fallback";
-            return true;
-        }
-        g_lastNameBindingResult =
-            "selected=" + selectedFailure
-            + ",source=" + g_lastNameBindingResult;
-        return false;
+        return SetDynamicModifierNameFromPresentationObject(
+            viewModel, sourceVm);
     }
-    g_lastNameBindingResult =
-        "selected=" + selectedFailure + ",source=unavailable";
     return false;
 }
 
 bool SetDynamicModifierResolvedValue(
     std::uintptr_t viewModel, std::int32_t value) noexcept
 {
+    PerfScope perf(PerfMetric::SetResolvedValue);
     if (viewModel == 0 || value <= 0) {
         return false;
     }
@@ -2584,7 +3001,7 @@ std::uintptr_t CreateVmRollModifierViewModel(
         && (!requireResolvedValue || valueTransferred)
         && guidSet && disabledSet && stateSet;
     if (!configured) {
-        if (g_trace.load(std::memory_order_relaxed)) {
+        if (TraceEnabled()) {
             Log("TRACE", "native_client_vmroll_modifier_factory_failed",
                 "viewmodel=" + Hex(viewModel)
                 + "|dice_type_set=" + Hex(diceTypeSet)
@@ -2598,10 +3015,6 @@ std::uintptr_t CreateVmRollModifierViewModel(
                 + "|name_from_source_vm_set="
                 + std::to_string(nameTransferred ? 1 : 0)
                 + "|name_binding_strategy=typed_noesis_reflection"
-                + "|name_binding_result="
-                + g_lastNameBindingResult
-                + "|name_binding_value="
-                + g_lastNameBindingValue
                 + "|resolved_value="
                 + std::to_string(resolvedValue)
                 + "|resolved_value_set="
@@ -2730,10 +3143,11 @@ std::optional<std::uint32_t> ClientModifierCollectionCount(
     return count;
 }
 
-std::vector<std::uintptr_t> SnapshotClientModifierCollection(
+ClientModifierCollectionSnapshot SnapshotClientModifierCollection(
     void* collection, std::uintptr_t getterRva) noexcept
 {
-    std::vector<std::uintptr_t> result;
+    PerfScope perf(PerfMetric::SnapshotCollection);
+    ClientModifierCollectionSnapshot result;
     if (g_gameModule == nullptr || g_build == nullptr
         || collection == nullptr || getterRva == 0) {
         return result;
@@ -2742,7 +3156,6 @@ std::vector<std::uintptr_t> SnapshotClientModifierCollection(
     if (!count.has_value()) {
         return result;
     }
-    result.reserve(*count);
     auto const base = reinterpret_cast<std::uintptr_t>(g_gameModule);
     auto const get = reinterpret_cast<ClientModifierCollectionGetProc>(
         base + getterRva);
@@ -2787,28 +3200,34 @@ bool ClientRollBonusKeepSelectedDetour(
                 {
                     std::scoped_lock lock(
                         g_clientPresentationLeaseMutex);
-                    for (auto const& [_, current]
-                         : g_clientPresentationLeases) {
-                        if (current.vmRoll
-                            != reinterpret_cast<std::uintptr_t>(vmRoll)) {
-                            continue;
-                        }
+                    auto const indexed =
+                        g_clientPresentationLeaseByVmRoll.find(
+                            reinterpret_cast<std::uintptr_t>(vmRoll));
+                    auto const found = indexed
+                        == g_clientPresentationLeaseByVmRoll.end()
+                        ? g_clientPresentationLeases.end()
+                        : g_clientPresentationLeases.find(indexed->second);
+                    if (found != g_clientPresentationLeases.end()) {
+                        auto const& current = found->second;
                         if (!current.selectedRemovalGuardArmed) {
-                            break;
+                            // The exact roll is known, but its handoff guard is
+                            // not active; preserve vanilla removal.
+                        } else {
+                            auto const begin =
+                                current.retainedRollBonusViewModels.begin();
+                            auto const end = begin
+                                + static_cast<std::ptrdiff_t>(
+                                    current.retainedRollBonusViewModelCount);
+                            if (current.selection != nullptr
+                                && std::find(begin, end, viewModelAddress)
+                                != end) {
+                                preserved = *current.selection;
+                            }
                         }
-                        auto const begin =
-                            current.retainedRollBonusViewModels.begin();
-                        auto const end = begin
-                            + static_cast<std::ptrdiff_t>(
-                                current.retainedRollBonusViewModelCount);
-                        if (std::find(begin, end, viewModelAddress) != end) {
-                            preserved = current.selection;
-                        }
-                        break;
                     }
                 }
                 if (preserved.has_value()) {
-                    if (g_trace.load(std::memory_order_relaxed)) {
+                    if (TraceEnabled()) {
                         auto const& record = preserved->record;
                         Log("TRACE",
                             "native_client_roll_selected_bonus_removal_suppressed",
@@ -2841,6 +3260,7 @@ bool ClientRollBonusKeepSelectedDetour(
 void RestoreSelectedRollBonusList(std::uintptr_t activeRoll,
     std::uintptr_t vmRoll, std::string_view stage) noexcept
 {
+    PerfScope perf(PerfMetric::RestoreSelected);
     try {
         bool const tracing = TraceEnabled();
         if (g_gameModule == nullptr || g_build == nullptr
@@ -2848,21 +3268,31 @@ void RestoreSelectedRollBonusList(std::uintptr_t activeRoll,
             return;
         }
 
-        ClientPresentationLease lease;
+        ClientPresentationLeaseSnapshot lease;
         std::array<std::uintptr_t,
             kMaximumRetainedRollBonusViewModels> retained{};
         std::size_t retainedCount{};
         {
             std::scoped_lock lock(g_clientPresentationLeaseMutex);
-            for (auto const& [_, current] : g_clientPresentationLeases) {
-                if (current.vmRoll != vmRoll) {
-                    continue;
-                }
-                lease = current;
+            auto const indexed =
+                g_clientPresentationLeaseByVmRoll.find(vmRoll);
+            auto const found = indexed
+                == g_clientPresentationLeaseByVmRoll.end()
+                ? g_clientPresentationLeases.end()
+                : g_clientPresentationLeases.find(indexed->second);
+            if (found != g_clientPresentationLeases.end()) {
+                auto const& current = found->second;
+                lease = ClientPresentationLeaseSnapshot{
+                    .selection = current.selection,
+                    .frozenAdvantage = current.frozenAdvantage,
+                    .presentationFrozen =
+                        current.presentationFrozen,
+                    .retainedRollBonusViewModelCount =
+                        current.retainedRollBonusViewModelCount,
+                };
                 retained = current.retainedRollBonusViewModels;
                 retainedCount =
                     current.retainedRollBonusViewModelCount;
-                break;
             }
         }
         if (retainedCount == 0) {
@@ -2942,7 +3372,7 @@ void RestoreSelectedRollBonusList(std::uintptr_t activeRoll,
             }
             detailStream << details[index];
         }
-        auto const& record = lease.selection.record;
+        auto const& record = lease.selection->record;
         Log("TRACE", "native_client_roll_selected_bonus_restored",
             "action=" + boh::ActionName(record.kind)
             + "|delegation_id=" + std::to_string(record.id)
@@ -2993,8 +3423,10 @@ bool ReadRollBonusViewModelDice(std::uintptr_t viewModel,
 
 void CaptureSelectedRollBonusViewModels(
     std::uintptr_t activeRoll, std::uintptr_t vmRoll,
-    std::uint32_t rollState) noexcept
+    std::uint32_t rollState,
+    boh::ProfileSelection const& selection) noexcept
 {
+    PerfScope perf(PerfMetric::CaptureSelected);
     try {
         bool const tracing = TraceEnabled();
         if (g_build == nullptr || activeRoll == 0 || vmRoll == 0
@@ -3010,26 +3442,23 @@ void CaptureSelectedRollBonusViewModels(
             kActiveRollDynamicModifierCollectionOffset);
         auto const entries = SnapshotClientModifierCollection(
             collection, g_build->clientModifierCollectionGetRva);
-        auto const matchedLease = FindClientPresentationLeaseByVmRoll(
-            vmRoll);
-        if (!matchedLease.has_value()) {
-            return;
-        }
-
         std::size_t eligible{};
         std::size_t retained{};
         std::size_t cached{};
         std::vector<std::string> retainedDetails;
         {
             std::scoped_lock lock(g_clientPresentationLeaseMutex);
-            for (auto& [_, lease] : g_clientPresentationLeases) {
-                if (lease.vmRoll == vmRoll) {
-                    // Each click gets a fresh snapshot. Keeping a previous
-                    // click's wrapper would make a spent or deselected boost
-                    // eligible for a later result.
-                    QueueClientViewModelReleases(lease);
-                    break;
-                }
+            auto const indexed =
+                g_clientPresentationLeaseByVmRoll.find(vmRoll);
+            auto const found = indexed
+                == g_clientPresentationLeaseByVmRoll.end()
+                ? g_clientPresentationLeases.end()
+                : g_clientPresentationLeases.find(indexed->second);
+            if (found != g_clientPresentationLeases.end()) {
+                // Each click gets a fresh snapshot. Keeping a previous
+                // click's wrapper would make a spent or deselected boost
+                // eligible for a later result.
+                QueueClientViewModelReleases(found->second);
             }
         }
         for (auto const viewModel : entries) {
@@ -3050,10 +3479,14 @@ void CaptureSelectedRollBonusViewModels(
             bool added{};
             {
                 std::scoped_lock lock(g_clientPresentationLeaseMutex);
-                for (auto& [_, lease] : g_clientPresentationLeases) {
-                    if (lease.vmRoll != vmRoll) {
-                        continue;
-                    }
+                auto const indexed =
+                    g_clientPresentationLeaseByVmRoll.find(vmRoll);
+                auto const found = indexed
+                    == g_clientPresentationLeaseByVmRoll.end()
+                    ? g_clientPresentationLeases.end()
+                    : g_clientPresentationLeases.find(indexed->second);
+                if (found != g_clientPresentationLeases.end()) {
+                    auto& lease = found->second;
                     auto const begin =
                         lease.retainedRollBonusViewModels.begin();
                     auto const end = begin
@@ -3072,13 +3505,12 @@ void CaptureSelectedRollBonusViewModels(
                     } else {
                         added = false;
                     }
-                    break;
                 }
             }
             if (added) {
                 ++retained;
                 if (RememberCachedRollBonusPresentation(
-                        matchedLease->selection, viewModel, identity,
+                        selection, viewModel, identity,
                         diceSize, diceCount)) {
                     ++cached;
                 }
@@ -3112,7 +3544,7 @@ void CaptureSelectedRollBonusViewModels(
             }
             details << retainedDetails[index];
         }
-        auto const& record = lease->selection.record;
+        auto const& record = lease->selection->record;
         Log("TRACE", "native_client_roll_bonus_viewmodels_retained",
             "action=" + boh::ActionName(record.kind)
             + "|delegation_id=" + std::to_string(record.id)
@@ -3144,6 +3576,7 @@ void ArmSelectedRollBonusPresentationAfterPayload(
     std::uintptr_t activeRoll, std::uintptr_t vmRoll,
     std::uint32_t rollState) noexcept
 {
+    PerfScope perf(PerfMetric::ArmSelected);
     try {
         bool const tracing = TraceEnabled();
         if (g_gameModule == nullptr || g_build == nullptr
@@ -3152,20 +3585,31 @@ void ArmSelectedRollBonusPresentationAfterPayload(
             return;
         }
 
-        ClientPresentationLease lease;
+        ClientPresentationLeaseSnapshot lease;
         std::array<std::uintptr_t,
             kMaximumRetainedRollBonusViewModels> retained{};
         std::size_t retainedCount{};
         {
             std::scoped_lock lock(g_clientPresentationLeaseMutex);
-            for (auto const& [_, current] : g_clientPresentationLeases) {
-                if (current.vmRoll == vmRoll) {
-                    lease = current;
-                    retained = current.retainedRollBonusViewModels;
-                    retainedCount =
-                        current.retainedRollBonusViewModelCount;
-                    break;
-                }
+            auto const indexed =
+                g_clientPresentationLeaseByVmRoll.find(vmRoll);
+            auto const found = indexed
+                == g_clientPresentationLeaseByVmRoll.end()
+                ? g_clientPresentationLeases.end()
+                : g_clientPresentationLeases.find(indexed->second);
+            if (found != g_clientPresentationLeases.end()) {
+                auto const& current = found->second;
+                lease = ClientPresentationLeaseSnapshot{
+                    .selection = current.selection,
+                    .frozenAdvantage = current.frozenAdvantage,
+                    .presentationFrozen =
+                        current.presentationFrozen,
+                    .retainedRollBonusViewModelCount =
+                        current.retainedRollBonusViewModelCount,
+                };
+                retained = current.retainedRollBonusViewModels;
+                retainedCount =
+                    current.retainedRollBonusViewModelCount;
             }
         }
         if (retainedCount == 0) {
@@ -3215,12 +3659,15 @@ void ArmSelectedRollBonusPresentationAfterPayload(
         if (eligible != 0 && eligible == retainedCount
             && present == eligible) {
             std::scoped_lock lock(g_clientPresentationLeaseMutex);
-            for (auto& [_, current] : g_clientPresentationLeases) {
-                if (current.vmRoll == vmRoll) {
-                    current.selectedRemovalGuardArmed = true;
-                    removalGuardArmed = true;
-                    break;
-                }
+            auto const indexed =
+                g_clientPresentationLeaseByVmRoll.find(vmRoll);
+            auto const found = indexed
+                == g_clientPresentationLeaseByVmRoll.end()
+                ? g_clientPresentationLeases.end()
+                : g_clientPresentationLeases.find(indexed->second);
+            if (found != g_clientPresentationLeases.end()) {
+                found->second.selectedRemovalGuardArmed = true;
+                removalGuardArmed = true;
             }
         }
 
@@ -3234,7 +3681,7 @@ void ArmSelectedRollBonusPresentationAfterPayload(
             }
             detailStream << details[index];
         }
-        auto const& record = lease.selection.record;
+        auto const& record = lease.selection->record;
         Log("TRACE", "native_client_roll_bonus_direct_handoff_armed",
             "action=" + boh::ActionName(record.kind)
             + "|delegation_id=" + std::to_string(record.id)
@@ -3268,6 +3715,7 @@ SelectedRollBonusBindingResult BindSelectedRollBonusPresentation(
     std::uintptr_t activeRoll, std::uintptr_t vmRoll,
     std::span<ResolvedBonusObservation const> bonuses) noexcept
 {
+    PerfScope perf(PerfMetric::BindPresentation);
     SelectedRollBonusBindingResult result;
     try {
         if (g_gameModule == nullptr || g_build == nullptr
@@ -3275,29 +3723,42 @@ SelectedRollBonusBindingResult BindSelectedRollBonusPresentation(
             return result;
         }
 
-        ClientPresentationLease lease;
+        ClientPresentationLeaseSnapshot lease;
         std::array<std::uintptr_t,
             kMaximumRetainedRollBonusViewModels> retained{};
         std::size_t retainedCount{};
         {
             std::scoped_lock lock(g_clientPresentationLeaseMutex);
-            for (auto& [_, current] : g_clientPresentationLeases) {
-                if (current.vmRoll != vmRoll) {
-                    continue;
-                }
-                lease = current;
+            auto const indexed =
+                g_clientPresentationLeaseByVmRoll.find(vmRoll);
+            auto const found = indexed
+                == g_clientPresentationLeaseByVmRoll.end()
+                ? g_clientPresentationLeases.end()
+                : g_clientPresentationLeases.find(indexed->second);
+            if (found != g_clientPresentationLeases.end()) {
+                auto& current = found->second;
+                lease = ClientPresentationLeaseSnapshot{
+                    .selection = current.selection,
+                    .frozenAdvantage = current.frozenAdvantage,
+                    .presentationFrozen =
+                        current.presentationFrozen,
+                    .retainedRollBonusViewModelCount =
+                        current.retainedRollBonusViewModelCount,
+                };
                 retained = current.retainedRollBonusViewModels;
                 retainedCount = current.retainedRollBonusViewModelCount;
                 current.retainedRollBonusViewModels = {};
                 current.retainedRollBonusViewModelCount = 0;
                 current.selectedRemovalGuardArmed = false;
-                break;
             }
         }
         result.retained = retainedCount;
+        if (lease.selection == nullptr) {
+            return result;
+        }
         auto const cached = retainedCount == 0
-            ? FindCachedRollBonusPresentations(lease.selection)
-            : std::vector<CachedRollBonusPresentation>{};
+            ? FindCachedRollBonusPresentations(*lease.selection)
+            : CachedRollBonusPresentationSnapshot{};
         result.cached = cached.size();
         if (retainedCount == 0 && cached.empty()) {
             return result;
@@ -3310,8 +3771,9 @@ SelectedRollBonusBindingResult BindSelectedRollBonusPresentation(
             std::uint8_t diceCount{};
             bool cached{};
         };
-        std::vector<PresentationCandidate> candidates;
-        candidates.reserve(retainedCount + cached.size());
+        FixedSnapshot<PresentationCandidate,
+            kMaximumRetainedRollBonusViewModels
+                + kMaximumCachedRollBonusPresentations> candidates;
         for (std::size_t reverse = retainedCount; reverse > 0; --reverse) {
             std::uintptr_t diceTypeSet{};
             DynamicModifierIdentity identity{};
@@ -3359,7 +3821,11 @@ SelectedRollBonusBindingResult BindSelectedRollBonusPresentation(
                 base + g_build->clientModifierCollectionRemoveRva);
         auto const existing = SnapshotClientModifierCollection(
             vmCollection, g_build->clientVmRollModifierCollectionGetRva);
-        std::vector<bool> existingConsumed(existing.size(), false);
+        auto const selectedEntries = SnapshotClientModifierCollection(
+            selectedCollection,
+            g_build->clientModifierCollectionGetRva);
+        std::array<bool,
+            kMaximumObservedDynamicModifierViewModels> existingConsumed{};
         bool const tracing = TraceEnabled();
         std::vector<std::string> bindingDetails;
 
@@ -3418,11 +3884,10 @@ SelectedRollBonusBindingResult BindSelectedRollBonusPresentation(
             // placeholder row for XAML to render while the request is in
             // flight.
             if (!candidate.cached) {
-                bool const selectedPresent =
-                    ClientModifierCollectionContains(
-                        selectedCollection,
-                        g_build->clientModifierCollectionGetRva,
-                        candidate.selectedViewModel);
+                bool const selectedPresent = std::find(
+                    selectedEntries.begin(), selectedEntries.end(),
+                    candidate.selectedViewModel)
+                    != selectedEntries.end();
                 bool const selectedValueTransferred = selectedPresent
                     && SetSelectedRollBonusResolvedValue(
                         candidate.selectedViewModel,
@@ -3584,8 +4049,6 @@ SelectedRollBonusBindingResult BindSelectedRollBonusPresentation(
                             + ":source_vm_before=" + Hex(existingSourceVm)
                             + ":source_vm_transferred="
                             + std::to_string(sourceVmTransferred ? 1 : 0)
-                            + ":name_result=" + g_lastNameBindingResult
-                            + ":name_value=" + g_lastNameBindingValue
                             + ":resolved_value="
                             + std::to_string(bonuses[*bonusMatch].value)
                             + ":resolved_value_transferred=1");
@@ -3614,8 +4077,6 @@ SelectedRollBonusBindingResult BindSelectedRollBonusPresentation(
                         + std::to_string(sourceVmTransferred ? 1 : 0)
                         + ":name_from_presentation="
                         + std::to_string(nameTransferred ? 1 : 0)
-                        + ":name_result=" + g_lastNameBindingResult
-                        + ":name_value=" + g_lastNameBindingValue
                         + ":resolved_value="
                         + std::to_string(bonuses[*bonusMatch].value)
                         + ":resolved_value_transferred="
@@ -3650,8 +4111,6 @@ SelectedRollBonusBindingResult BindSelectedRollBonusPresentation(
                         + std::to_string(sourceVmTransferred ? 1 : 0)
                         + ":name_from_presentation="
                         + std::to_string(nameTransferred ? 1 : 0)
-                        + ":name_result=" + g_lastNameBindingResult
-                        + ":name_value=" + g_lastNameBindingValue
                         + ":resolved_value="
                         + std::to_string(bonuses[*bonusMatch].value)
                         + ":resolved_value_transferred="
@@ -3673,7 +4132,7 @@ SelectedRollBonusBindingResult BindSelectedRollBonusPresentation(
                 }
                 details << bindingDetails[index];
             }
-            auto const& record = lease.selection.record;
+        auto const& record = lease.selection->record;
             Log("TRACE", "native_client_roll_bonus_presentation_bound",
                 "action=" + boh::ActionName(record.kind)
                 + "|delegation_id=" + std::to_string(record.id)
@@ -3733,6 +4192,7 @@ SelectedRollBonusBindingResult BindSelectedRollBonusPresentation(
 void ClientRollBonusReconcileStartMidHook(
     safetyhook::Context& context) noexcept
 {
+    PerfScope perf(PerfMetric::ReconcileStart);
     try {
         DrainDeferredClientViewModelReleases();
         g_rollBonusReconciliationObservation = {};
@@ -3778,8 +4238,8 @@ void ClientRollBonusReconcileStartMidHook(
             .modifiersComponent = context.rax,
             .vmRoll = reinterpret_cast<std::uintptr_t>(vmRoll),
         };
-        if (lease.has_value()) {
-            observation.selection = lease->selection;
+        if (lease.has_value() && TraceEnabled()) {
+            observation.selection = *lease->selection;
         }
         auto const bytes = static_cast<std::byte*>(bonuses);
         for (std::int32_t index = 0; index < count; ++index) {
@@ -3920,13 +4380,13 @@ void TraceAdvantageSourceModifierBinding(
 
     Log("TRACE", "native_client_advantage_source_modifier_binding",
         "action=" + (lease.has_value()
-            ? boh::ActionName(lease->selection.record.kind)
+            ? boh::ActionName(lease->selection->record.kind)
             : std::string("reference"))
         + "|delegation_id=" + (lease.has_value()
-            ? std::to_string(lease->selection.record.id)
+            ? std::to_string(lease->selection->record.id)
             : std::string("none"))
         + "|roll_uuid=" + (lease.has_value()
-            ? lease->selection.record.rollUuid
+            ? lease->selection->record.rollUuid
             : std::string("unmapped"))
         + "|profile_mode=" + (lease.has_value()
             ? std::string("delegated")
@@ -3950,6 +4410,7 @@ void TraceAdvantageSourceModifierBinding(
 void ClientRollBonusReconcileViewModelMidHook(
     safetyhook::Context& context) noexcept
 {
+    PerfScope perf(PerfMetric::ReconcileViewModel);
     try {
         TraceAdvantageSourceModifierBinding(context);
         auto& observation = g_rollBonusReconciliationObservation;
@@ -3997,7 +4458,7 @@ void ClientRollBonusReconcileViewModelMidHook(
 }
 
 struct PreservedRollBonusViewModel {
-    ClientPresentationLease lease;
+    ClientPresentationLeaseSnapshot lease;
     std::uintptr_t vmRoll{};
     std::uintptr_t viewModel{};
     std::uint8_t diceSize{};
@@ -4054,10 +4515,10 @@ void LogPreservedRollBonusViewModel(
     PreservedRollBonusViewModel const& preserved,
     std::string_view branch) noexcept
 {
-    if (!g_trace.load(std::memory_order_relaxed)) {
+    if (!TraceEnabled()) {
         return;
     }
-    auto const& record = preserved.lease.selection.record;
+    auto const& record = preserved.lease.selection->record;
     Log("TRACE", "native_client_roll_bonus_disable_suppressed",
         "action=" + boh::ActionName(record.kind)
         + "|delegation_id=" + std::to_string(record.id)
@@ -4075,7 +4536,7 @@ void LogPreservedRollBonusViewModel(
 }
 
 struct PreservedAdvantageSourceModifier {
-    ClientPresentationLease lease;
+    ClientPresentationLeaseSnapshot lease;
     std::uintptr_t vmRoll{};
     std::uintptr_t viewModel{};
     std::uintptr_t sourceViewModel{};
@@ -4137,7 +4598,7 @@ void LogPreservedAdvantageSourceModifier(
     if (!TraceEnabled()) {
         return;
     }
-    auto const& record = preserved.lease.selection.record;
+    auto const& record = preserved.lease.selection->record;
     Log("TRACE", "native_client_advantage_source_modifier_preserved",
         "action=" + boh::ActionName(record.kind)
         + "|delegation_id=" + std::to_string(record.id)
@@ -4162,6 +4623,7 @@ void LogPreservedAdvantageSourceModifier(
 void ClientRollBonusPreserveMatchedMidHook(
     safetyhook::Context& context) noexcept
 {
+    PerfScope perf(PerfMetric::PreserveMatched);
     try {
         auto const currentDisabled = static_cast<std::uint8_t>(
             context.rax & 0xffU);
@@ -4197,6 +4659,7 @@ void ClientRollBonusPreserveMatchedMidHook(
 void ClientRollBonusPreserveMissingMidHook(
     safetyhook::Context& context) noexcept
 {
+    PerfScope perf(PerfMetric::PreserveMissing);
     try {
         auto const currentDisabled = static_cast<std::uint8_t>(
             context.rax & 0xffU);
@@ -4230,7 +4693,7 @@ void ClientRollBonusPreserveMissingMidHook(
 }
 
 struct PreservedAdvantageViewModel {
-    ClientPresentationLease lease;
+    ClientPresentationLeaseSnapshot lease;
     std::uintptr_t vmRoll{};
     std::uintptr_t viewModel{};
     std::uint8_t expectedAdvantage{};
@@ -4288,7 +4751,7 @@ void LogPreservedAdvantageViewModel(
     if (!TraceEnabled()) {
         return;
     }
-    auto const& record = preserved.lease.selection.record;
+    auto const& record = preserved.lease.selection->record;
     Log("TRACE", "native_client_advantage_disable_suppressed",
         "action=" + boh::ActionName(record.kind)
         + "|delegation_id=" + std::to_string(record.id)
@@ -4360,13 +4823,13 @@ void TraceAdvantageViewModelBinding(
 
     Log("TRACE", "native_client_advantage_viewmodel_binding",
         "action=" + (lease.has_value()
-            ? boh::ActionName(lease->selection.record.kind)
+            ? boh::ActionName(lease->selection->record.kind)
             : std::string("reference"))
         + "|delegation_id=" + (lease.has_value()
-            ? std::to_string(lease->selection.record.id)
+            ? std::to_string(lease->selection->record.id)
             : std::string("none"))
         + "|roll_uuid=" + (lease.has_value()
-            ? lease->selection.record.rollUuid
+            ? lease->selection->record.rollUuid
             : std::string("unmapped"))
         + "|profile_mode=" + (lease.has_value()
             ? std::string("delegated")
@@ -4399,6 +4862,7 @@ void TraceAdvantageViewModelBinding(
 void ClientAdvantagePreserveMatchedMidHook(
     safetyhook::Context& context) noexcept
 {
+    PerfScope perf(PerfMetric::AdvantageMatched);
     try {
         TraceAdvantageViewModelBinding(context, "matched_static");
         auto const currentDisabled = static_cast<std::uint8_t>(
@@ -4427,6 +4891,7 @@ void ClientAdvantagePreserveMatchedMidHook(
 void ClientAdvantagePreserveMissingMidHook(
     safetyhook::Context& context) noexcept
 {
+    PerfScope perf(PerfMetric::AdvantageMissing);
     try {
         TraceAdvantageViewModelBinding(context, "missing_static");
         auto const currentDisabled = static_cast<std::uint8_t>(
@@ -4454,6 +4919,7 @@ void ClientAdvantagePreserveMissingMidHook(
 void ClientRollBonusRendererAddMidHook(
     safetyhook::Context& context) noexcept
 {
+    PerfScope perf(PerfMetric::RendererAdd);
     try {
         if (context.rsi == 0
             || context.r14 < kVmRollDynamicModifierCollectionOffset) {
@@ -4490,7 +4956,7 @@ void ClientRollBonusRendererAddMidHook(
         }
 
         auto const cached =
-            FindCachedRollBonusPresentations(lease->selection);
+            FindCachedRollBonusPresentations(*lease->selection);
         std::uintptr_t selected{};
         std::uintptr_t sourceVm{};
         std::size_t sameShape{};
@@ -4528,10 +4994,10 @@ void ClientRollBonusRendererAddMidHook(
 
         bool const transferred =
             SetDynamicModifierSourceVm(viewModel, sourceVm);
-        if (!g_trace.load(std::memory_order_relaxed)) {
+        if (!TraceEnabled()) {
             return;
         }
-        auto const& record = lease->selection.record;
+        auto const& record = lease->selection->record;
         Log("TRACE", "native_client_roll_bonus_renderer_source_bound",
             "action=" + boh::ActionName(record.kind)
             + "|delegation_id=" + std::to_string(record.id)
@@ -4559,7 +5025,7 @@ void ClientRollBonusRendererAddMidHook(
     }
 }
 
-void ClientRollBonusPreserveSelectedMidHook(
+[[maybe_unused]] void ClientRollBonusPreserveSelectedMidHook(
     safetyhook::Context& context) noexcept
 {
     try {
@@ -4623,7 +5089,7 @@ void ClientRollBonusPreserveSelectedMidHook(
                 true,
                 diceCount,
                 !presentInSelected);
-        auto const& record = lease->selection.record;
+        auto const& record = lease->selection->record;
         Log("TRACE",
             "native_client_roll_bonus_nested_viewmodel_candidate",
             "action=" + boh::ActionName(record.kind)
@@ -4666,6 +5132,7 @@ void ClientRollBonusPreserveSelectedMidHook(
 void ClientRollBonusReconcileEndMidHook(
     safetyhook::Context& context) noexcept
 {
+    PerfScope perf(PerfMetric::ReconcileEnd);
     try {
         auto observation = g_rollBonusReconciliationObservation;
         g_rollBonusReconciliationObservation = {};
@@ -4675,7 +5142,7 @@ void ClientRollBonusReconcileEndMidHook(
             return;
         }
 
-        if (g_trace.load(std::memory_order_relaxed)) {
+        if (TraceEnabled()) {
             auto const& record = observation.selection.record;
             for (std::size_t index = 0;
                  index < observation.viewModelCount; ++index) {
@@ -4897,6 +5364,8 @@ void ClientRollBonusReconcileEndMidHook(
 
 void ClientRollFinalizeMidHook(safetyhook::Context& context) noexcept
 {
+    PerfRollCompletion completion;
+    PerfScope perf(PerfMetric::Finalize);
     try {
         auto const activeRoll = reinterpret_cast<void*>(context.rdi);
         void* vmRoll{};
@@ -4966,13 +5435,13 @@ void ClientRollFinalizeMidHook(safetyhook::Context& context) noexcept
         context.r15 = (context.r15
                 & ~static_cast<std::uintptr_t>(0xffU)) | 1U;
 
-        if (!g_trace.load(std::memory_order_relaxed)) {
+        if (!TraceEnabled()) {
             return;
         }
         std::uint32_t rollState{};
         Read(At<std::uint32_t>(
             activeRoll, kActiveRollStateOffset), rollState);
-        auto const& record = lease->selection.record;
+        auto const& record = lease->selection->record;
         Log("TRACE", "native_client_roll_finalize_consistency",
             "action=" + boh::ActionName(record.kind)
             + "|delegation_id=" + std::to_string(record.id)
@@ -5009,179 +5478,6 @@ void ClientRollFinalizeMidHook(safetyhook::Context& context) noexcept
             + "|tick_ms=" + std::to_string(GetTickCount64()));
     } catch (...) {
         // Final presentation consistency must fail open.
-    }
-}
-
-void ClientRollPhaseMidHook(safetyhook::Context& context) noexcept
-{
-    try {
-        if (!TraceEnabled()) {
-            return;
-        }
-        auto const activeRoll = reinterpret_cast<void*>(context.rcx);
-        void* vmRoll{};
-        if (!Read(At<void*>(
-                activeRoll, kActiveRollVmRollOffset), vmRoll)
-            || vmRoll == nullptr) {
-            return;
-        }
-        auto const lease = FindClientPresentationLeaseByVmRoll(
-            reinterpret_cast<std::uintptr_t>(vmRoll));
-        if (!lease.has_value()) {
-            return;
-        }
-
-        std::uint32_t rollState{};
-        std::uint8_t displayed{};
-        std::uint8_t fallback{};
-        std::uint8_t immediateTotal{};
-        bool const stateReadable = Read(At<std::uint32_t>(
-            activeRoll, kActiveRollStateOffset), rollState);
-        bool const displayedReadable = Read(At<std::uint8_t>(
-            activeRoll, kActiveRollDisplayedValueOffset), displayed);
-        bool const fallbackReadable = Read(At<std::uint8_t>(
-            activeRoll, kActiveRollFallbackOffset), fallback);
-        bool const immediateTotalReadable = Read(At<std::uint8_t>(
-            activeRoll, kActiveRollImmediateTotalOffset), immediateTotal);
-        auto const phase = static_cast<std::uint32_t>(
-            context.r8 & 0xffffffffU);
-        auto const& record = lease->selection.record;
-        Log("TRACE", "native_client_roll_phase",
-            "action=" + boh::ActionName(record.kind)
-            + "|delegation_id=" + std::to_string(record.id)
-            + "|roll_uuid=" + record.rollUuid
-            + "|phase=" + std::to_string(phase)
-            + "|roll_state_before="
-            + (stateReadable ? std::to_string(rollState) : "unreadable")
-            + "|displayed_value_before="
-            + (displayedReadable ? std::to_string(displayed) : "unreadable")
-            + "|fallback_before="
-            + (fallbackReadable ? std::to_string(fallback) : "unreadable")
-            + "|immediate_total="
-            + (immediateTotalReadable
-                ? std::to_string(immediateTotal) : "unreadable")
-            + "|active_roll=" + Hex(context.rcx)
-            + "|vm_roll="
-            + Hex(reinterpret_cast<std::uintptr_t>(vmRoll))
-            + "|component_owner_unchanged=1"
-            + "|thread_id=" + std::to_string(GetCurrentThreadId())
-            + "|tick_ms=" + std::to_string(GetTickCount64()));
-    } catch (...) {
-        // Phase observation is trace-only and must fail open.
-    }
-}
-
-void ClientModifierAnimationStartMidHook(
-    safetyhook::Context& context) noexcept
-{
-    try {
-        g_modifierAnimationObservation = {};
-        if (!TraceEnabled()) {
-            return;
-        }
-        auto const activeRoll = reinterpret_cast<void*>(context.rcx);
-        void* vmRoll{};
-        if (!Read(At<void*>(
-                activeRoll, kActiveRollVmRollOffset), vmRoll)
-            || vmRoll == nullptr) {
-            return;
-        }
-        auto const lease = FindClientPresentationLeaseByVmRoll(
-            reinterpret_cast<std::uintptr_t>(vmRoll));
-        if (!lease.has_value()) {
-            return;
-        }
-
-        ModifierAnimationObservation observation{
-            .active = true,
-            .activeRoll = context.rcx,
-            .event = context.r8,
-            .selection = lease->selection,
-        };
-        if (!Read(At<std::uint8_t>(
-                activeRoll, kActiveRollDisplayedValueOffset),
-                observation.displayedBefore)
-            || !Read(At<std::uint8_t>(
-                activeRoll, kActiveRollFallbackOffset),
-                observation.fallbackBefore)
-            || !Read(At<std::uint8_t>(
-                activeRoll, kActiveRollImmediateTotalOffset),
-                observation.immediateTotalBefore)
-            || !Read(At<std::uint32_t>(
-                activeRoll, kActiveRollStateOffset),
-                observation.rollStateBefore)) {
-            return;
-        }
-        g_modifierAnimationObservation = std::move(observation);
-    } catch (...) {
-        g_modifierAnimationObservation = {};
-        // Modifier animation observation is trace-only and must fail open.
-    }
-}
-
-void ClientModifierAnimationEndMidHook(
-    safetyhook::Context& context) noexcept
-{
-    try {
-        if (!TraceEnabled()) {
-            g_modifierAnimationObservation = {};
-            return;
-        }
-        auto observation = std::move(g_modifierAnimationObservation);
-        g_modifierAnimationObservation = {};
-        if (!observation.active
-            || observation.activeRoll != context.rbx) {
-            return;
-        }
-        auto const activeRoll = reinterpret_cast<void*>(
-            observation.activeRoll);
-        std::uint8_t displayedAfter{};
-        std::uint8_t fallbackAfter{};
-        std::uint8_t immediateTotalAfter{};
-        std::uint32_t rollStateAfter{};
-        if (!Read(At<std::uint8_t>(
-                activeRoll, kActiveRollDisplayedValueOffset),
-                displayedAfter)
-            || !Read(At<std::uint8_t>(
-                activeRoll, kActiveRollFallbackOffset), fallbackAfter)
-            || !Read(At<std::uint8_t>(
-                activeRoll, kActiveRollImmediateTotalOffset),
-                immediateTotalAfter)
-            || !Read(At<std::uint32_t>(
-                activeRoll, kActiveRollStateOffset), rollStateAfter)) {
-            return;
-        }
-        auto const& record = observation.selection.record;
-        Log("TRACE", "native_client_modifier_animation",
-            "action=" + boh::ActionName(record.kind)
-            + "|delegation_id=" + std::to_string(record.id)
-            + "|roll_uuid=" + record.rollUuid
-            + "|event=" + Hex(observation.event)
-            + "|roll_state_before="
-            + std::to_string(observation.rollStateBefore)
-            + "|roll_state_after=" + std::to_string(rollStateAfter)
-            + "|displayed_value_before="
-            + std::to_string(observation.displayedBefore)
-            + "|displayed_value_after="
-            + std::to_string(displayedAfter)
-            + "|displayed_delta="
-            + std::to_string(
-                static_cast<int>(displayedAfter)
-                - static_cast<int>(observation.displayedBefore))
-            + "|fallback_before="
-            + std::to_string(observation.fallbackBefore)
-            + "|fallback_after=" + std::to_string(fallbackAfter)
-            + "|immediate_total_before="
-            + std::to_string(observation.immediateTotalBefore)
-            + "|immediate_total_after="
-            + std::to_string(immediateTotalAfter)
-            + "|active_roll=" + Hex(observation.activeRoll)
-            + "|component_owner_unchanged=1"
-            + "|thread_id=" + std::to_string(GetCurrentThreadId())
-            + "|tick_ms=" + std::to_string(GetTickCount64()));
-    } catch (...) {
-        g_modifierAnimationObservation = {};
-        // Modifier animation observation is trace-only and must fail open.
     }
 }
 
@@ -5259,10 +5555,6 @@ bool InstallCodeHooks(std::string& failure)
             kClientAdvantagePreserveMissingSignature,
             "client_advantage_preserve_missing", failure)
         || !ValidateHookSite(
-            g_build->clientRollBonusPreserveSelectedHookRva,
-            kClientRollBonusPreserveSelectedSignature,
-            "client_roll_bonus_preserve_selected", failure)
-        || !ValidateHookSite(
             g_build->clientRollBonusRendererAddHookRva,
             kClientRollBonusRendererAddSignature,
             "client_roll_bonus_renderer_add", failure)
@@ -5273,15 +5565,6 @@ bool InstallCodeHooks(std::string& failure)
         || !ValidateHookSite(g_build->clientRollFinalizeHookRva,
             kClientRollFinalizeSignature,
             "client_roll_finalize", failure)
-        || !ValidateHookSite(g_build->clientRollPhaseHookRva,
-            kClientRollPhaseSignature,
-            "client_roll_phase", failure)
-        || !ValidateHookSite(g_build->clientModifierAnimationStartHookRva,
-            kClientModifierAnimationStartSignature,
-            "client_modifier_animation_start", failure)
-        || !ValidateHookSite(g_build->clientModifierAnimationEndHookRva,
-            kClientModifierAnimationEndSignature,
-            "client_modifier_animation_end", failure)
         || !ValidateHookSite(g_build->clientModifierCollectionAddRva,
             kClientModifierCollectionAddSignature,
             "client_modifier_collection_add", failure)
@@ -5446,30 +5729,11 @@ bool InstallCodeHooks(std::string& failure)
         failure = "client_roll_bonus_preserve_missing_hook_creation_failed";
         return false;
     }
-    g_clientRollBonusPreserveSelectedHook = safetyhook::create_mid(
-        reinterpret_cast<void*>(
-            base + g_build->clientRollBonusPreserveSelectedHookRva),
-        &ClientRollBonusPreserveSelectedMidHook);
-    if (!g_clientRollBonusPreserveSelectedHook) {
-        g_clientRollBonusPreserveMissingHook.reset();
-        g_clientRollBonusPreserveMatchedHook.reset();
-        g_clientRollBonusReconcileViewModelHook.reset();
-        g_clientRollBonusReconcileStartHook.reset();
-        g_clientRollResultHook.reset();
-        g_clientRollStartHook.reset();
-        g_clientRollAggregateHook.reset();
-        g_clientRollPresentationHook.reset();
-        g_profileMathHook.reset();
-        g_profileUiHook.reset();
-        failure = "client_roll_bonus_preserve_selected_hook_creation_failed";
-        return false;
-    }
     g_clientRollBonusRendererAddHook = safetyhook::create_mid(
         reinterpret_cast<void*>(
             base + g_build->clientRollBonusRendererAddHookRva),
         &ClientRollBonusRendererAddMidHook);
     if (!g_clientRollBonusRendererAddHook) {
-        g_clientRollBonusPreserveSelectedHook.reset();
         g_clientRollBonusPreserveMissingHook.reset();
         g_clientRollBonusPreserveMatchedHook.reset();
         g_clientRollBonusReconcileViewModelHook.reset();
@@ -5489,7 +5753,6 @@ bool InstallCodeHooks(std::string& failure)
         &ClientRollBonusReconcileEndMidHook);
     if (!g_clientRollBonusReconcileEndHook) {
         g_clientRollBonusRendererAddHook.reset();
-        g_clientRollBonusPreserveSelectedHook.reset();
         g_clientRollBonusPreserveMissingHook.reset();
         g_clientRollBonusPreserveMatchedHook.reset();
         g_clientRollBonusReconcileViewModelHook.reset();
@@ -5509,7 +5772,6 @@ bool InstallCodeHooks(std::string& failure)
     if (!g_clientRollFinalizeHook) {
         g_clientRollBonusReconcileEndHook.reset();
         g_clientRollBonusRendererAddHook.reset();
-        g_clientRollBonusPreserveSelectedHook.reset();
         g_clientRollBonusPreserveMissingHook.reset();
         g_clientRollBonusPreserveMatchedHook.reset();
         g_clientRollBonusReconcileViewModelHook.reset();
@@ -5523,86 +5785,14 @@ bool InstallCodeHooks(std::string& failure)
         failure = "client_roll_finalize_hook_creation_failed";
         return false;
     }
-    g_clientRollPhaseHook = safetyhook::create_mid(
-        reinterpret_cast<void*>(base + g_build->clientRollPhaseHookRva),
-        &ClientRollPhaseMidHook);
-    if (!g_clientRollPhaseHook) {
-        g_clientRollFinalizeHook.reset();
-        g_clientRollBonusReconcileEndHook.reset();
-        g_clientRollBonusRendererAddHook.reset();
-        g_clientRollBonusPreserveSelectedHook.reset();
-        g_clientRollBonusPreserveMissingHook.reset();
-        g_clientRollBonusPreserveMatchedHook.reset();
-        g_clientRollBonusReconcileViewModelHook.reset();
-        g_clientRollBonusReconcileStartHook.reset();
-        g_clientRollResultHook.reset();
-        g_clientRollStartHook.reset();
-        g_clientRollAggregateHook.reset();
-        g_clientRollPresentationHook.reset();
-        g_profileMathHook.reset();
-        g_profileUiHook.reset();
-        failure = "client_roll_phase_hook_creation_failed";
-        return false;
-    }
-    g_clientModifierAnimationStartHook = safetyhook::create_mid(
-        reinterpret_cast<void*>(
-            base + g_build->clientModifierAnimationStartHookRva),
-        &ClientModifierAnimationStartMidHook);
-    if (!g_clientModifierAnimationStartHook) {
-        g_clientRollPhaseHook.reset();
-        g_clientRollFinalizeHook.reset();
-        g_clientRollBonusReconcileEndHook.reset();
-        g_clientRollBonusRendererAddHook.reset();
-        g_clientRollBonusPreserveSelectedHook.reset();
-        g_clientRollBonusPreserveMissingHook.reset();
-        g_clientRollBonusPreserveMatchedHook.reset();
-        g_clientRollBonusReconcileViewModelHook.reset();
-        g_clientRollBonusReconcileStartHook.reset();
-        g_clientRollResultHook.reset();
-        g_clientRollStartHook.reset();
-        g_clientRollAggregateHook.reset();
-        g_clientRollPresentationHook.reset();
-        g_profileMathHook.reset();
-        g_profileUiHook.reset();
-        failure = "client_modifier_animation_start_hook_creation_failed";
-        return false;
-    }
-    g_clientModifierAnimationEndHook = safetyhook::create_mid(
-        reinterpret_cast<void*>(
-            base + g_build->clientModifierAnimationEndHookRva),
-        &ClientModifierAnimationEndMidHook);
-    if (!g_clientModifierAnimationEndHook) {
-        g_clientModifierAnimationStartHook.reset();
-        g_clientRollPhaseHook.reset();
-        g_clientRollFinalizeHook.reset();
-        g_clientRollBonusReconcileEndHook.reset();
-        g_clientRollBonusRendererAddHook.reset();
-        g_clientRollBonusPreserveSelectedHook.reset();
-        g_clientRollBonusPreserveMissingHook.reset();
-        g_clientRollBonusPreserveMatchedHook.reset();
-        g_clientRollBonusReconcileViewModelHook.reset();
-        g_clientRollBonusReconcileStartHook.reset();
-        g_clientRollResultHook.reset();
-        g_clientRollStartHook.reset();
-        g_clientRollAggregateHook.reset();
-        g_clientRollPresentationHook.reset();
-        g_profileMathHook.reset();
-        g_profileUiHook.reset();
-        failure = "client_modifier_animation_end_hook_creation_failed";
-        return false;
-    }
     g_clientRollPayloadReadyHook = safetyhook::create_mid(
         reinterpret_cast<void*>(
             base + g_build->clientRollPayloadReadyHookRva),
         &ClientRollPayloadReadyMidHook);
     if (!g_clientRollPayloadReadyHook) {
-        g_clientModifierAnimationEndHook.reset();
-        g_clientModifierAnimationStartHook.reset();
-        g_clientRollPhaseHook.reset();
         g_clientRollFinalizeHook.reset();
         g_clientRollBonusReconcileEndHook.reset();
         g_clientRollBonusRendererAddHook.reset();
-        g_clientRollBonusPreserveSelectedHook.reset();
         g_clientRollBonusPreserveMissingHook.reset();
         g_clientRollBonusPreserveMatchedHook.reset();
         g_clientRollBonusReconcileViewModelHook.reset();
@@ -5622,13 +5812,9 @@ bool InstallCodeHooks(std::string& failure)
         &ClientRollPostDispatchMidHook);
     if (!g_clientRollPostDispatchHook) {
         g_clientRollPayloadReadyHook.reset();
-        g_clientModifierAnimationEndHook.reset();
-        g_clientModifierAnimationStartHook.reset();
-        g_clientRollPhaseHook.reset();
         g_clientRollFinalizeHook.reset();
         g_clientRollBonusReconcileEndHook.reset();
         g_clientRollBonusRendererAddHook.reset();
-        g_clientRollBonusPreserveSelectedHook.reset();
         g_clientRollBonusPreserveMissingHook.reset();
         g_clientRollBonusPreserveMatchedHook.reset();
         g_clientRollBonusReconcileViewModelHook.reset();
@@ -5649,13 +5835,9 @@ bool InstallCodeHooks(std::string& failure)
     if (!g_clientRollBonusKeepSelectedHook) {
         g_clientRollPostDispatchHook.reset();
         g_clientRollPayloadReadyHook.reset();
-        g_clientModifierAnimationEndHook.reset();
-        g_clientModifierAnimationStartHook.reset();
-        g_clientRollPhaseHook.reset();
         g_clientRollFinalizeHook.reset();
         g_clientRollBonusReconcileEndHook.reset();
         g_clientRollBonusRendererAddHook.reset();
-        g_clientRollBonusPreserveSelectedHook.reset();
         g_clientRollBonusPreserveMissingHook.reset();
         g_clientRollBonusPreserveMatchedHook.reset();
         g_clientRollBonusReconcileViewModelHook.reset();
@@ -5674,13 +5856,9 @@ bool InstallCodeHooks(std::string& failure)
         g_clientRollBonusKeepSelectedHook.reset();
         g_clientRollPostDispatchHook.reset();
         g_clientRollPayloadReadyHook.reset();
-        g_clientModifierAnimationEndHook.reset();
-        g_clientModifierAnimationStartHook.reset();
-        g_clientRollPhaseHook.reset();
         g_clientRollFinalizeHook.reset();
         g_clientRollBonusReconcileEndHook.reset();
         g_clientRollBonusRendererAddHook.reset();
-        g_clientRollBonusPreserveSelectedHook.reset();
         g_clientRollBonusPreserveMissingHook.reset();
         g_clientRollBonusPreserveMatchedHook.reset();
         g_clientRollBonusReconcileViewModelHook.reset();
@@ -5750,8 +5928,6 @@ bool InstallCodeHooks(std::string& failure)
         + Hex(g_build->clientAdvantagePreserveMatchedHookRva)
         + "|client_advantage_preserve_missing_rva="
         + Hex(g_build->clientAdvantagePreserveMissingHookRva)
-        + "|client_roll_bonus_preserve_selected_rva="
-        + Hex(g_build->clientRollBonusPreserveSelectedHookRva)
         + "|client_roll_bonus_keep_selected_rva="
         + Hex(g_build->clientModifierCollectionRemoveRva)
         + "|client_roll_bonus_renderer_add_rva="
@@ -5760,12 +5936,6 @@ bool InstallCodeHooks(std::string& failure)
         + Hex(g_build->clientRollBonusReconcileEndHookRva)
         + "|client_roll_finalize_rva="
         + Hex(g_build->clientRollFinalizeHookRva)
-        + "|client_roll_phase_rva="
-        + Hex(g_build->clientRollPhaseHookRva)
-        + "|client_modifier_animation_start_rva="
-        + Hex(g_build->clientModifierAnimationStartHookRva)
-        + "|client_modifier_animation_end_rva="
-        + Hex(g_build->clientModifierAnimationEndHookRva)
         + "|client_modifier_collection_add_rva="
         + Hex(g_build->clientModifierCollectionAddRva)
         + "|client_modifier_collection_remove_rva="
@@ -5802,15 +5972,11 @@ bool InstallCodeHooks(std::string& failure)
         + "|client_roll_bonus_preserve_missing=verified"
         + "|client_advantage_preserve_matched=verified"
         + "|client_advantage_preserve_missing=verified"
-        + "|client_roll_bonus_preserve_selected=verified"
         + "|client_roll_bonus_keep_selected=verified"
         + "|client_roll_bonus_renderer_add=verified"
         + "|client_roll_bonus_presentation_transfer=verified"
         + "|client_roll_bonus_reconcile_end=verified"
         + "|client_roll_finalize=verified"
-        + "|client_roll_phase=verified"
-        + "|client_modifier_animation_start=verified"
-        + "|client_modifier_animation_end=verified"
         + "|client_modifier_collection_add=verified"
         + "|client_modifier_collection_get=verified"
         + "|client_vmroll_modifier_collection_add=verified"
@@ -6005,8 +6171,27 @@ DWORD WINAPI Worker(void*)
     g_clientActionPath = root / L"Script Extender" / L"BestOfHandsNative.client";
     g_statusPath = root / L"Script Extender" / L"BestOfHandsNative.status";
     g_logPath = root / L"Script Extender Logs" / L"BestOfHandsNative.log";
+    LARGE_INTEGER qpcFrequency{};
+    if (QueryPerformanceFrequency(&qpcFrequency)) {
+        g_perfQpcFrequency.store(
+            qpcFrequency.QuadPart, std::memory_order_relaxed);
+    }
     g_session = std::to_wstring(GetCurrentProcessId())
         + L"-" + std::to_wstring(GetTickCount64());
+    g_sessionUtf8 = Narrow(g_session);
+    {
+        std::scoped_lock lock(g_clientPresentationLeaseMutex);
+        g_clientPresentationLeases.reserve(
+            kMaximumClientPresentationLeases);
+        g_clientPresentationLeaseByVmRoll.reserve(
+            kMaximumClientPresentationLeases);
+        g_cachedRollBonusPresentations.reserve(
+            kMaximumCachedRollBonusPresentations);
+        g_deferredClientViewModelReleases.reserve(
+            kMaximumClientPresentationLeases
+                * kMaximumRetainedRollBonusViewModels
+            + kMaximumCachedRollBonusPresentations);
+    }
 
     g_build = DetectBuild();
     if (g_build == nullptr) {
@@ -6017,6 +6202,12 @@ DWORD WINAPI Worker(void*)
     }
     Log("INFO", "loaded", "version=" + std::string(boh::kPluginVersion)
         + "|executable=" + Narrow(g_build->executable));
+    if constexpr (kPerfDiagnostics) {
+        Log("INFO", "perf_diagnostics_enabled",
+            "hot_path=fixed_atomic_qpc"
+            "|output=one_background_summary_per_roll"
+            "|metric_format=calls,total_us,max_us,first_us,last_us");
+    }
 
     std::string failure;
     if (!InstallCodeHooks(failure)) {
@@ -6037,7 +6228,10 @@ DWORD WINAPI Worker(void*)
     };
 
     while (!g_stop.load()) {
-        RefreshDocument(false);
+        // Game-thread hooks synchronously refresh this document before profile
+        // evaluation. The worker is only a fallback and must not make those
+        // hooks wait behind background parsing.
+        RefreshDocument(false, false);
         RefreshClientDocument(false);
         auto const world = ServerWorld();
         if (world != lastObservedWorld) {
@@ -6077,8 +6271,11 @@ DWORD WINAPI Worker(void*)
                 }
             }
         }
+        FlushCompletedPerfRolls();
         Sleep(25);
     }
+    EndActivePerfRoll(true);
+    FlushCompletedPerfRolls();
     RestoreSystemHooks();
     WriteStatus("stopped", "native plugin stopped", "");
     return 0;

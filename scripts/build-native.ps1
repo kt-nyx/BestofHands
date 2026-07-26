@@ -56,6 +56,20 @@ if ($machine -ne 0x8664) {
     throw ('Native output is not AMD64 (machine 0x{0:x4}): {1}' -f $machine, $dll)
 }
 
+if ($Configuration -eq 'Release') {
+    $ascii = [Text.Encoding]::ASCII.GetString($bytes)
+    $forbiddenTraceMarkers = @(
+        'native_profile_source_selected'
+        'native_client_'
+    )
+    foreach ($marker in $forbiddenTraceMarkers) {
+        if ($ascii.Contains($marker)) {
+            throw "Release DLL retained disabled trace payload '$marker': $dll"
+        }
+    }
+    Write-Host 'Verified release DLL contains no disabled native trace payloads.'
+}
+
 Write-Host "Created $dll" -ForegroundColor Green
 Write-Host "SHA-256: $((Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash)"
 
