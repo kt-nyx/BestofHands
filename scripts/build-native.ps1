@@ -6,7 +6,8 @@ param(
     [string]$Configuration = 'Release',
     [switch]$PerformanceDiagnostics,
     [switch]$Install,
-    [string]$GameBinPath = $env:BG3_BIN
+    [string]$GameBinPath = $env:BG3_BIN,
+    [string]$CMakeGenerator = $env:CMAKE_GENERATOR
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,12 +30,34 @@ if ($null -eq $cmake) {
 }
 $ctest = Join-Path (Split-Path -Parent $cmake) 'ctest.exe'
 $performanceDiagnosticsValue = if ($PerformanceDiagnostics) { 'ON' } else { 'OFF' }
+if (-not [string]::IsNullOrWhiteSpace($CMakeGenerator) -and
+    $CMakeGenerator -cne 'Visual Studio 18 2026' -and
+    $CMakeGenerator -cne 'Visual Studio 17 2022') {
+    throw "Unsupported CMake generator '$CMakeGenerator'. Use Visual Studio 2026 or 2022."
+}
 
-& $cmake -S $source -B $build -G 'Visual Studio 17 2022' -A x64 `
+$configureArguments = @('-S', $source, '-B', $build)
+if (-not [string]::IsNullOrWhiteSpace($CMakeGenerator)) {
+    $configureArguments += @('-G', $CMakeGenerator)
+}
+$configureArguments += @(
+    '-A', 'x64',
     "-DBEST_OF_HANDS_PERF_DIAGNOSTICS=$performanceDiagnosticsValue"
+)
+& $cmake @configureArguments
 if ($LASTEXITCODE -ne 0) {
     throw 'Native CMake configuration failed.'
 }
+$cachePath = Join-Path $build 'CMakeCache.txt'
+$generatorMatch = [regex]::Match(
+    (Get-Content -LiteralPath $cachePath -Raw),
+    '(?m)^CMAKE_GENERATOR:INTERNAL=(Visual Studio (?:18 2026|17 2022))\r?$'
+)
+if (-not $generatorMatch.Success) {
+    throw 'Native CMake configuration did not select Visual Studio 2026 or 2022.'
+}
+Write-Host "Using CMake generator: $($generatorMatch.Groups[1].Value)"
+
 & $cmake --build $build --config $Configuration --parallel
 if ($LASTEXITCODE -ne 0) {
     throw 'Native DLL compilation failed.'

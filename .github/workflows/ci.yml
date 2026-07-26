@@ -62,6 +62,35 @@ jobs:
         shell: pwsh
         run: pwsh -NoProfile -File .\scripts\test.ps1
 
+      - name: Install pinned CMake
+        shell: pwsh
+        run: |
+          $tools = Get-Content -LiteralPath .\tools\tool-versions.json -Raw |
+            ConvertFrom-Json
+          $version = $tools.nativeBuildToolchain.cmake
+          $archiveName = $tools.nativeBuildToolchain.archive
+          $expected = $tools.nativeBuildToolchain.archiveSha256.ToUpperInvariant()
+          if ($archiveName -cne "cmake-$version-windows-x86_64.zip" -or
+              $expected -notmatch '^[0-9A-F]{64}$') {
+            throw 'Pinned CMake metadata is invalid.'
+          }
+          $archive = Join-Path $env:RUNNER_TEMP $archiveName
+          $url = "https://github.com/Kitware/CMake/releases/download/v$version/$archiveName"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+          if ($actual -cne $expected) {
+            throw "CMake archive hash mismatch: $actual"
+          }
+          $destination = Join-Path $env:RUNNER_TEMP "cmake-$version"
+          Expand-Archive -LiteralPath $archive -DestinationPath $destination
+          $cmake = Get-ChildItem -LiteralPath $destination -Filter 'cmake.exe' -File -Recurse |
+            Where-Object { $_.Directory.Name -eq 'bin' } |
+            Select-Object -First 1
+          if ($null -eq $cmake) {
+            throw 'cmake.exe was not present in the pinned CMake archive.'
+          }
+          $cmake.Directory.FullName >> $env:GITHUB_PATH
+
       - name: Download pinned LSLib ExportTool
         shell: pwsh
         run: |

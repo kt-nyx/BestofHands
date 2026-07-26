@@ -16,6 +16,11 @@
     "zydis": "4.1.0",
     "zycore": "1.5.0"
   },
+  "nativeBuildToolchain": {
+    "cmake": "4.2.7",
+    "archive": "cmake-4.2.7-windows-x86_64.zip",
+    "archiveSha256": "5182396acbe8b45797a761d1625d93f8c785515c68efccb5a361f5f6167fa08d"
+  },
   "lslib": {
     "testedVersion": "1.20.4",
     "archive": "ExportTool-v1.20.4.zip",

@@ -108,6 +108,15 @@ if ($toolVersions.nativeBuildDependencies.safetyHook -ne '0.7.0' -or
     $toolVersions.nativeBuildDependencies.zycore -ne '1.5.0') {
     throw 'Native dependency versions are missing or differ from the reviewed build set.'
 }
+$cmakeVersion = [string]$toolVersions.nativeBuildToolchain.cmake
+$cmakeArchive = [string]$toolVersions.nativeBuildToolchain.archive
+$cmakeArchiveSha256 = [string]$toolVersions.nativeBuildToolchain.archiveSha256
+if ($cmakeVersion -notmatch '^\d+\.\d+\.\d+$' -or
+    ([Version]$cmakeVersion) -lt [Version]'4.2.0' -or
+    $cmakeArchive -cne "cmake-$cmakeVersion-windows-x86_64.zip" -or
+    $cmakeArchiveSha256 -notmatch '^[0-9a-f]{64}$') {
+    throw 'Pinned native CMake toolchain metadata is missing or invalid.'
+}
 
 $semanticVersion = (Get-Content -LiteralPath $versionPath -Raw).Trim()
 $semanticMatch = [regex]::Match(
