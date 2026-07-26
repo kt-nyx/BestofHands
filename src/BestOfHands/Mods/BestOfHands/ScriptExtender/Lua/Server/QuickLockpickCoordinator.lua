@@ -222,6 +222,18 @@ function QuickLockpickCoordinator.Create(
         end
         interaction.active = false
         interaction.updatedAt = api.MonotonicTime() or 0
+        interaction.stopRevision = (interaction.stopRevision or 0) + 1
+        local stopRevision = interaction.stopRevision
+        api.Schedule(
+            settings.QUICK_LOCKPICK_NATIVE_SUPPRESSION_MS or 2000,
+            function()
+                if nativeInteractions[key] == interaction
+                    and not interaction.active
+                    and interaction.stopRevision == stopRevision then
+                    nativeInteractions[key] = nil
+                end
+            end
+        )
     end
 
     function instance.OnLockpickSucceeded(actor, target)
@@ -250,6 +262,14 @@ function QuickLockpickCoordinator.Create(
             return false
         end
         return true
+    end
+
+    function instance.OnRollResult(eventName, actor, target, result)
+        if eventName ~= "GAMEPLAY_LockPicking"
+            or tonumber(result) ~= 1 then
+            return false
+        end
+        return instance.OnLockpickSucceeded(actor, target)
     end
 
     function instance.OnEnteredForceTurnBased(actor)

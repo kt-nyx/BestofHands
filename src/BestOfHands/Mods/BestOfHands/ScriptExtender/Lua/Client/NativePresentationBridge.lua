@@ -20,6 +20,13 @@ local function safeField(value, field)
 end
 
 local function entityHandle(value)
+    if value == nil then
+        return nil
+    end
+    local direct = tostring(value):match("Entity %((%x+)%)")
+    if direct ~= nil then
+        return direct
+    end
     local ok, entity = pcall(Ext.Entity.Get, value)
     if not ok or entity == nil then
         return nil
@@ -28,6 +35,13 @@ local function entityHandle(value)
 end
 
 local function entityGuid(value)
+    local directUuid = safeField(value, "Uuid")
+    local directGuid = directUuid
+        and safeField(directUuid, "EntityUuid")
+        or nil
+    if directGuid ~= nil then
+        return tostring(directGuid)
+    end
     local ok, result = pcall(function()
         local entity = Ext.Entity.Get(value)
         return entity and entity.Uuid and tostring(entity.Uuid.EntityUuid) or nil
@@ -87,9 +101,11 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
     local invalidatedLockedTargets = {}
     local lastSession = ""
     local lastProbe = ""
+    local lastLeftClickPayload = ""
     local traceEnabled = settings.TRACE_EVENTS == true
+    local scheduleLeftClickSnapshot
 
-    local function loadActions()
+    local function loadActionText()
         local ok, text = pcall(Ext.IO.LoadFile, ACTION_FILE)
         if not ok or type(text) ~= "string" then
             return nil
@@ -116,6 +132,15 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
             leftClickInitiators = {}
             lockedTargets = {}
             invalidatedLockedTargets = {}
+            lastLeftClickPayload = ""
+        end
+        return text
+    end
+
+    local function loadActions()
+        local text = loadActionText()
+        if text == nil then
+            return nil
         end
         local records = { all = {}, byDelegationId = {}, byRollUuid = {} }
         for line in text:gmatch("[^\r\n]+") do
@@ -240,10 +265,14 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
             }, "\t")
         end
         lines[#lines + 1] = "end=1"
+        local payload = table.concat(lines, "\n") .. "\n"
+        if payload == lastLeftClickPayload then
+            return true
+        end
         local ok, result = pcall(
             Ext.IO.SaveFile,
             LEFT_CLICK_FILE,
-            table.concat(lines, "\n") .. "\n"
+            payload
         )
         if not ok or result == false then
             write("client_left_click_bridge_write_failed", {
@@ -252,6 +281,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
             })
             return false
         end
+        lastLeftClickPayload = payload
         return true
     end
 
@@ -263,7 +293,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
     end
 
     local function refreshLeftClickSnapshot()
-        if loadActions() == nil then
+        if loadActionText() == nil then
             return false
         end
 
@@ -275,13 +305,12 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
         for _, entity in pairs(controlled) do
             local initiator = entityHandle(entity)
             if initiator ~= nil then
-                controlledHandles[initiator:lower()] = true
-            end
-            if initiator ~= nil then
-                initiators[initiator:lower()] = {
+                local initiatorKey = initiator:lower()
+                controlledHandles[initiatorKey] = true
+                initiators[initiatorKey] = {
                     eligible = safeField(entity, "IsInCombat") == nil
                         and safeField(entity, "IsInTurnBasedMode") == nil,
-                    initiator = initiator:lower(),
+                    initiator = initiatorKey,
                 }
             end
         end
@@ -300,7 +329,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
             ) or nil
             if owner ~= nil and controlledHandles[owner:lower()] then
                 local keyId = fixedString(safeField(key, "Key"))
-                if availableKeys[keyId] ~= true then
+                if keyId ~= "" then
                     availableKeys[keyId] = true
                 end
             end
@@ -316,6 +345,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
             local ok, netId = pcall(function()
                 return entity:GetNetId()
             end)
+            netId = ok and tonumber(netId) or nil
             local guid = objectGuid(entityGuid(entity))
             local handleKey = handle and handle:lower() or nil
             local invalidated = (handleKey ~= nil
@@ -330,12 +360,12 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
                 or invalidated
             if not excluded
                 and handle ~= nil
-                and ok
-                and tonumber(netId) ~= nil
-                and tonumber(netId) > 0 then
-                targets[handle:lower()] = {
-                    netId = tonumber(netId),
-                    target = handle:lower(),
+                and netId ~= nil
+                and netId > 0 then
+                targets[handleKey] = {
+                    guid = guid,
+                    netId = netId,
+                    target = handleKey,
                 }
             end
         end
@@ -535,10 +565,14 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
 
         local initiatorHandle = entityHandle(actorEntity)
         local targetEntityHandle = entityHandle(targetHandle)
-        local targetNetId = targetHandle:GetNetId()
+        local netIdOk, rawTargetNetId = pcall(function()
+            return targetHandle:GetNetId()
+        end)
+        local targetNetId = netIdOk and tonumber(rawTargetNetId) or nil
         if initiatorHandle == nil
             or targetEntityHandle == nil
-            or targetNetId == nil then
+            or targetNetId == nil
+            or targetNetId <= 0 then
             return false, "lockpick_identity_unavailable"
         end
 
@@ -546,7 +580,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
             initiator = initiatorHandle:lower(),
             request = data.request,
             target = targetEntityHandle:lower(),
-            targetNetId = tonumber(targetNetId),
+            targetNetId = targetNetId,
         }
         if not saveClientRecords() then
             quickRequests[data.request] = nil
@@ -585,6 +619,12 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
             return false
         end
         invalidatedLockedTargets[targetGuid] = true
+        for targetHandle, record in pairs(lockedTargets) do
+            if record.guid == targetGuid then
+                invalidatedLockedTargets[targetHandle] = true
+                lockedTargets[targetHandle] = nil
+            end
+        end
         local ok, targetHandle = pcall(
             Ext.Entity.UuidToHandle,
             targetGuid
@@ -596,6 +636,9 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
             lockedTargets[handle] = nil
         end
         local saved = saveLeftClickSnapshot()
+        if not saved and type(scheduleLeftClickSnapshot) == "function" then
+            scheduleLeftClickSnapshot()
+        end
         if traceEnabled then
             write("client_left_click_target_invalidated", {
                 saved = saved and 1 or 0,
@@ -675,26 +718,36 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
     ))
 
     local snapshotRefreshPending = false
-    local function scheduleLeftClickSnapshot()
+    local function runLeftClickSnapshotRefresh()
+        snapshotRefreshPending = false
+        local ok, refreshed = xpcall(
+            refreshLeftClickSnapshot,
+            debug.traceback
+        )
+        if not ok then
+            write("client_left_click_snapshot_failed", {
+                error = refreshed,
+            })
+        end
+        if not ok or not refreshed then
+            if snapshotRefreshPending then
+                return
+            end
+            snapshotRefreshPending = true
+            if Ext.Timer ~= nil
+                and type(Ext.Timer.WaitFor) == "function" then
+                Ext.Timer.WaitFor(250, runLeftClickSnapshotRefresh)
+            else
+                Ext.OnNextTick(runLeftClickSnapshotRefresh)
+            end
+        end
+    end
+    scheduleLeftClickSnapshot = function()
         if snapshotRefreshPending then
             return
         end
         snapshotRefreshPending = true
-        Ext.OnNextTick(function()
-            snapshotRefreshPending = false
-            local ok, refreshed = xpcall(
-                refreshLeftClickSnapshot,
-                debug.traceback
-            )
-            if not ok then
-                write("client_left_click_snapshot_failed", {
-                    error = refreshed,
-                })
-            end
-            if not ok or not refreshed then
-                scheduleLeftClickSnapshot()
-            end
-        end)
+        Ext.OnNextTick(runLeftClickSnapshotRefresh)
     end
 
     if type(Ext.OnNextTick) == "function"

@@ -18,6 +18,7 @@ $developmentPath = Join-Path $root 'DEVELOPMENT.md'
 $noticesPath = Join-Path $root 'THIRD_PARTY_NOTICES.txt'
 $nativeCmakePath = Join-Path $root 'native\CMakeLists.txt'
 $nativeHeaderPath = Join-Path $root 'native\include\BridgeProtocol.h'
+$nativeQuickLockpickHeaderPath = Join-Path $root 'native\include\QuickLockpickState.h'
 $nativeSourcePath = Join-Path $root 'native\src\BestOfHandsNative.cpp'
 $nativeBridgePath = Join-Path $moduleRoot 'ScriptExtender\Lua\Server\NativeBridge.lua'
 
@@ -34,6 +35,7 @@ $requiredFiles = @(
     $noticesPath,
     $nativeCmakePath,
     $nativeHeaderPath,
+    $nativeQuickLockpickHeaderPath,
     $nativeSourcePath,
     $nativeBridgePath
 )
@@ -349,6 +351,7 @@ if ($nativeCmake -notmatch ('project\(BestOfHandsNative VERSION ' + [regex]::Esc
     throw "Native CMake project does not expose version $semanticVersion."
 }
 $nativeSource = Get-Content -LiteralPath $nativeSourcePath -Raw
+$nativeQuickLockpickHeader = Get-Content -LiteralPath $nativeQuickLockpickHeaderPath -Raw
 foreach ($requiredNativeMarker in @(
     'ProfileUiMidHook',
     'ProfileMathMidHook',
@@ -396,6 +399,9 @@ foreach ($requiredNativeMarker in @(
     'kClientInputControllerUpdateSignature',
     'kClientSetRunningTaskSignature',
     'FindStockCharacterTask',
+    'BuildLeftClickRoutingSnapshot',
+    'g_clientGetCharacterTaskProcedure',
+    'StockLockpickTaskConfiguration',
     'activation=engine_set_running_task',
     'unsupported_game_build'
 )) {
@@ -411,10 +417,25 @@ foreach ($forbiddenQuickLockpickNativeSurface in @(
     'kClientCharacterTaskTypeOffset',
     'QuickLockpickActivation',
     'QuickLockpickDiagnostic',
-    'native_left_click_snapshot_refreshed'
+    'native_left_click_snapshot_refreshed',
+    'IsClientGetCharacterTaskAddress',
+    'g_consumedQuickLockpickOrder',
+    'kMaximumQuickLockpickRequests'
 )) {
-    if ($nativeSource.Contains($forbiddenQuickLockpickNativeSurface) -or $nativeHeader.Contains($forbiddenQuickLockpickNativeSurface)) {
+    if ($nativeSource.Contains($forbiddenQuickLockpickNativeSurface) -or
+        $nativeHeader.Contains($forbiddenQuickLockpickNativeSurface) -or
+        $nativeQuickLockpickHeader.Contains($forbiddenQuickLockpickNativeSurface)) {
         throw "Native source retains guessed quick-lockpick ABI '$forbiddenQuickLockpickNativeSurface'."
+    }
+}
+foreach ($requiredQuickLockpickContract in @(
+    'sizeof(StockLockpickTaskConfiguration) == 0x13',
+    'BuildLeftClickRoutingSnapshot',
+    'ResolveLeftClickTarget',
+    'PruneConsumedQuickLockpicks'
+)) {
+    if (-not $nativeQuickLockpickHeader.Contains($requiredQuickLockpickContract)) {
+        throw "Native quick-lockpick state contract is missing '$requiredQuickLockpickContract'."
     }
 }
 if ($sourceText.Contains('QUICK_LOCKPICK_DIAGNOSTICS')) {

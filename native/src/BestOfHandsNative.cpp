@@ -2,6 +2,7 @@
 #include "BridgeProtocol.h"
 #include "FixedSnapshot.h"
 #include "ProfileRouting.h"
+#include "QuickLockpickState.h"
 #include "SafeMemory.h"
 
 #include <Windows.h>
@@ -14,7 +15,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -136,15 +136,10 @@ constexpr std::size_t kMaximumObservedDynamicModifierViewModels = 64;
 constexpr std::size_t kMaximumClientPresentationLeases = 64;
 constexpr std::size_t kMaximumRetainedRollBonusViewModels = 16;
 constexpr std::size_t kMaximumCachedRollBonusPresentations = 16;
-constexpr std::size_t kMaximumQuickLockpickRequests = 64;
 constexpr std::size_t kClientControllerOwnerOffset = 0x08;
 constexpr std::size_t kClientControllerRunningTaskOffset = 0x50;
 constexpr std::size_t kClientItemUseTargetOffset = 0x258;
 constexpr std::size_t kClientLockpickTargetOffset = 0x250;
-constexpr std::size_t kClientLockpickTargetNetIdOffset = 0x258;
-constexpr std::size_t kClientLockpickStartedOffset = 0x260;
-constexpr std::size_t kClientLockpickTargetSelectedOffset = 0x261;
-constexpr std::size_t kClientLockpickCanLockpickOffset = 0x262;
 constexpr std::uint32_t kClientItemUseTaskType = 7;
 constexpr std::uint32_t kClientLockpickTaskType = 15;
 constexpr std::size_t kDynamicModifierVmTraceBytes = 0x200;
@@ -652,7 +647,7 @@ safetyhook::InlineHook g_clientInputControllerUpdateHook{};
 std::atomic_bool g_quickLockpickPending{false};
 std::mutex g_quickLockpickMutex;
 std::unordered_set<std::string> g_consumedQuickLockpicks;
-std::deque<std::string> g_consumedQuickLockpickOrder;
+std::atomic<std::uintptr_t> g_clientGetCharacterTaskProcedure{};
 struct ResolvedBonusObservation {
     std::uint8_t diceSize{};
     std::uint8_t diceCount{};
@@ -726,7 +721,7 @@ boh::BridgeDocument g_document;
 std::shared_mutex g_clientDocumentMutex;
 boh::ClientBridgeDocument g_clientDocument;
 std::shared_mutex g_leftClickDocumentMutex;
-boh::ClientBridgeDocument g_leftClickDocument;
+boh::LeftClickRoutingSnapshot g_leftClickDocument;
 std::string g_hookFailure;
 std::optional<fs::file_time_type> g_actionWriteTime;
 std::optional<fs::file_time_type> g_clientActionWriteTime;
@@ -1135,39 +1130,6 @@ bool IsReadable(void const* pointer, std::size_t size = 1)
     return end >= start && end <= regionEnd;
 }
 
-bool IsExecutableGameAddress(std::uintptr_t address) noexcept
-{
-    if (g_gameModule == nullptr || g_build == nullptr) {
-        return false;
-    }
-    auto const base = reinterpret_cast<std::uintptr_t>(g_gameModule);
-    if (address < base || address >= base + g_build->imageSize) {
-        return false;
-    }
-    MEMORY_BASIC_INFORMATION info{};
-    if (VirtualQuery(reinterpret_cast<void const*>(address),
-            &info, sizeof(info)) == 0
-        || info.State != MEM_COMMIT
-        || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
-        return false;
-    }
-    constexpr DWORD executable =
-        PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE
-        | PAGE_EXECUTE_WRITECOPY;
-    return (info.Protect & executable) != 0;
-}
-
-bool IsClientGetCharacterTaskAddress(std::uintptr_t address) noexcept
-{
-    if (!IsExecutableGameAddress(address)) {
-        return false;
-    }
-    std::array<std::byte, kClientGetCharacterTaskSignature.size()> bytes{};
-    return boh::SafeRead(
-            reinterpret_cast<void const*>(address), bytes)
-        && bytes == kClientGetCharacterTaskSignature;
-}
-
 template <class T>
 bool Read(void const* pointer, T& value)
 {
@@ -1196,6 +1158,9 @@ void RefreshQuickLockpickPendingFlag()
 {
     std::shared_lock documentLock(g_clientDocumentMutex);
     std::scoped_lock quickLock(g_quickLockpickMutex);
+    boh::PruneConsumedQuickLockpicks(
+        g_consumedQuickLockpicks,
+        g_clientDocument.quickLockpicks);
     bool pending = false;
     for (auto const& request : g_clientDocument.quickLockpicks) {
         if (!g_consumedQuickLockpicks.contains(request.request)) {
@@ -1210,15 +1175,7 @@ void MarkQuickLockpickConsumed(std::string const& request)
 {
     {
         std::scoped_lock lock(g_quickLockpickMutex);
-        if (g_consumedQuickLockpicks.insert(request).second) {
-            g_consumedQuickLockpickOrder.push_back(request);
-        }
-        while (g_consumedQuickLockpickOrder.size()
-            > kMaximumQuickLockpickRequests) {
-            g_consumedQuickLockpicks.erase(
-                g_consumedQuickLockpickOrder.front());
-            g_consumedQuickLockpickOrder.pop_front();
-        }
+        g_consumedQuickLockpicks.insert(request);
     }
     RefreshQuickLockpickPendingFlag();
 }
@@ -1244,13 +1201,12 @@ std::optional<boh::QuickLockpickRequest> NextQuickLockpick(
 std::optional<std::uintptr_t> FindStockCharacterTask(
     void* controller, std::uint32_t requestedType) noexcept
 {
-    if (controller == nullptr || g_gameModule == nullptr || g_build == nullptr) {
+    if (controller == nullptr) {
         return {};
     }
     auto const getCharacterTask =
-        reinterpret_cast<std::uintptr_t>(g_gameModule)
-        + g_build->clientGetCharacterTaskRva;
-    if (!IsClientGetCharacterTaskAddress(getCharacterTask)) {
+        g_clientGetCharacterTaskProcedure.load(std::memory_order_acquire);
+    if (getCharacterTask == 0) {
         return {};
     }
     void* task{};
@@ -1292,7 +1248,7 @@ std::optional<LeftClickRedirect> ResolveLeftClickRedirect(
         return {};
     }
 
-    boh::LockedTarget targetRecord;
+    std::uint64_t targetNetId{};
     std::uint64_t owner{};
     if (!Read(At<std::uint64_t>(
             controller, kClientControllerOwnerOffset), owner)
@@ -1301,29 +1257,12 @@ std::optional<LeftClickRedirect> ResolveLeftClickRedirect(
     }
     {
         std::shared_lock documentLock(g_leftClickDocumentMutex);
-        if (!g_leftClickDocument.valid
-            || g_leftClickDocument.nativeSession != g_sessionUtf8) {
+        auto const resolvedTarget = boh::ResolveLeftClickTarget(
+            g_leftClickDocument, g_sessionUtf8, owner, target);
+        if (!resolvedTarget.has_value()) {
             return {};
         }
-        auto const initiatorIt = std::ranges::find_if(
-            g_leftClickDocument.leftClickInitiators,
-            [owner](auto const& candidate) {
-                return candidate.initiator == owner;
-            });
-        if (initiatorIt
-                == g_leftClickDocument.leftClickInitiators.end()
-            || !initiatorIt->eligible) {
-            return {};
-        }
-        auto const targetIt = std::ranges::find_if(
-            g_leftClickDocument.lockedTargets,
-            [target](auto const& candidate) {
-                return candidate.target == target;
-            });
-        if (targetIt == g_leftClickDocument.lockedTargets.end()) {
-            return {};
-        }
-        targetRecord = *targetIt;
+        targetNetId = *resolvedTarget;
     }
 
     auto const lockpickTask = FindStockCharacterTask(
@@ -1338,8 +1277,8 @@ std::optional<LeftClickRedirect> ResolveLeftClickRedirect(
     }
     return LeftClickRedirect{
         *lockpickTask,
-        targetRecord.target,
-        targetRecord.netId,
+        target,
+        targetNetId,
         runningTask == *lockpickTask,
     };
 }
@@ -1348,19 +1287,12 @@ bool ConfigureStockLockpickTask(
     LeftClickRedirect const& redirect) noexcept
 {
     auto* lockpickTask = reinterpret_cast<void*>(redirect.lockpickTask);
-    std::uint8_t const no = 0;
-    std::uint8_t const yes = 1;
-    return Write(At<std::uint64_t>(
-            lockpickTask, kClientLockpickTargetOffset), redirect.target)
-        && Write(At<std::uint64_t>(
-            lockpickTask, kClientLockpickTargetNetIdOffset),
-            redirect.targetNetId)
-        && Write(At<std::uint8_t>(
-            lockpickTask, kClientLockpickStartedOffset), no)
-        && Write(At<std::uint8_t>(
-            lockpickTask, kClientLockpickTargetSelectedOffset), yes)
-        && Write(At<std::uint8_t>(
-            lockpickTask, kClientLockpickCanLockpickOffset), no);
+    boh::StockLockpickTaskConfiguration configuration{
+        .target = redirect.target,
+        .targetNetId = redirect.targetNetId,
+    };
+    return Write(At<boh::StockLockpickTaskConfiguration>(
+        lockpickTask, kClientLockpickTargetOffset), configuration);
 }
 
 void ClientTaskSelectionMidHook(safetyhook::Context& context) noexcept
@@ -2138,7 +2070,6 @@ void RefreshClientDocument(bool force)
     if (previousSession != currentSession) {
         std::scoped_lock lock(g_quickLockpickMutex);
         g_consumedQuickLockpicks.clear();
-        g_consumedQuickLockpickOrder.clear();
     }
     RefreshQuickLockpickPendingFlag();
     if (TraceEnabled()) {
@@ -2156,13 +2087,11 @@ void RefreshLeftClickDocument(bool force)
         return;
     }
     g_leftClickActionWriteTime = writeTime;
-    auto parsed = boh::ParseClientBridgeDocument(
-        ReadAll(g_leftClickActionPath));
+    auto parsed = boh::BuildLeftClickRoutingSnapshot(
+        boh::ParseClientBridgeDocument(ReadAll(g_leftClickActionPath)));
     {
         std::unique_lock lock(g_leftClickDocumentMutex);
-        g_leftClickDocument = parsed.valid
-            ? std::move(parsed)
-            : boh::ClientBridgeDocument{};
+        g_leftClickDocument = std::move(parsed);
     }
 }
 
@@ -6337,6 +6266,8 @@ bool InstallCodeHooks(std::string& failure)
         return false;
     }
     auto resetExistingCodeHooks = []() noexcept {
+        g_clientGetCharacterTaskProcedure.store(
+            0, std::memory_order_release);
         g_clientTaskSelectionHook.reset();
         g_clientRollSourceContextHook.reset();
         g_clientRollBonusKeepSelectedHook.reset();
@@ -6384,6 +6315,9 @@ bool InstallCodeHooks(std::string& failure)
         failure = "client_advantage_preserve_missing_hook_creation_failed";
         return false;
     }
+    g_clientGetCharacterTaskProcedure.store(
+        base + g_build->clientGetCharacterTaskRva,
+        std::memory_order_release);
     g_clientTaskSelectionHook = safetyhook::create_mid(
         reinterpret_cast<void*>(
             base + g_build->clientTaskSelectionHookRva),
@@ -6800,6 +6734,7 @@ DWORD WINAPI Worker(void*)
     EndActivePerfRoll(true);
     FlushCompletedPerfRolls();
     g_quickLockpickPending.store(false, std::memory_order_release);
+    g_clientGetCharacterTaskProcedure.store(0, std::memory_order_release);
     g_clientInputControllerUpdateHook.reset();
     g_clientTaskSelectionHook.reset();
     RestoreSystemHooks();

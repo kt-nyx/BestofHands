@@ -183,13 +183,12 @@ listen("RollResult", 6, "after", function(eventName, character, subject, result,
         isActive,
         criticality
     )
+    -- Left-click interception caches every locked target, including rolls for
+    -- which the initiator is already the specialist and no delegation record
+    -- is armed. Invalidate all authoritative lockpick successes rather than
+    -- coupling cache cleanup to delegated-roll ownership.
+    quickLockpick.OnRollResult(eventName, character, subject, result)
     if handled then
-        if eventName == "GAMEPLAY_LockPicking" and result == 1 then
-            -- The client Lock component can outlive the authoritative success
-            -- callback briefly. Remove this target from native left-click
-            -- eligibility before the player's next ordinary open attempt.
-            quickLockpick.OnLockpickSucceeded(character, subject)
-        end
         if diagnostics.IsTraceEnabled() then
             -- The coordinator may schedule terminal cleanup on the next tick.
             -- Queue the diagnostic snapshot afterward so pending counts

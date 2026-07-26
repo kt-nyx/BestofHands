@@ -2,6 +2,7 @@
 #include "BridgeProtocol.h"
 #include "FixedSnapshot.h"
 #include "ProfileRouting.h"
+#include "QuickLockpickState.h"
 #include "SafeMemory.h"
 
 #include <cassert>
@@ -9,6 +10,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <unordered_set>
 #include <vector>
 
 #ifdef NDEBUG
@@ -78,6 +80,21 @@ int main()
         nullptr,
         15,
         stockTask));
+    StockLockpickTaskConfiguration lockpickConfiguration{
+        .target = 0x123456789abcdef0ULL,
+        .targetNetId = 0x0fedcba987654321ULL,
+    };
+    assert(sizeof(lockpickConfiguration) == 0x13);
+    assert(lockpickConfiguration.target == 0x123456789abcdef0ULL);
+    assert(lockpickConfiguration.targetNetId == 0x0fedcba987654321ULL);
+    assert(lockpickConfiguration.lockpickingStarted == 0);
+    assert(lockpickConfiguration.targetSelected == 1);
+    assert(lockpickConfiguration.canLockpick == 0);
+    auto const* lockpickConfigurationBytes =
+        reinterpret_cast<std::uint8_t const*>(&lockpickConfiguration);
+    assert(lockpickConfigurationBytes[0x10] == 0);
+    assert(lockpickConfigurationBytes[0x11] == 1);
+    assert(lockpickConfigurationBytes[0x12] == 0);
     auto* inaccessible = VirtualAlloc(
         nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
     assert(inaccessible != nullptr);
@@ -292,6 +309,168 @@ int main()
     assert(!ParseClientBridgeDocument(
         "protocol=7\npak_version=2.0.0\nnative_session=x\n"
         "quick=request\t1\t2\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
+        "quick=request\t1\t0\t3\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
+        "quick=request\t1\t2\t0\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
+        "quick=request\t1\t2\t3\textra\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
+        "quick=request\t1\t2\t18446744073709551616\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
+        "eligible=not-hex\t1\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
+        "eligible=1\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
+        "eligible=1\t1\textra\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
+        "locked=not-hex\t1\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
+        "locked=1\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
+        "locked=1\t1\textra\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
+        "locked=1\tnot-decimal\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
+        "locked=1\t18446744073709551616\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=6\npak_version=2.0.0\nnative_session=x\n"
+        "end=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=7\npak_version=1.0.0\nnative_session=x\n"
+        "end=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=7\npak_version=2.0.0\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n").valid);
+    auto const maximumClientValues = ParseClientBridgeDocument(
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
+        "quick=request\tffffffffffffffff\tfffffffffffffffe"
+        "\t18446744073709551615\n"
+        "eligible=ffffffffffffffff\t0\n"
+        "locked=fffffffffffffffe\t18446744073709551615\n"
+        "end=1\n");
+    assert(maximumClientValues.valid);
+    assert(maximumClientValues.quickLockpicks[0].initiator
+        == 0xffffffffffffffffULL);
+    assert(maximumClientValues.quickLockpicks[0].target
+        == 0xfffffffffffffffeULL);
+    assert(maximumClientValues.quickLockpicks[0].targetNetId
+        == 0xffffffffffffffffULL);
+    assert(!maximumClientValues.leftClickInitiators[0].eligible);
+    assert(maximumClientValues.lockedTargets[0].netId
+        == 0xffffffffffffffffULL);
+    auto leftClickSnapshot = BuildLeftClickRoutingSnapshot(client);
+    assert(leftClickSnapshot.valid);
+    assert(leftClickSnapshot.nativeSession == "44-55");
+    assert(leftClickSnapshot.initiators.at(0x01c0000100000085ULL));
+    assert(leftClickSnapshot.targets.at(0x01c000010000f15cULL)
+        == 1125899906937610ULL);
+    auto const resolvedLeftClickTarget = ResolveLeftClickTarget(
+        leftClickSnapshot,
+        "44-55",
+        0x01c0000100000085ULL,
+        0x01c000010000f15cULL);
+    assert(resolvedLeftClickTarget.has_value());
+    assert(*resolvedLeftClickTarget == 1125899906937610ULL);
+    assert(!ResolveLeftClickTarget(
+        leftClickSnapshot,
+        "wrong-session",
+        0x01c0000100000085ULL,
+        0x01c000010000f15cULL).has_value());
+    assert(!ResolveLeftClickTarget(
+        leftClickSnapshot,
+        "44-55",
+        0x01c0000100000999ULL,
+        0x01c000010000f15cULL).has_value());
+    assert(!ResolveLeftClickTarget(
+        leftClickSnapshot,
+        "44-55",
+        0x01c0000100000085ULL,
+        0x01c0000100000999ULL).has_value());
+    auto duplicateInitiatorDocument = client;
+    duplicateInitiatorDocument.leftClickInitiators.push_back(
+        client.leftClickInitiators[0]);
+    assert(!BuildLeftClickRoutingSnapshot(
+        duplicateInitiatorDocument).valid);
+    auto duplicateTargetDocument = client;
+    duplicateTargetDocument.lockedTargets.push_back(
+        client.lockedTargets[0]);
+    assert(!BuildLeftClickRoutingSnapshot(duplicateTargetDocument).valid);
+    auto invalidLeftClickDocument = client;
+    invalidLeftClickDocument.valid = false;
+    assert(!BuildLeftClickRoutingSnapshot(invalidLeftClickDocument).valid);
+    auto emptyLeftClickDocument = client;
+    emptyLeftClickDocument.leftClickInitiators.clear();
+    emptyLeftClickDocument.lockedTargets.clear();
+    auto emptyLeftClickSnapshot =
+        BuildLeftClickRoutingSnapshot(emptyLeftClickDocument);
+    assert(emptyLeftClickSnapshot.valid);
+    assert(emptyLeftClickSnapshot.initiators.empty());
+    assert(emptyLeftClickSnapshot.targets.empty());
+    auto ineligibleLeftClickDocument = client;
+    ineligibleLeftClickDocument.leftClickInitiators[0].eligible = false;
+    auto ineligibleLeftClickSnapshot =
+        BuildLeftClickRoutingSnapshot(ineligibleLeftClickDocument);
+    assert(ineligibleLeftClickSnapshot.valid);
+    assert(!ineligibleLeftClickSnapshot.initiators.at(
+        0x01c0000100000085ULL));
+    assert(!ResolveLeftClickTarget(
+        ineligibleLeftClickSnapshot,
+        "44-55",
+        0x01c0000100000085ULL,
+        0x01c000010000f15cULL).has_value());
+
+    std::unordered_set<std::string> consumedRequests{
+        "active-a",
+        "active-b",
+        "stale",
+    };
+    std::vector<QuickLockpickRequest> activeRequests{
+        QuickLockpickRequest{ .request = "active-a" },
+        QuickLockpickRequest{ .request = "active-b" },
+    };
+    PruneConsumedQuickLockpicks(consumedRequests, activeRequests);
+    assert(consumedRequests.size() == 2);
+    assert(consumedRequests.contains("active-a"));
+    assert(consumedRequests.contains("active-b"));
+    activeRequests.erase(activeRequests.begin());
+    PruneConsumedQuickLockpicks(consumedRequests, activeRequests);
+    assert(consumedRequests.size() == 1);
+    assert(consumedRequests.contains("active-b"));
+    activeRequests.clear();
+    PruneConsumedQuickLockpicks(consumedRequests, activeRequests);
+    assert(consumedRequests.empty());
+    for (std::size_t index = 0; index < 128; ++index) {
+        auto request = "active-" + std::to_string(index);
+        consumedRequests.insert(request);
+        activeRequests.push_back(
+            QuickLockpickRequest{ .request = std::move(request) });
+    }
+    consumedRequests.insert("stale-large-set");
+    PruneConsumedQuickLockpicks(consumedRequests, activeRequests);
+    assert(consumedRequests.size() == 128);
+    for (auto const& request : activeRequests) {
+        assert(consumedRequests.contains(request.request));
+    }
+    activeRequests.erase(activeRequests.begin(), activeRequests.begin() + 64);
+    PruneConsumedQuickLockpicks(consumedRequests, activeRequests);
+    assert(consumedRequests.size() == 64);
+    for (auto const& request : activeRequests) {
+        assert(consumedRequests.contains(request.request));
+    }
     assert(!ParseClientBridgeDocument(
         "protocol=7\npak_version=2.0.0\n"
         "record=7\tuuid\t1\t2\t3\nend=1\n").valid);

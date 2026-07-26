@@ -329,15 +329,331 @@ test("quick lockpick fallback does not replay a native context-menu interaction"
         coordinator.OnUseFinished("actor", "target", 0),
         "active native interaction suppresses failed-Use fallback")
     coordinator.OnNativeStopped("actor", "target")
+    assertEqual(1, #scheduled,
+        "native stop schedules bounded lifecycle cleanup")
+    assertEqual(2000, scheduled[1].delay,
+        "native suppression state uses the configured grace period")
     now = 2500
     assertEqual(false,
         coordinator.OnUseFinished("actor", "target", 0),
         "native completion grace suppresses its failed Use event")
-    now = 4001
+
+    coordinator.OnNativeStopped("actor", "target")
+    assertEqual(2, #scheduled,
+        "a repeated stop refreshes the suppression lifetime")
+    now = 3001
+    scheduled[1].callback()
+    assertEqual(false,
+        coordinator.OnUseFinished("actor", "target", 0),
+        "an older cleanup cannot erase a newer suppression window")
+    now = 4501
+    scheduled[2].callback()
     assertEqual(true,
         coordinator.OnUseFinished("actor", "target", 0),
-        "a later genuine left click may create a new fallback")
+        "expired native lifecycle state is removed")
     assertEqual(1, coordinator.Count(), "new fallback is queued once")
+end)
+
+test("quick lockpick validates route identity and client replies", function()
+    local scheduled = {}
+    local sent = {}
+    local isPlayer = false
+    local actorUuid = "actor-uuid"
+    local targetUuid = "target-uuid"
+    local userId = 65537
+    local api = {
+        GetEntityUuid = function(value)
+            if value == "actor" then
+                return actorUuid
+            end
+            return targetUuid
+        end,
+        GetReservedUserId = function() return userId end,
+        IsInCombat = function() return false end,
+        IsLocked = function() return true end,
+        IsPlayer = function() return isPlayer end,
+        MonotonicTime = function() return 100 end,
+        Schedule = function(delay, callback)
+            scheduled[#scheduled + 1] = {
+                callback = callback,
+                delay = delay,
+            }
+        end,
+        SendQuickLockpick = function(_, payload, recipient)
+            sent[#sent + 1] = {
+                payload = payload,
+                userId = recipient,
+            }
+            return true
+        end,
+    }
+    local coordinator = QuickLockpickCoordinator.Create({
+        QUICK_LOCKPICK_TIMEOUT_MS = 5000,
+    }, api, {
+        IsReady = function() return true end,
+    }, {}, recordingDiagnostics())
+
+    assertEqual(false,
+        coordinator.OnUseFinished("actor", "target", 0),
+        "non-player failed Use is ignored")
+    assertEqual(0, #scheduled, "non-player schedules nothing")
+
+    isPlayer = true
+    actorUuid = nil
+    assertEqual(false,
+        coordinator.OnUseFinished("actor", "target", 0),
+        "missing actor UUID is rejected")
+    userId = nil
+    actorUuid = "actor-uuid"
+    assertEqual(false,
+        coordinator.OnUseFinished("actor", "target", 0),
+        "missing owning user is rejected")
+    userId = 65537
+    targetUuid = nil
+    assertEqual(false,
+        coordinator.OnUseFinished("actor", "target", 0),
+        "missing target UUID is rejected")
+
+    targetUuid = "target-uuid"
+    assertEqual(true,
+        coordinator.OnUseFinished("actor", "target", 0),
+        "valid route is accepted")
+    scheduled[1].callback()
+    local request = sent[1].payload.request
+    assertEqual(false,
+        coordinator.OnClientMessage(nil, 65537),
+        "nil client reply is ignored")
+    assertEqual(false,
+        coordinator.OnClientMessage({}, 65537),
+        "reply without request is ignored")
+    assertEqual(false,
+        coordinator.OnClientMessage({
+            operation = "queued",
+            request = "unknown",
+        }, 65537),
+        "unknown request is ignored")
+    assertEqual(false,
+        coordinator.OnClientMessage({
+            operation = "unknown",
+            request = request,
+        }, 65537),
+        "unknown operation is ignored")
+    assertEqual(false,
+        coordinator.OnClientMessage({
+            operation = "rejected",
+            request = request,
+        }, 1),
+        "wrong client cannot reject a request")
+    assertEqual(true,
+        coordinator.OnClientMessage({
+            operation = "rejected",
+            reason = "test_rejection",
+            request = request,
+        }, 65537),
+        "owning client rejection clears the request")
+    assertEqual(0, coordinator.Count(), "rejected request is removed")
+    assertEqual("cancel", sent[#sent].payload.operation,
+        "client rejection is acknowledged with cleanup")
+end)
+
+test("quick lockpick deferred failures and stale timers are harmless", function()
+    local now = 100
+    local locked = true
+    local scheduled = {}
+    local sent = {}
+    local failStarts = false
+    local api = {
+        GetEntityUuid = function(value) return value .. "-uuid" end,
+        GetReservedUserId = function() return 65537 end,
+        IsInCombat = function() return false end,
+        IsLocked = function() return locked end,
+        IsPlayer = function() return true end,
+        MonotonicTime = function() return now end,
+        Schedule = function(delay, callback)
+            scheduled[#scheduled + 1] = {
+                callback = callback,
+                delay = delay,
+            }
+        end,
+        SendQuickLockpick = function(_, payload)
+            sent[#sent + 1] = payload
+            return not (failStarts and payload.operation == "start")
+        end,
+    }
+    local coordinator = QuickLockpickCoordinator.Create({
+        QUICK_LOCKPICK_NATIVE_SUPPRESSION_MS = 10,
+        QUICK_LOCKPICK_TIMEOUT_MS = 5000,
+    }, api, {
+        IsReady = function() return true end,
+    }, {}, recordingDiagnostics())
+
+    assertEqual(true,
+        coordinator.OnUseFinished("actor", "target", 0),
+        "first fallback is accepted")
+    locked = false
+    scheduled[1].callback()
+    assertEqual(0, coordinator.Count(),
+        "changed lock state cancels before client dispatch")
+    assertEqual("cancel", sent[#sent].operation,
+        "changed conditions remove any client state")
+    scheduled[2].callback()
+    assertEqual(1, #sent, "stale timeout cannot send duplicate cleanup")
+
+    locked = true
+    failStarts = true
+    assertEqual(true,
+        coordinator.OnUseFinished("actor", "target", 0),
+        "second fallback is accepted")
+    scheduled[3].callback()
+    assertEqual(0, coordinator.Count(),
+        "failed client transport clears the pending request")
+    assertEqual("start", sent[#sent - 1].operation,
+        "failed start was attempted once")
+    assertEqual("cancel", sent[#sent].operation,
+        "failed start receives cleanup")
+
+    failStarts = false
+    assertEqual(true,
+        coordinator.OnUseFinished("actor", "target", 0),
+        "third fallback is accepted")
+    local thirdDispatch = scheduled[5]
+    local thirdTimeout = scheduled[6]
+    thirdDispatch.callback()
+    assertEqual(true,
+        coordinator.OnNativeRequest("actor", "target"),
+        "native request consumes the third fallback")
+    coordinator.OnNativeStopped("actor", "target")
+    now = 111
+    assertEqual(true,
+        coordinator.OnUseFinished("actor", "target", 0),
+        "replacement fallback is accepted after suppression grace")
+    assertEqual(1, coordinator.Count(), "replacement is pending")
+    thirdTimeout.callback()
+    assertEqual(1, coordinator.Count(),
+        "stale timeout cannot clear a replacement record")
+end)
+
+test("quick lockpick keeps simultaneous actor-target requests isolated", function()
+    local scheduled = {}
+    local sent = {}
+    local api = {
+        GetEntityUuid = function(value) return value .. "-uuid" end,
+        GetReservedUserId = function(actor)
+            return actor == "actor-a" and 10 or 20
+        end,
+        IsInCombat = function() return false end,
+        IsLocked = function() return true end,
+        IsPlayer = function() return true end,
+        MonotonicTime = function() return 200 end,
+        Schedule = function(delay, callback)
+            scheduled[#scheduled + 1] = {
+                callback = callback,
+                delay = delay,
+            }
+        end,
+        SendQuickLockpick = function(_, payload, userId)
+            sent[#sent + 1] = {
+                payload = payload,
+                userId = userId,
+            }
+            return true
+        end,
+    }
+    local coordinator = QuickLockpickCoordinator.Create({
+        QUICK_LOCKPICK_TIMEOUT_MS = 5000,
+    }, api, {
+        IsReady = function() return true end,
+    }, {}, recordingDiagnostics())
+
+    assertEqual(true,
+        coordinator.OnUseFinished("actor-a", "target-a", 0),
+        "first actor-target accepted")
+    assertEqual(true,
+        coordinator.OnUseFinished("actor-b", "target-b", 0),
+        "second actor-target accepted")
+    assertEqual(true,
+        coordinator.OnUseFinished("actor-a", "target-b", 0),
+        "same actor on another target is independent")
+    assertEqual(3, coordinator.Count(), "three independent requests pending")
+    scheduled[1].callback()
+    scheduled[3].callback()
+    scheduled[5].callback()
+    assertEqual(3, #sent, "each request starts exactly once")
+    assertEqual(false,
+        sent[1].payload.request == sent[2].payload.request,
+        "same-tick requests receive distinct correlation IDs")
+    assertEqual(false,
+        sent[2].payload.request == sent[3].payload.request,
+        "request sequence remains unique for every target")
+    assertEqual(10, sent[1].userId, "first request routed to actor A client")
+    assertEqual(20, sent[2].userId, "second request routed to actor B client")
+    assertEqual(10, sent[3].userId, "third request routed to actor A client")
+
+    assertEqual(true,
+        coordinator.OnNativeRequest("actor-b", "target-b"),
+        "one native request clears only its exact pending route")
+    assertEqual(2, coordinator.Count(), "two unrelated requests remain")
+    coordinator.Clear("test")
+    assertEqual(0, coordinator.Count(), "reset clears every remaining request")
+    local cancellations = 0
+    for _, message in ipairs(sent) do
+        if message.payload.operation == "cancel" then
+            cancellations = cancellations + 1
+        end
+    end
+    assertEqual(3, cancellations,
+        "consumed and reset requests each receive one cleanup")
+    local sentAfterReset = #sent
+    scheduled[2].callback()
+    scheduled[4].callback()
+    scheduled[6].callback()
+    assertEqual(sentAfterReset, #sent,
+        "stale timeouts after reset cannot send more cleanup")
+end)
+
+test("quick lockpick invalidation fails closed when routing is unavailable", function()
+    local userId = nil
+    local sendResult = false
+    local sent = 0
+    local api = {
+        GetEntityUuid = function(value) return value .. "-uuid" end,
+        GetReservedUserId = function() return userId end,
+        SendQuickLockpick = function()
+            sent = sent + 1
+            return sendResult
+        end,
+    }
+    local coordinator = QuickLockpickCoordinator.Create({}, api, {}, {},
+        recordingDiagnostics())
+
+    assertEqual(false,
+        coordinator.OnLockpickSucceeded("actor", "target"),
+        "missing owning user prevents invalidation")
+    assertEqual(0, sent, "unrouteable invalidation is not sent")
+    userId = 65537
+    assertEqual(false,
+        coordinator.OnLockpickSucceeded("actor", "target"),
+        "transport failure is reported")
+    assertEqual(1, sent, "failed invalidation is attempted once")
+    sendResult = true
+    assertEqual(true,
+        coordinator.OnLockpickSucceeded("actor", "target"),
+        "valid invalidation succeeds")
+    assertEqual(2, sent, "successful invalidation is sent once")
+    assertEqual(false,
+        coordinator.OnRollResult(
+            "GAMEPLAY_DisarmingTrap", "actor", "target", 1),
+        "trap success cannot invalidate the lockpick cache")
+    assertEqual(false,
+        coordinator.OnRollResult(
+            "GAMEPLAY_LockPicking", "actor", "target", 0),
+        "lockpick failure cannot invalidate the target")
+    assertEqual(true,
+        coordinator.OnRollResult(
+            "GAMEPLAY_LockPicking", "actor", "target", "1"),
+        "all authoritative lockpick successes invalidate the target")
+    assertEqual(3, sent,
+        "result routing adds exactly one successful invalidation")
 end)
 
 local function installEntityMock()
@@ -776,12 +1092,170 @@ test("client bridge prepares and queues BG3's stock lockpick task", function()
             .. "\t" .. targetEntity.handle .. "\t77",
         "validated native activation request"
     )
+    handler({
+        actor = actorGuid,
+        operation = "start",
+        request = "42-0-1",
+        target = targetGuid,
+    })
+    assertEqual(1, #serverMessages,
+        "duplicate start does not acknowledge or queue twice")
+    handler({ operation = "cancel", request = "unknown" })
+    assertContains(
+        files["BestOfHandsNative.client"],
+        "quick=42-0-1",
+        "unknown cancellation cannot remove another request"
+    )
     handler({ operation = "cancel", request = "42-0-1" })
     assertEqual(
         nil,
         (files["BestOfHandsNative.client"] or ""):find("quick=", 1, true),
         "cancel removes the native bridge request"
     )
+end)
+
+test("client bridge rejects malformed or unpublishable fallback requests", function()
+    local actorGuid = "11000000-0000-0000-0000-000000000001"
+    local targetGuid = "11000000-0000-0000-0000-000000000002"
+    local actorEntity = entity(actorGuid, "01c0000100000111")
+    local targetEntity = entity(targetGuid, "01c0000100000112")
+    local targetNetId = 99
+    targetEntity.GetNetId = function()
+        if targetNetId == "throw" then
+            error("simulated network ID failure")
+        end
+        return targetNetId
+    end
+    local entities = {
+        [actorGuid] = actorEntity,
+        [targetGuid] = targetEntity,
+        [actorEntity] = actorEntity,
+        [targetEntity] = targetEntity,
+    }
+    local files = {
+        ["BestOfHandsNative.actions"] = table.concat({
+            "protocol=7",
+            "pak_version=2.0.0",
+            "probe=test",
+            "native_session=44-55",
+            "trace=0",
+            "end=1",
+            "",
+        }, "\n"),
+    }
+    local handler = nil
+    local failSave = false
+    local failAcknowledgement = false
+    local messages = {}
+    Ext = {
+        Entity = {
+            Get = function(value) return entities[value] end,
+            UuidToHandle = function(value)
+                return value == targetGuid and targetEntity or nil
+            end,
+            OnCreate = function() end,
+            OnChange = function() end,
+            OnDestroy = function() end,
+        },
+        IO = {
+            LoadFile = function(path) return files[path] end,
+            SaveFile = function(path, value)
+                if failSave then
+                    return false
+                end
+                files[path] = value
+                return true
+            end,
+        },
+        Utils = { Print = function() end },
+    }
+    local channel = {
+        SetHandler = function(_, callback) handler = callback end,
+        SendToServer = function(_, payload)
+            if failAcknowledgement then
+                error("simulated channel failure")
+            end
+            messages[#messages + 1] = payload
+        end,
+    }
+    NativePresentationBridge.Start({
+        TRACE_EVENTS = false,
+        VERSION = "2.0.0",
+    }, channel)
+
+    local function start(request, actor, targetValue)
+        handler({
+            actor = actor,
+            operation = "start",
+            request = request,
+            target = targetValue,
+        })
+        return messages[#messages]
+    end
+
+    assertEqual("rejected",
+        start("unsafe|request", actorGuid, targetGuid).operation,
+        "unsafe request token is rejected")
+    assertEqual("rejected",
+        start("missing-actor", "not-a-guid", targetGuid).operation,
+        "malformed actor UUID is rejected")
+    assertEqual("rejected",
+        start("missing-target", actorGuid, "not-a-guid").operation,
+        "malformed target UUID is rejected")
+    assertEqual("rejected",
+        start("unknown-actor",
+            "11000000-0000-0000-0000-000000000099",
+            targetGuid).operation,
+        "unreplicated actor is rejected")
+    assertEqual("rejected",
+        start("unknown-target", actorGuid,
+            "11000000-0000-0000-0000-000000000099").operation,
+        "unreplicated target is rejected")
+
+    targetNetId = nil
+    assertEqual("rejected",
+        start("missing-net-id", actorGuid, targetGuid).operation,
+        "target without a network ID is rejected")
+    targetNetId = 0
+    assertEqual("rejected",
+        start("zero-net-id", actorGuid, targetGuid).operation,
+        "zero target network ID is rejected")
+    targetNetId = "not-a-number"
+    assertEqual("rejected",
+        start("invalid-net-id", actorGuid, targetGuid).operation,
+        "non-numeric target network ID is rejected")
+    targetNetId = "throw"
+    local messagesBeforeNetIdError = #messages
+    handler({
+        actor = actorGuid,
+        operation = "start",
+        request = "throwing-net-id",
+        target = targetGuid,
+    })
+    assertEqual(messagesBeforeNetIdError + 1, #messages,
+        "network ID read failure sends a rejection")
+    assertEqual("rejected", messages[#messages].operation,
+        "network ID read exception fails closed")
+    targetNetId = 99
+    failSave = true
+    assertEqual("rejected",
+        start("write-failure", actorGuid, targetGuid).operation,
+        "native request publication failure is rejected")
+    failSave = false
+    failAcknowledgement = true
+    local before = #messages
+    handler({
+        actor = actorGuid,
+        operation = "start",
+        request = "ack-failure",
+        target = targetGuid,
+    })
+    assertEqual(before, #messages,
+        "throwing channel cannot publish acknowledgement or rejection")
+    assertEqual(nil,
+        (files["BestOfHandsNative.client"] or ""):find(
+            "quick=ack-failure", 1, true),
+        "failed acknowledgement removes the published native request")
 end)
 
 test("client bridge publishes pre-use left-click interception state", function()
@@ -925,6 +1399,284 @@ test("client bridge publishes pre-use left-click interception state", function()
         "eligible=" .. actorEntity.handle .. "\t0",
         "combat disables pre-use interception"
     )
+end)
+
+test("client left-click snapshot isolates actors, keys, targets, and sessions", function()
+    local actorA = entity(
+        "21000000-0000-0000-0000-000000000001",
+        "01c0000100000211"
+    )
+    local actorB = entity(
+        "21000000-0000-0000-0000-000000000002",
+        "01c0000100000212"
+    )
+    local outsider = entity(
+        "21000000-0000-0000-0000-000000000099",
+        "01c0000100000299"
+    )
+    local keyedTarget = entity(
+        "21000000-0000-0000-0000-000000000011",
+        "01c0000100000311"
+    )
+    local freeTarget = entity(
+        "21000000-0000-0000-0000-000000000012",
+        "01c0000100000312"
+    )
+    local invalidTarget = entity(
+        "21000000-0000-0000-0000-000000000013",
+        "01c0000100000313"
+    )
+    local keyEntity = entity(
+        "21000000-0000-0000-0000-000000000021",
+        "01c0000100000411"
+    )
+    actorB.IsInTurnBasedMode = {}
+    keyedTarget.Lock = { Key_M = "KEYED_TARGET" }
+    freeTarget.Lock = { Key_M = "" }
+    invalidTarget.Lock = { Key_M = "" }
+    keyedTarget.GetNetId = function() return 111 end
+    freeTarget.GetNetId = function() return 112 end
+    invalidTarget.GetNetId = function() return 0 end
+    keyEntity.Key = { Key = "KEYED_TARGET" }
+    keyEntity.InventoryTopOwner = { TopOwner = outsider }
+
+    local componentEntities = {
+        ClientControl = { actorA, actorB },
+        Key = { keyEntity },
+        Lock = { keyedTarget, freeTarget, invalidTarget },
+    }
+    local byGuid = {
+        [keyedTarget.guid] = keyedTarget,
+        [freeTarget.guid] = freeTarget,
+        [invalidTarget.guid] = invalidTarget,
+    }
+    local callbacks = {}
+    local nextTicks = {}
+    local timers = {}
+    local files = {}
+    local handler = nil
+    local failSnapshotSave = false
+    local snapshotSaveCount = 0
+    local function actions(session)
+        return table.concat({
+            "protocol=7",
+            "pak_version=2.0.0",
+            "probe=test",
+            "native_session=" .. session,
+            "trace=0",
+            "end=1",
+            "",
+        }, "\n")
+    end
+    files["BestOfHandsNative.actions"] = actions("session-a")
+    Ext = {
+        Entity = {
+            Get = function(value) return value end,
+            UuidToHandle = function(value) return byGuid[value] end,
+            GetAllEntitiesWithComponent = function(component)
+                return componentEntities[component] or {}
+            end,
+            OnCreate = function(component, callback)
+                callbacks[component .. "Create"] = callback
+            end,
+            OnChange = function(component, callback)
+                callbacks[component .. "Change"] = callback
+            end,
+            OnDestroy = function(component, callback)
+                callbacks[component .. "Destroy"] = callback
+            end,
+        },
+        Events = {
+            SessionLoaded = { Subscribe = function() end },
+            ResetCompleted = { Subscribe = function() end },
+        },
+        IO = {
+            LoadFile = function(path) return files[path] end,
+            SaveFile = function(path, value)
+                if path == "BestOfHandsNative.leftclick"
+                    and failSnapshotSave then
+                    return false
+                end
+                if path == "BestOfHandsNative.leftclick" then
+                    snapshotSaveCount = snapshotSaveCount + 1
+                end
+                files[path] = value
+                return true
+            end,
+        },
+        OnNextTick = function(callback)
+            nextTicks[#nextTicks + 1] = callback
+        end,
+        Timer = {
+            WaitFor = function(delay, callback)
+                timers[#timers + 1] = {
+                    callback = callback,
+                    delay = delay,
+                }
+            end,
+        },
+        Utils = { Print = function() end },
+    }
+    local channel = {
+        SetHandler = function(_, callback) handler = callback end,
+        SendToServer = function() return true end,
+    }
+    NativePresentationBridge.Start({
+        TRACE_EVENTS = false,
+        VERSION = "2.0.0",
+    }, channel)
+
+    local function flush()
+        local callback = table.remove(nextTicks, 1)
+        assertEqual("function", type(callback), "snapshot refresh scheduled")
+        callback()
+    end
+    local function snapshot()
+        return files["BestOfHandsNative.leftclick"] or ""
+    end
+
+    flush()
+    assertContains(snapshot(),
+        "eligible=" .. actorA.handle .. "\t1",
+        "ordinary controlled actor is eligible")
+    assertContains(snapshot(),
+        "eligible=" .. actorB.handle .. "\t0",
+        "turn-based actor is ineligible")
+    assertContains(snapshot(),
+        "locked=" .. keyedTarget.handle .. "\t111",
+        "key owned outside the controlled party does not suppress lockpicking")
+    assertContains(snapshot(),
+        "locked=" .. freeTarget.handle .. "\t112",
+        "keyless lock is published")
+    assertEqual(nil,
+        snapshot():find("locked=" .. invalidTarget.handle, 1, true),
+        "invalid network ID is excluded")
+
+    keyEntity.InventoryTopOwner.TopOwner = actorA
+    callbacks.InventoryTopOwnerChange(keyEntity)
+    flush()
+    assertEqual(nil,
+        snapshot():find("locked=" .. keyedTarget.handle, 1, true),
+        "matching controlled-party key restores vanilla key use")
+    assertContains(snapshot(),
+        "locked=" .. freeTarget.handle .. "\t112",
+        "unrelated keyless target remains eligible")
+
+    actorB.IsInTurnBasedMode = nil
+    callbacks.IsInTurnBasedModeDestroy(actorB)
+    flush()
+    assertContains(snapshot(),
+        "eligible=" .. actorB.handle .. "\t1",
+        "leaving turn-based mode restores eligibility")
+
+    callbacks.LockChange(freeTarget)
+    callbacks.LockChange(freeTarget)
+    callbacks.KeyChange(keyEntity)
+    assertEqual(1, #nextTicks,
+        "multiple component changes coalesce into one snapshot refresh")
+    local savesBeforeUnchangedRefresh = snapshotSaveCount
+    flush()
+    assertEqual(savesBeforeUnchangedRefresh, snapshotSaveCount,
+        "unchanged snapshot does not rewrite the bridge file")
+
+    handler({
+        actor = actorA.guid,
+        operation = "invalidate",
+        target = freeTarget.guid,
+    })
+    assertEqual(nil,
+        snapshot():find("locked=" .. freeTarget.handle, 1, true),
+        "target invalidation removes only the unlocked target")
+    callbacks.LockChange(freeTarget)
+    flush()
+    assertEqual(nil,
+        snapshot():find("locked=" .. freeTarget.handle, 1, true),
+        "late changes cannot revive the invalidated target")
+    callbacks.LockCreate(keyedTarget)
+    flush()
+    assertEqual(nil,
+        snapshot():find("locked=" .. freeTarget.handle, 1, true),
+        "another target's Lock creation cannot clear the tombstone")
+    callbacks.LockCreate(freeTarget)
+    flush()
+    assertContains(snapshot(),
+        "locked=" .. freeTarget.handle .. "\t112",
+        "matching Lock creation permits genuine relocking")
+
+    byGuid[freeTarget.guid] = nil
+    handler({
+        actor = actorA.guid,
+        operation = "invalidate",
+        target = freeTarget.guid,
+    })
+    assertEqual(nil,
+        snapshot():find("locked=" .. freeTarget.handle, 1, true),
+        "UUID invalidation remains immediate if handle lookup is unavailable")
+    byGuid[freeTarget.guid] = freeTarget
+    callbacks.LockCreate(freeTarget)
+    flush()
+
+    failSnapshotSave = true
+    handler({
+        actor = actorA.guid,
+        operation = "invalidate",
+        target = freeTarget.guid,
+    })
+    handler({
+        actor = actorA.guid,
+        operation = "invalidate",
+        target = freeTarget.guid,
+    })
+    assertEqual(1, #nextTicks,
+        "repeated failed invalidations coalesce into one snapshot refresh")
+    flush()
+    assertEqual(1, #timers,
+        "continued invalidation write failure enters bounded backoff")
+    failSnapshotSave = false
+    table.remove(timers, 1).callback()
+    assertEqual(nil,
+        snapshot():find("locked=" .. freeTarget.handle, 1, true),
+        "invalidation retry removes the target without another component event")
+
+    files["BestOfHandsNative.actions"] = actions("session-b")
+    callbacks.ClientControlChange(actorA)
+    flush()
+    assertContains(snapshot(),
+        "locked=" .. freeTarget.handle .. "\t112",
+        "new native session cannot inherit stale target tombstones")
+
+    files["BestOfHandsNative.actions"] = nil
+    callbacks.KeyChange(keyEntity)
+    flush()
+    assertEqual(0, #nextTicks,
+        "failed refresh does not spin on every client tick")
+    assertEqual(1, #timers,
+        "unavailable handshake schedules one bounded retry")
+    assertEqual(250, timers[1].delay,
+        "handshake retry uses the configured backoff")
+    files["BestOfHandsNative.actions"] = actions("session-c")
+    table.remove(timers, 1).callback()
+    assertContains(snapshot(), "native_session=session-c",
+        "retry publishes the recovered native session")
+
+    local beforeInvalidMessage = snapshot()
+    handler({
+        operation = "invalidate",
+        target = "not-a-guid",
+    })
+    assertEqual(beforeInvalidMessage, snapshot(),
+        "malformed invalidation cannot alter the target snapshot")
+
+    failSnapshotSave = true
+    actorA.IsInCombat = {}
+    callbacks.IsInCombatCreate(actorA)
+    flush()
+    assertEqual(1, #timers,
+        "snapshot write failure schedules one bounded retry")
+    failSnapshotSave = false
+    table.remove(timers, 1).callback()
+    assertContains(snapshot(), "native_session=session-c",
+        "snapshot write retry recovers without another component event")
 end)
 
 test("runtime tool precheck uses BG3 party inventory without consuming anything", function()

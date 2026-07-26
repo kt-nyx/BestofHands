@@ -8,7 +8,11 @@ Client Lua publishes a compact snapshot of eligible locally controlled
 initiator handles and replicated locked targets. Targets for which the
 controlled party owns the matching key are excluded so BG3's automatic
 key-use path remains vanilla. Initiators in combat or forced turn-based mode
-are also excluded. At BG3's exact, signature-guarded internal task-selection
+are also excluded. Identical snapshots are not rewritten, and a failed
+handshake or file write retries after 250 ms instead of on every client tick.
+Native code parses each changed snapshot into duplicate-rejecting hash maps,
+so task-selection lookups do not scan every cached world lock. At BG3's exact,
+signature-guarded internal task-selection
 boundary, after the controller has ranked its reusable character tasks but
 before it clears the non-winning tasks' readiness, prepares the winner, or
 installs `RunningTask`, the DLL detects an ordinary ItemUse aimed at an
@@ -26,9 +30,13 @@ and outcome pipeline. The task-selection instruction sequence,
 `GetCharacterTask`, and the fallback-only `SetRunningTask` routine all have
 per-executable RVAs in the exact-build table and independently validated
 machine-code signatures; no source-level vtable index or Lua proxy address is
-assumed.
+assumed. The validated `GetCharacterTask` address is cached once when the hooks
+are installed instead of re-reading and re-validating its machine code during
+each intercepted selection. The five contiguous stock Lockpick task fields are
+published with one guarded 19-byte write.
 
-After an authoritative delegated lockpick success, server Lua immediately
+After any authoritative lockpick success, including a direct roll by the
+already-selected specialist, server Lua immediately
 removes that target from the owning client's left-click snapshot. The client
 tombstones its stable UUID and handle so a lagging replicated `Lock` change
 cannot reclassify the now-unlocked object before the player opens it. A future
