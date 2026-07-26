@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -26,6 +27,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -40,7 +42,6 @@ using ClientModifierCollectionAddProc = void (*)(void*, void*);
 using ClientModifierCollectionRemoveProc = bool (*)(void*, void*);
 using ClientModifierCollectionGetProc = void* (*)(void*, std::int32_t);
 using ClientSelectedModifierValueProc = void* (*)(void*);
-
 constexpr std::size_t kWorldSystemsBufferOffset = 0x30;
 constexpr std::size_t kWorldSystemsCountOffset = 0x3c;
 constexpr std::size_t kSystemEntrySize = 0xf8;
@@ -135,6 +136,12 @@ constexpr std::size_t kMaximumObservedDynamicModifierViewModels = 64;
 constexpr std::size_t kMaximumClientPresentationLeases = 64;
 constexpr std::size_t kMaximumRetainedRollBonusViewModels = 16;
 constexpr std::size_t kMaximumCachedRollBonusPresentations = 16;
+constexpr std::size_t kMaximumQuickLockpickRequests = 64;
+constexpr std::size_t kClientControllerOwnerOffset = 0x08;
+constexpr std::size_t kClientControllerUpdateVtableIndex = 4;
+constexpr std::size_t kClientControllerGetTaskVtableIndex = 11;
+constexpr std::size_t kClientControllerSetRunningTaskVtableIndex = 13;
+constexpr std::uint32_t kClientLockpickTaskType = 15;
 constexpr std::size_t kDynamicModifierVmTraceBytes = 0x200;
 constexpr std::size_t kDynamicModifierVmNameValueSize = 0x12;
 // Noesis 3.1.7 reflection ABI used by BG3. The game subclasses expose
@@ -166,6 +173,8 @@ constexpr std::string_view kReportedHooks =
     "client_roll_bonus_presentation_transfer,"
     "client_roll_bonus_reconcile_end,"
     "client_roll_finalize";
+constexpr std::string_view kReportedFeatures =
+    "quick_lockpick_task_adapter";
 
 constexpr std::array<std::byte, 11> kProfileUiSignature{
     std::byte{0x4c}, std::byte{0x89}, std::byte{0x7d}, std::byte{0x10},
@@ -584,6 +593,13 @@ safetyhook::InlineHook g_clientRollBonusKeepSelectedHook{};
 safetyhook::MidHook g_clientRollBonusRendererAddHook{};
 safetyhook::MidHook g_clientRollBonusReconcileEndHook{};
 safetyhook::MidHook g_clientRollFinalizeHook{};
+safetyhook::InlineHook g_clientInputUpdateHook{};
+std::atomic_bool g_quickLockpickPending{false};
+std::uintptr_t g_clientInputUpdateTarget{};
+std::mutex g_quickLockpickMutex;
+std::unordered_set<std::string> g_consumedQuickLockpicks;
+std::unordered_map<std::string, std::uint8_t> g_quickLockpickAttempts;
+std::deque<std::string> g_consumedQuickLockpickOrder;
 
 struct ResolvedBonusObservation {
     std::uint8_t diceSize{};
@@ -1084,6 +1100,219 @@ template <class T>
 T* At(void* base, std::size_t offset)
 {
     return reinterpret_cast<T*>(reinterpret_cast<std::byte*>(base) + offset);
+}
+
+bool IsExecutableGameAddress(std::uintptr_t address) noexcept
+{
+    if (address == 0 || g_gameModule == nullptr || g_build == nullptr) {
+        return false;
+    }
+    auto const base = reinterpret_cast<std::uintptr_t>(g_gameModule);
+    if (address < base || address >= base + g_build->imageSize) {
+        return false;
+    }
+    MEMORY_BASIC_INFORMATION info{};
+    if (VirtualQuery(reinterpret_cast<void const*>(address),
+            &info, sizeof(info)) == 0
+        || info.State != MEM_COMMIT
+        || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+        return false;
+    }
+    constexpr DWORD executable =
+        PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE
+        | PAGE_EXECUTE_WRITECOPY;
+    return (info.Protect & executable) != 0;
+}
+
+bool ReadClientControllerMethod(
+    void* controller,
+    std::size_t index,
+    std::uintptr_t& method) noexcept
+{
+    std::uintptr_t vtable{};
+    return Read(controller, vtable)
+        && vtable != 0
+        && Read(reinterpret_cast<void const*>(
+            vtable + index * sizeof(void*)), method)
+        && IsExecutableGameAddress(method);
+}
+
+void RefreshQuickLockpickPendingFlag()
+{
+    std::shared_lock documentLock(g_clientDocumentMutex);
+    std::scoped_lock quickLock(g_quickLockpickMutex);
+    bool pending = false;
+    for (auto const& request : g_clientDocument.quickLockpicks) {
+        if (!g_consumedQuickLockpicks.contains(request.request)) {
+            pending = true;
+            break;
+        }
+    }
+    g_quickLockpickPending.store(pending, std::memory_order_release);
+}
+
+void MarkQuickLockpickConsumed(std::string const& request)
+{
+    {
+        std::scoped_lock lock(g_quickLockpickMutex);
+        if (g_consumedQuickLockpicks.insert(request).second) {
+            g_consumedQuickLockpickOrder.push_back(request);
+        }
+        g_quickLockpickAttempts.erase(request);
+        while (g_consumedQuickLockpickOrder.size()
+            > kMaximumQuickLockpickRequests) {
+            g_consumedQuickLockpicks.erase(
+                g_consumedQuickLockpickOrder.front());
+            g_consumedQuickLockpickOrder.pop_front();
+        }
+    }
+    RefreshQuickLockpickPendingFlag();
+}
+
+std::optional<boh::QuickLockpickRequest> NextQuickLockpick(
+    std::uintptr_t controller)
+{
+    std::shared_lock documentLock(g_clientDocumentMutex);
+    if (!g_clientDocument.valid
+        || g_clientDocument.nativeSession != g_sessionUtf8) {
+        return {};
+    }
+    std::scoped_lock quickLock(g_quickLockpickMutex);
+    for (auto const& request : g_clientDocument.quickLockpicks) {
+        if (request.controller == controller
+            && !g_consumedQuickLockpicks.contains(request.request)) {
+            return request;
+        }
+    }
+    return {};
+}
+
+bool QuickLockpickRetryAvailable(std::string const& request)
+{
+    std::scoped_lock lock(g_quickLockpickMutex);
+    auto& attempts = g_quickLockpickAttempts[request];
+    ++attempts;
+    return attempts < 3;
+}
+
+void ProcessQuickLockpick(void* controller) noexcept
+{
+    if (!g_quickLockpickPending.load(std::memory_order_acquire)) {
+        return;
+    }
+    std::optional<boh::QuickLockpickRequest> request;
+    try {
+        request = NextQuickLockpick(
+            reinterpret_cast<std::uintptr_t>(controller));
+        if (!request.has_value()) {
+            return;
+        }
+
+        std::uint64_t owner{};
+        std::uintptr_t getTask{};
+        std::uintptr_t setRunningTask{};
+        if (!Read(At<std::uint64_t>(
+                controller, kClientControllerOwnerOffset), owner)
+            || owner != request->initiator
+            || !ReadClientControllerMethod(controller,
+                kClientControllerGetTaskVtableIndex, getTask)
+            || !ReadClientControllerMethod(controller,
+                kClientControllerSetRunningTaskVtableIndex,
+                setRunningTask)) {
+            Log("ERROR", "native_quick_lockpick_rejected",
+                "request=" + request->request
+                + "|reason=controller_validation_failed");
+            MarkQuickLockpickConsumed(request->request);
+            return;
+        }
+
+        void* stockTask{};
+        if (!boh::TryGetCharacterTask(
+                getTask, controller, kClientLockpickTaskType, stockTask)
+            || stockTask == nullptr
+            || reinterpret_cast<std::uintptr_t>(stockTask)
+                != request->task
+            || !IsReadable(stockTask, sizeof(void*))) {
+            Log("ERROR", "native_quick_lockpick_rejected",
+                "request=" + request->request
+                + "|reason=stock_task_validation_failed");
+            MarkQuickLockpickConsumed(request->request);
+            return;
+        }
+
+        bool started{};
+        if (!boh::TrySetRunningTask(
+                setRunningTask, controller, stockTask, true, started)) {
+            Log("ERROR", "native_quick_lockpick_rejected",
+                "request=" + request->request
+                + "|reason=task_activation_fault");
+            MarkQuickLockpickConsumed(request->request);
+            return;
+        }
+        if (!started && QuickLockpickRetryAvailable(request->request)) {
+            return;
+        }
+
+        Log(started ? "INFO" : "WARN",
+            started
+                ? "native_quick_lockpick_started"
+                : "native_quick_lockpick_rejected",
+            "request=" + request->request
+            + "|initiator=" + Hex(request->initiator)
+            + "|target=" + Hex(request->target)
+            + (started
+                ? "|task=stock_client_lockpick"
+                : "|reason=task_activation_declined"));
+        MarkQuickLockpickConsumed(request->request);
+    } catch (...) {
+        Log("ERROR", "native_quick_lockpick_rejected",
+            "request=" + (request.has_value()
+                    ? request->request
+                    : std::string{"unresolved"})
+                + "|reason=unexpected_exception");
+        if (request.has_value()) {
+            MarkQuickLockpickConsumed(request->request);
+        } else {
+            g_quickLockpickPending.store(false, std::memory_order_release);
+        }
+    }
+}
+
+void ClientInputUpdateDetour(
+    void* controller, void const* gameTime) noexcept
+{
+    g_clientInputUpdateHook.call<void>(controller, gameTime);
+    ProcessQuickLockpick(controller);
+}
+
+bool EnsureClientInputUpdateHook(
+    std::uintptr_t controller,
+    std::string& failure)
+{
+    std::uintptr_t update{};
+    if (!ReadClientControllerMethod(
+            reinterpret_cast<void*>(controller),
+            kClientControllerUpdateVtableIndex, update)) {
+        failure = "quick_lockpick_input_update_validation_failed";
+        return false;
+    }
+    if (g_clientInputUpdateHook) {
+        if (update != g_clientInputUpdateTarget) {
+            failure = "quick_lockpick_input_update_target_changed";
+            return false;
+        }
+        return true;
+    }
+    g_clientInputUpdateHook = safetyhook::create_inline(
+        reinterpret_cast<void*>(update), &ClientInputUpdateDetour);
+    if (!g_clientInputUpdateHook) {
+        failure = "quick_lockpick_input_update_hook_creation_failed";
+        return false;
+    }
+    g_clientInputUpdateTarget = update;
+    Log("INFO", "native_quick_lockpick_adapter_ready",
+        "input_update=" + Hex(update));
+    return true;
 }
 
 void QueueClientViewModelReleases(ClientPresentationLease& lease)
@@ -1590,6 +1819,7 @@ void WriteStatus(std::string_view state, std::string_view detail, std::string_vi
            << "session=" << Narrow(g_session) << "\n"
            << "pid=" << GetCurrentProcessId() << "\n"
            << "hooks=" << (g_hooksReady.load() ? kReportedHooks : "none") << "\n"
+           << "features=" << kReportedFeatures << "\n"
            << "ack=" << ack << "\n"
            << "detail=" << detail << "\n"
            << "end=1\n";
@@ -1671,8 +1901,11 @@ void RefreshClientDocument(bool force)
     g_clientActionWriteTime = writeTime;
     auto parsed = boh::ParseClientBridgeDocument(ReadAll(g_clientActionPath));
     if (!parsed.valid) {
-        std::unique_lock lock(g_clientDocumentMutex);
-        g_clientDocument = {};
+        {
+            std::unique_lock lock(g_clientDocumentMutex);
+            g_clientDocument = {};
+        }
+        g_quickLockpickPending.store(false, std::memory_order_release);
         if (TraceEnabled()) {
             Log("TRACE", "native_client_bridge_cleared",
                 "reason=invalid_or_incomplete_document");
@@ -1680,13 +1913,35 @@ void RefreshClientDocument(bool force)
         return;
     }
     auto const recordCount = parsed.records.size();
+    auto const quickCount = parsed.quickLockpicks.size();
+    auto const quickController = quickCount > 0
+        ? parsed.quickLockpicks.front().controller
+        : 0;
+    auto const currentSession = parsed.nativeSession;
+    std::string previousSession;
     {
         std::unique_lock lock(g_clientDocumentMutex);
+        previousSession = g_clientDocument.nativeSession;
         g_clientDocument = std::move(parsed);
     }
+    if (previousSession != currentSession) {
+        std::scoped_lock lock(g_quickLockpickMutex);
+        g_consumedQuickLockpicks.clear();
+        g_quickLockpickAttempts.clear();
+        g_consumedQuickLockpickOrder.clear();
+    }
+    if (quickController != 0) {
+        std::string failure;
+        if (!EnsureClientInputUpdateHook(quickController, failure)) {
+            Log("ERROR", "native_quick_lockpick_adapter_failed",
+                "detail=" + failure);
+        }
+    }
+    RefreshQuickLockpickPendingFlag();
     if (TraceEnabled()) {
         Log("TRACE", "native_client_bridge_refreshed",
-            "records=" + std::to_string(recordCount));
+            "records=" + std::to_string(recordCount)
+            + "|quick_lockpicks=" + std::to_string(quickCount));
     }
 }
 
@@ -6269,6 +6524,9 @@ DWORD WINAPI Worker(void*)
     }
     EndActivePerfRoll(true);
     FlushCompletedPerfRolls();
+    g_quickLockpickPending.store(false, std::memory_order_release);
+    g_clientInputUpdateHook.reset();
+    g_clientInputUpdateTarget = 0;
     RestoreSystemHooks();
     WriteStatus("stopped", "native plugin stopped", "");
     return 0;

@@ -107,6 +107,60 @@ function NativeRuntimeApi.Create(settings, diagnostics)
         end)
     end
 
+    function api.IsPlayer(character)
+        return safe(diagnostics, "DB_Players.Get", false, function()
+            local rows = Osi.DB_Players:Get(character) or {}
+            return next(rows) ~= nil
+        end)
+    end
+
+    function api.IsLocked(target)
+        return safe(diagnostics, "IsLocked", false, function()
+            return Osi.IsLocked(target) == 1
+        end)
+    end
+
+    function api.IsInCombat(character)
+        return safe(diagnostics, "IsInCombat", true, function()
+            return Osi.IsInCombat(character) == 1
+        end)
+    end
+
+    function api.GetEntityUuid(value)
+        return safe(diagnostics, "EntityUuid", nil, function()
+            local entity = Ext.Entity.Get(value)
+            local uuid = entity
+                and entity.Uuid
+                and entity.Uuid.EntityUuid
+                or nil
+            return uuid ~= nil and tostring(uuid) or nil
+        end)
+    end
+
+    function api.GetReservedUserId(character)
+        return safe(diagnostics, "GetReservedUserID", nil, function()
+            local userId = Osi.GetReservedUserID(character)
+            return type(userId) == "number" and userId >= 0 and userId or nil
+        end)
+    end
+
+    function api.SendQuickLockpick(channel, payload, userId)
+        return safe(diagnostics, "QuickLockpick.SendToClient", false, function()
+            channel:SendToClient(payload, userId)
+            return true
+        end)
+    end
+
+    function api.MonotonicTime()
+        return safe(diagnostics, "MonotonicTime", nil, function()
+            if Ext.Utils ~= nil
+                and type(Ext.Utils.MonotonicTime) == "function" then
+                return Ext.Utils.MonotonicTime()
+            end
+            return nil
+        end)
+    end
+
     function api.RejectNativeActionWithoutTool(action, character, target)
         local responsePublished = safe(
             diagnostics,

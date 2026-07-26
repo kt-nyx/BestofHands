@@ -12,13 +12,14 @@ Now you can leave it in the ***Best of Hands***.
 
 Best of Hands is a focused QoL mod for lockpicking and trap disarming:
 
+- Left-clicking a locked door or container starts its ordinary lockpick action automatically.
 - Lockpick and disarm checks use the complete native modifier profile of the eligible active-party character with the **highest Sleight of Hand**.
 
 If your party has the key for a door or chest, the key is still used instead of starting a lockpick.
 
 The character who starts the interaction remains responsible for movement, visibility, ownership, permission, and crime. The selected specialist supplies the roll profile only. The initiator's bonuses are not added to it.
 
-Version 2 uses BG3's original action and roll pipelines. This preserves one visible roll, Inspiration retries, lockpick **Try Again**, trap activation on failure, success callbacks, and ordinary tool consumption. The mod does not copy a hand-picked list of bonuses, so equipment, statuses, advantage, consumables, and mod-added native roll modifiers can participate normally.
+Version 2 turns a failed ordinary left-click on a lock into BG3's own reusable client lockpick task, then uses BG3's original action and roll pipelines. This preserves movement to the target, permissions, keys, one visible roll, Inspiration retries, lockpick **Try Again**, trap activation on failure, success callbacks, and ordinary tool consumption. The mod does not copy a hand-picked list of bonuses, so equipment, statuses, advantage, consumables, and mod-added native roll modifiers can participate normally. Context-menu lockpicking remains available and enters the same pipeline.
 
 For delegated advantage or disadvantage, the native plugin supplies the specialist's aggregate roll mode at BG3's own active-roll viewmodel boundary and retains that local presentation value through the click-to-roll transition. BG3 still constructs the dice, modifier rows, and animations; the mod does not replace the roll UI or change replicated gameplay state.
 

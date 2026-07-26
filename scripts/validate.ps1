@@ -138,6 +138,7 @@ $expectedPackageFiles = @(
     'Mods/BestOfHands/ScriptExtender/Lua/BootstrapClient.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/BootstrapServer.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Client/NativePresentationBridge.lua',
+    'Mods/BestOfHands/ScriptExtender/Lua/Shared/Channels.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/LegacyAssistanceCleanup.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/Diagnostics.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/Init.lua',
@@ -145,6 +146,7 @@ $expectedPackageFiles = @(
     'Mods/BestOfHands/ScriptExtender/Lua/Server/NativeInteractionCoordinator.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/NativeRuntimeApi.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/PartySkillResolver.lua',
+    'Mods/BestOfHands/ScriptExtender/Lua/Server/QuickLockpickCoordinator.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/Settings.lua'
 ) | Sort-Object
 
@@ -242,6 +244,8 @@ $initText = Get-Content -LiteralPath $initPath -Raw
 foreach ($requiredNativeSurface in @(
     'Server/NativeBridge.lua',
     'Server/NativeInteractionCoordinator.lua',
+    'Server/QuickLockpickCoordinator.lua',
+    'listen("UseFinished"',
     'listen("RequestCanLockpick"',
     'listen("RequestCanDisarmTrap"',
     'listen("RequestProcessed"'
@@ -249,9 +253,6 @@ foreach ($requiredNativeSurface in @(
     if (-not $initText.Contains($requiredNativeSurface)) {
         throw "V2 native bootstrap surface is missing '$requiredNativeSurface'."
     }
-}
-if ($initText.Contains('UseFinished')) {
-    throw 'V2 must not retain the custom UseFinished roll path.'
 }
 
 $coordinatorPath = Join-Path $moduleRoot 'ScriptExtender\Lua\Server\NativeInteractionCoordinator.lua'
@@ -291,7 +292,10 @@ foreach ($requiredClientPresentationSurface in @(
     'BestOfHandsNative.client',
     'client_profile_mapping_written',
     'client_profile_mapping_removed',
+    'client_quick_lockpick_requested',
     'dc_active_roll_trace',
+    'task.TargetSelected = true',
+    '"quick=" .. record.request',
     'rollUuid',
     'specialistHandle'
 )) {
@@ -365,6 +369,11 @@ foreach ($requiredNativeMarker in @(
     'ProfileScope::Client',
     'component_owner_unchanged=1',
     'requested_roll_owner_mutation=0',
+    'ClientInputUpdateDetour',
+    'TrySetRunningTask',
+    'kClientControllerSetRunningTaskVtableIndex',
+    'stock_client_lockpick',
+    'quick_lockpick_task_adapter',
     'unsupported_game_build'
 )) {
     if (-not $nativeSource.Contains($requiredNativeMarker)) {
@@ -397,7 +406,7 @@ $reportedHooksMatch = [regex]::Match(
 $requiredHooksSource = Get-Content -LiteralPath $nativeBridgePath -Raw
 $requiredHooksMatch = [regex]::Match(
     $requiredHooksSource,
-    'local REQUIRED_HOOKS\s*=\s*(?<body>[\s\S]*?)\r?\n\r?\nNativeBridge'
+    'local REQUIRED_HOOKS\s*=\s*(?<body>[\s\S]*?)\r?\nlocal REQUIRED_FEATURES'
 )
 if (-not $reportedHooksMatch.Success -or -not $requiredHooksMatch.Success) {
     throw 'Could not parse the native/Lua hook handshake manifests.'
@@ -415,6 +424,26 @@ if ($reportedHooks -ne $requiredHooks) {
 }
 if ($reportedHooks.Contains('client_roll_bonus_preserve_selected')) {
     throw 'Production hook manifest retains the retired observation-only selected-modifier hook.'
+}
+
+$reportedFeaturesMatch = [regex]::Match(
+    $nativeSource,
+    'constexpr std::string_view kReportedFeatures\s*=\s*(?<body>[\s\S]*?);'
+)
+$requiredFeaturesMatch = [regex]::Match(
+    $requiredHooksSource,
+    'local REQUIRED_FEATURES\s*=\s*"(?<value>[^"]*)"'
+)
+if (-not $reportedFeaturesMatch.Success -or -not $requiredFeaturesMatch.Success) {
+    throw 'Could not parse the native/Lua feature handshake manifests.'
+}
+$reportedFeatures = ([regex]::Matches(
+    $reportedFeaturesMatch.Groups['body'].Value,
+    '"([^"]*)"'
+) | ForEach-Object { $_.Groups[1].Value }) -join ''
+$requiredFeatures = $requiredFeaturesMatch.Groups['value'].Value
+if ($reportedFeatures -ne $requiredFeatures) {
+    throw "Native and Lua feature handshake manifests differ.`nNative: $reportedFeatures`nLua: $requiredFeatures"
 }
 
 $license = Get-Content -LiteralPath $licensePath -Raw

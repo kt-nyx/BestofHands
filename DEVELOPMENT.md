@@ -1,16 +1,19 @@
 # Developing Best of Hands
 
-Best of Hands 2.0 consists of a normal BG3 PAK and a small Windows native plugin. The PAK selects the specialist and owns diagnostics; the DLL changes the roll-profile source at narrow validated server action boundaries and supplies the specialist's aggregate advantage at the exact client `DCActiveRoll` presentation boundary. A bounded, exact-roll-UUID client lease retains that presentation value after the replicated `RequestedRoll` is destroyed and preserves it through BG3's signature-validated modifier-aggregation and click-to-roll boundaries. These hooks never change the server roll component or outcome. On the client they may correct only presentation state, including the local advantage byte and immediate-total fallback flag; numeric result values and ownership remain unchanged. Neither half completes actions, rolls dice, consumes tools, or synthesizes success/failure outcomes. The only gameplay target rewrite is an accepted active-roll bonus: its already validated initiator target is changed to the specialist so the effect enters the delegated profile.
+Best of Hands 2.0 consists of a normal BG3 PAK and a small Windows native plugin. The PAK selects the specialist and owns diagnostics; the DLL changes the roll-profile source at narrow validated server action boundaries and supplies the specialist's aggregate advantage at the exact client `DCActiveRoll` presentation boundary. A bounded, exact-roll-UUID client lease retains that presentation value after the replicated `RequestedRoll` is destroyed and preserves it through BG3's signature-validated modifier-aggregation and click-to-roll boundaries. These hooks never change the server roll component or outcome. On the client they may correct only presentation state, including the local advantage byte and immediate-total fallback flag; numeric result values and ownership remain unchanged. Neither half completes actions, rolls dice, consumes tools, or synthesizes success/failure outcomes. The left-click adapter activates only BG3's stock client Lockpick task, and the only gameplay target rewrite is an accepted active-roll bonus: its already validated initiator target is changed to the specialist so the effect enters the delegated profile.
 
 ## Runtime contract
 
-> **Current validation boundary:** the native profile-source path below is
-> implemented for BG3's ordinary lockpick and disarm actions. The v1 automatic
-> left-click lockpick entry point is not currently enabled: a failed ordinary
-> `Use` does not itself create BG3's client lockpick task. During the first
-> runtime validation pass, initiate lockpicking from the native context-menu
-> action. Do not publish v2 until a client-task adapter restores left-click
-> lockpicking without reviving the removed custom roll/outcome path.
+An ordinary left-click on a locked door or container first remains entirely
+vanilla. If that `Use` fails while the object is still locked, server Lua sends
+one coalesced request to the owning client. Client Lua fills BG3's existing
+reusable Lockpick task with the target, and the DLL invokes the task
+controller's normal `SetRunningTask` method on its own client update boundary.
+That stock task performs movement and emits the same `RequestCanLockpick` used
+by the context-menu action. From that event onward, both entry points use the
+single shared delegation flow below. Combat and forced turn-based interactions
+are left untouched; malformed, stale, or unrouteable requests time out without
+creating a custom fallback.
 
 For a delegated lockpick or disarm:
 
@@ -52,6 +55,7 @@ The handshake is challenge/acknowledgement based. A status file from an old BG3 
 PAK / server Lua
   Init.lua
     +-- PartySkillResolver.lua
+    +-- QuickLockpickCoordinator.lua -- failed Use -> owning client
     +-- NativeInteractionCoordinator.lua
     +-- NativeBridge.lua <---- files ----> BestOfHandsNative.dll
     +-- NativeRuntimeApi.lua
@@ -59,9 +63,14 @@ PAK / server Lua
     `-- Diagnostics.lua
 
 PAK / client Lua
-  NativePresentationBridge.lua -> roll UUID -> client specialist handle
+  Channels.lua
+  NativePresentationBridge.lua -> stock Lockpick task request
+                               -> roll UUID -> client specialist handle
 
 Native DLL
+  stock task adapter -> validated InputController vtable
+                     -> SetRunningTask(existing Lockpick task) exactly once
+                     -> ordinary RequestCanLockpick
   build guard -> exact server UI/math, client builder, and roll-start signatures
               -> SafetyHook mid-hooks
               -> server world -> shared modifier/roll refresh wrappers
@@ -83,6 +92,7 @@ Native DLL
 The bridge files live under `%LOCALAPPDATA%\Larian Studios\Baldur's Gate 3\Script Extender`:
 
 - `BestOfHandsNative.actions`
+- `BestOfHandsNative.client`
 - `BestOfHandsNative.status`
 
 The native log is `%LOCALAPPDATA%\Larian Studios\Baldur's Gate 3\Script Extender Logs\BestOfHandsNative.log`.
@@ -105,6 +115,8 @@ src/BestOfHands/Mods/BestOfHands/
       BootstrapServer.lua
       Client/
         NativePresentationBridge.lua
+      Shared/
+        Channels.lua
       Server/
         Diagnostics.lua
         Init.lua
@@ -113,6 +125,7 @@ src/BestOfHands/Mods/BestOfHands/
         NativeInteractionCoordinator.lua
         NativeRuntimeApi.lua
         PartySkillResolver.lua
+        QuickLockpickCoordinator.lua
         Settings.lua
 tests/lua/test_runner.lua
 scripts/
@@ -132,6 +145,7 @@ Do not change the module UUID during ordinary development.
 - Rank by calculated raw Sleight of Hand; do not approximate a profile from that number.
 - Never add, subtract, copy, or reconstruct individual modifiers.
 - Never block and replace a native action with `RequestActiveRoll`, `Unlock`, `AttemptedDisarm`, or manual tool removal.
+- A failed `UseFinished` may request only BG3's stock client Lockpick task. It must never own permission, movement, rolls, outcomes, keys, or tools.
 - Call every wrapped native system exactly once. Substitute only ephemeral register-local sources; never write `RequestedRoll.Roller` or `ServerRollFinishedEvent.Roller`.
 - Keep native mutation guarded by a complete executable signature set.
 - Treat uncertain state as no delegation. Vanilla behavior must remain available.
@@ -256,7 +270,14 @@ Test both an initiator with no bonuses and one whose total would exceed the spec
 - `pending_delegations=0` after completion/cancellation;
 - no duplicate roll/result/callback records.
 
-Also validate keys, no-tool behavior, doors, containers, pressure plates, vents, owned objects, stealth, forced turn-based mode, party changes, larger parties, save reload, and multiplayer actors. Run the matrix separately on DX11 and Vulkan.
+For the left-click entry specifically, compare a locked door and container
+against their context-menu Lockpick actions. Confirm one roll after movement,
+ordinary key use without a roll, the native no-tool rejection, coalescing of
+rapid repeated clicks, and no automatic task in combat or forced turn-based
+mode. Then validate keys, no-tool behavior, doors, containers, pressure
+plates, vents, owned objects, stealth, forced turn-based mode, party changes,
+larger parties, save reload, and multiplayer actors. Run the matrix separately
+on DX11 and Vulkan.
 
 Eternal Lockpick and Eternal Trap Disarm Kit are not part of the initial v2 release gate. Their compatibility matrix begins only after the base native path is stable.
 

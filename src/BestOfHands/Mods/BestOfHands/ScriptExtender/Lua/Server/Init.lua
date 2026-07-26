@@ -7,6 +7,8 @@ local PartySkillResolver = Ext.Require("Server/PartySkillResolver.lua")
 local LegacyAssistanceCleanup = Ext.Require("Server/LegacyAssistanceCleanup.lua")
 local NativeBridge = Ext.Require("Server/NativeBridge.lua")
 local NativeInteractionCoordinator = Ext.Require("Server/NativeInteractionCoordinator.lua")
+local QuickLockpickCoordinator = Ext.Require("Server/QuickLockpickCoordinator.lua")
+local Channels = Ext.Require("Shared/Channels.lua")
 
 Ext.Vars.RegisterModVariable(Settings.MODULE_UUID, Settings.ACTIVE_ASSISTANCE_VAR, {
     Server = true,
@@ -25,6 +27,13 @@ local interaction = NativeInteractionCoordinator.Create(
     bridge,
     diagnostics
 )
+local quickLockpick = QuickLockpickCoordinator.Create(
+    Settings,
+    api,
+    bridge,
+    Channels.QuickLockpick,
+    diagnostics
+)
 local rollRouterAvailable = false
 
 local function statusFields()
@@ -35,6 +44,7 @@ local function statusFields()
         native_ready = status.ready and 1 or 0,
         native_session = status.nativeSession,
         pending_delegations = interaction.Count(),
+        pending_quick_lockpicks = quickLockpick.Count(),
         roll_router = rollRouterAvailable and 1 or 0,
         version = Settings.VERSION,
     }
@@ -94,6 +104,7 @@ listen("RequestCanLockpick", 3, "before", function(character, item, requestId)
         request_id = requestId,
         target = item,
     })
+    quickLockpick.OnNativeRequest(character, item)
     interaction.OnNativeRequest("lockpick", character, item, requestId)
 end)
 
@@ -130,6 +141,23 @@ listen("StoppedDisarmingTrap", 2, "after", function(character, item)
     interaction.OnNativeStopped("disarm", character, item)
 end)
 
+listen("UseFinished", 3, "before", function(character, item, success)
+    diagnostics.Trace("use_finished", {
+        actor = character,
+        success = success,
+        target = item,
+    })
+    quickLockpick.OnUseFinished(character, item, success)
+end)
+
+listen("EnteredForceTurnBased", 1, "after", function(character)
+    quickLockpick.OnEnteredForceTurnBased(character)
+end)
+
+listen("LeftForceTurnBased", 1, "after", function(character)
+    quickLockpick.OnLeftForceTurnBased(character)
+end)
+
 listen("RollResult", 6, "after", function(eventName, character, subject, result, isActive, criticality)
     local handled = interaction.OnRollResult(
         eventName,
@@ -161,6 +189,7 @@ rollRouterAvailable = interaction.Subscribe()
 Ext.Events.SessionLoaded:Subscribe(function()
     legacyCleanup.RecoverPersisted()
     interaction.Clear("session_loaded")
+    quickLockpick.Clear("session_loaded")
     bridge.BeginHandshake()
     diagnostics.Info("loaded", {
         extender_version = api.GetExtenderVersion(),
@@ -174,6 +203,7 @@ end)
 Ext.Events.ResetCompleted:Subscribe(function()
     legacyCleanup.RecoverPersisted()
     interaction.Clear("lua_reset")
+    quickLockpick.Clear("lua_reset")
     bridge.BeginHandshake()
     diagnostics.Info("lua_reset_completed", {})
     emitStatus("lua_reset_completed")
@@ -184,5 +214,6 @@ return {
     Diagnostics = diagnostics,
     Interaction = interaction,
     LegacyCleanup = legacyCleanup,
+    QuickLockpick = quickLockpick,
     Resolver = resolver,
 }

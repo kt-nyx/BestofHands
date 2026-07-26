@@ -17,6 +17,20 @@
 
 using namespace best_of_hands;
 
+namespace {
+
+void* MockGetCharacterTask(void* controller, std::uint32_t taskType)
+{
+    return taskType == 15 ? controller : nullptr;
+}
+
+bool MockSetRunningTask(void* controller, void* task, bool forceClear)
+{
+    return controller == task && forceClear;
+}
+
+}
+
 int main()
 {
     std::uint64_t readableValue = 0x123456789abcdef0ULL;
@@ -28,6 +42,19 @@ int main()
     assert(readableValue == replacementValue);
     assert(!SafeRead(nullptr, observedValue));
     assert(!SafeWrite(nullptr, replacementValue));
+    void* invokedTask{};
+    assert(TryGetCharacterTask(
+        reinterpret_cast<std::uintptr_t>(&MockGetCharacterTask),
+        &readableValue, 15, invokedTask));
+    assert(invokedTask == &readableValue);
+    bool taskStarted{};
+    assert(TrySetRunningTask(
+        reinterpret_cast<std::uintptr_t>(&MockSetRunningTask),
+        &readableValue, invokedTask, true, taskStarted));
+    assert(taskStarted);
+    assert(!TryGetCharacterTask(0, &readableValue, 15, invokedTask));
+    assert(!TrySetRunningTask(
+        0, &readableValue, invokedTask, true, taskStarted));
 
     auto* inaccessible = VirtualAlloc(
         nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
@@ -196,11 +223,18 @@ int main()
         "native_session=44-55\n"
         "trace=1\n"
         "record=7\t4dc3ec09-e11d-e030-cac3-99253090aaf8\t01c0000100000085\t01c00001000000d4\t01c000010000f15c\n"
+        "quick=42-1-7\t000001d000001000\t000001d000002000\t01c0000100000085\t01c000010000f15c\n"
         "end=1\n");
     assert(client.valid);
     assert(client.trace);
     assert(client.nativeSession == "44-55");
     assert(client.records.size() == 1);
+    assert(client.quickLockpicks.size() == 1);
+    assert(client.quickLockpicks[0].request == "42-1-7");
+    assert(client.quickLockpicks[0].controller == 0x000001d000001000ULL);
+    assert(client.quickLockpicks[0].task == 0x000001d000002000ULL);
+    assert(client.quickLockpicks[0].initiator == 0x01c0000100000085ULL);
+    assert(client.quickLockpicks[0].target == 0x01c000010000f15cULL);
     assert(!ParseClientBridgeDocument(
         "protocol=5\npak_version=2.0.0\n"
         "record=7\tuuid\t1\t2\t3\nend=1\n").valid);
@@ -216,6 +250,21 @@ int main()
     assert(!ParseClientBridgeDocument(
         "protocol=5\npak_version=2.0.0\nnative_session=x\n"
         "record=7\tuuid\t1\t2\t3\textra\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=5\npak_version=2.0.0\nnative_session=x\n"
+        "quick=request\t0\t2\t3\t4\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=5\npak_version=2.0.0\nnative_session=x\n"
+        "quick=request\t1\t2\t3\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=5\npak_version=2.0.0\nnative_session=x\n"
+        "quick=\t1\t2\t3\t4\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=5\npak_version=2.0.0\nnative_session=x\n"
+        "quick=request|unsafe\t1\t2\t3\t4\nend=1\n").valid);
+    assert(IsBridgeToken("42-1-7"));
+    assert(!IsBridgeToken(""));
+    assert(!IsBridgeToken("request|unsafe"));
 
     RequestedRollIdentity clientIdentity{
         .roll = 0x01c0000200000100ULL,

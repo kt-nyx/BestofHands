@@ -26,6 +26,13 @@ local function entityHandle(value)
     return tostring(entity):match("Entity %((%x+)%)")
 end
 
+local function objectPointer(value)
+    if value == nil then
+        return nil
+    end
+    return tostring(value):match("%((%x+)")
+end
+
 local function entityGuid(value)
     local ok, result = pcall(function()
         local entity = Ext.Entity.Get(value)
@@ -76,10 +83,11 @@ local function write(event, fields)
     Ext.Utils.Print(line)
 end
 
-function NativePresentationBridge.Start(settings)
+function NativePresentationBridge.Start(settings, quickLockpickChannel)
     local instance = {}
     local tracked = {}
     local clientRecords = {}
+    local quickRequests = {}
     local lastSession = ""
     local lastProbe = ""
     local traceEnabled = settings.TRACE_EVENTS == true
@@ -107,6 +115,7 @@ function NativePresentationBridge.Start(settings)
             lastProbe = probe
             tracked = {}
             clientRecords = {}
+            quickRequests = {}
         end
         local records = { all = {}, byDelegationId = {}, byRollUuid = {} }
         for line in text:gmatch("[^\r\n]+") do
@@ -161,6 +170,22 @@ function NativePresentationBridge.Start(settings)
                 record.initiatorHandle,
                 record.specialistHandle,
                 record.targetHandle,
+            }, "\t")
+        end
+        local quickValues = {}
+        for _, record in pairs(quickRequests) do
+            quickValues[#quickValues + 1] = record
+        end
+        table.sort(quickValues, function(left, right)
+            return left.request < right.request
+        end)
+        for _, record in ipairs(quickValues) do
+            lines[#lines + 1] = table.concat({
+                "quick=" .. record.request,
+                record.controller,
+                record.task,
+                record.initiator,
+                record.target,
             }, "\t")
         end
         lines[#lines + 1] = "end=1"
@@ -346,6 +371,119 @@ function NativePresentationBridge.Start(settings)
                 write(event, { error = errorMessage })
             end
         end
+    end
+
+    local function prepareQuickLockpick(data)
+        if type(data) ~= "table"
+            or type(data.request) ~= "string"
+            or not data.request:match("^[%w%.%-]+$")
+            or objectGuid(data.actor) == nil
+            or objectGuid(data.target) == nil then
+            return false, "invalid_request"
+        end
+        if loadActions() == nil or lastSession == "" then
+            return false, "native_session_unavailable"
+        end
+
+        local actorEntity = Ext.Entity.Get(objectGuid(data.actor))
+        local targetHandle = Ext.Entity.UuidToHandle(objectGuid(data.target))
+        local clientCharacter = actorEntity
+            and safeField(actorEntity, "ClientCharacter")
+            or nil
+        local controller = clientCharacter
+            and safeField(clientCharacter, "InputController")
+            or nil
+        if actorEntity == nil
+            or targetHandle == nil
+            or controller == nil then
+            return false, "client_entity_unavailable"
+        end
+
+        local task = nil
+        for _, candidate in pairs(safeField(controller, "Tasks") or {}) do
+            local taskType = safeField(candidate, "TaskType")
+            if tostring(taskType) == "Lockpick"
+                or tonumber(taskType) == 15 then
+                task = candidate
+                break
+            end
+        end
+        local controllerPointer = objectPointer(controller)
+        local taskPointer = objectPointer(task)
+        local initiatorHandle = entityHandle(actorEntity)
+        local targetEntityHandle = entityHandle(targetHandle)
+        local targetNetId = targetHandle:GetNetId()
+        if task == nil
+            or controllerPointer == nil
+            or taskPointer == nil
+            or initiatorHandle == nil
+            or targetEntityHandle == nil
+            or targetNetId == nil then
+            return false, "lockpick_task_unavailable"
+        end
+
+        -- These are BG3SE-mapped fields on BG3's reusable stock Lockpick
+        -- task. Native code invokes only InputController::SetRunningTask;
+        -- the task itself performs the normal permission, movement, roll,
+        -- result, tool, and crime pipeline.
+        task.Item = targetHandle
+        task.ItemNetId = targetNetId
+        task.LockpickingStarted = false
+        task.TargetSelected = true
+        task.CanLockpick = false
+
+        quickRequests[data.request] = {
+            controller = controllerPointer:lower(),
+            initiator = initiatorHandle:lower(),
+            request = data.request,
+            target = targetEntityHandle:lower(),
+            task = taskPointer:lower(),
+        }
+        if not saveClientRecords() then
+            quickRequests[data.request] = nil
+            return false, "native_request_write_failed"
+        end
+        if traceEnabled then
+            write("client_quick_lockpick_requested", {
+                actor = data.actor,
+                controller = controllerPointer,
+                request = data.request,
+                target = data.target,
+                task = taskPointer,
+            })
+        end
+        return true, nil
+    end
+
+    if quickLockpickChannel ~= nil then
+        quickLockpickChannel:SetHandler(protected(
+            "client_quick_lockpick_message_failed",
+            function(data)
+                if type(data) ~= "table" or type(data.request) ~= "string" then
+                    return
+                end
+                if data.operation == "cancel" then
+                    if quickRequests[data.request] ~= nil then
+                        quickRequests[data.request] = nil
+                        saveClientRecords()
+                    end
+                    return
+                end
+                if data.operation ~= "start"
+                    or quickRequests[data.request] ~= nil then
+                    return
+                end
+                local started, reason = prepareQuickLockpick(data)
+                if not started then
+                    write("client_quick_lockpick_rejected", {
+                        actor = data.actor,
+                        reason = reason,
+                        request = data.request,
+                        target = data.target,
+                    })
+                end
+            end
+        ))
     end
 
     Ext.Entity.OnCreate("RequestedRoll", protected(

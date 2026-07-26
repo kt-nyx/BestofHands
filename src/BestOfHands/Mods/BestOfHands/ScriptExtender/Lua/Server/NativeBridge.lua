@@ -22,8 +22,10 @@ local REQUIRED_HOOKS =
     .. ",client_roll_bonus_presentation_transfer"
     .. ",client_roll_bonus_reconcile_end"
     .. ",client_roll_finalize"
+local REQUIRED_FEATURES = "quick_lockpick_task_adapter"
 
 NativeBridge.REQUIRED_HOOKS = REQUIRED_HOOKS
+NativeBridge.REQUIRED_FEATURES = REQUIRED_FEATURES
 
 local function parseDocument(text)
     local result = {}
@@ -165,6 +167,7 @@ function NativeBridge.Create(settings, api, diagnostics)
             and status.version == settings.VERSION
             and status.state == "ready"
             and status.hooks == REQUIRED_HOOKS
+            and status.features == REQUIRED_FEATURES
             and status.session == nativeSession
             and status["end"] == "1"
         if not current then
@@ -194,6 +197,7 @@ function NativeBridge.Create(settings, api, diagnostics)
             and status.version == settings.VERSION
             and status.state == "ready"
             and status.hooks == REQUIRED_HOOKS
+            and status.features == REQUIRED_FEATURES
             and status.ack == probe
             and status.session ~= nil
             and status.session ~= ""

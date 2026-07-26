@@ -67,6 +67,7 @@ $expectedPackageFiles = @(
     'Mods/BestOfHands/ScriptExtender/Lua/BootstrapClient.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/BootstrapServer.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Client/NativePresentationBridge.lua',
+    'Mods/BestOfHands/ScriptExtender/Lua/Shared/Channels.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/LegacyAssistanceCleanup.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/Diagnostics.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/Init.lua',
@@ -74,6 +75,7 @@ $expectedPackageFiles = @(
     'Mods/BestOfHands/ScriptExtender/Lua/Server/NativeInteractionCoordinator.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/NativeRuntimeApi.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/PartySkillResolver.lua',
+    'Mods/BestOfHands/ScriptExtender/Lua/Server/QuickLockpickCoordinator.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/Settings.lua'
 ) | Sort-Object
 $actualPackageFiles = $manifestOutput |

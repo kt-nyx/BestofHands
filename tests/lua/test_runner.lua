@@ -6,6 +6,9 @@ local LegacyAssistanceCleanup = dofile(luaRoot .. "LegacyAssistanceCleanup.lua")
 local NativeBridge = dofile(luaRoot .. "NativeBridge.lua")
 local NativeInteractionCoordinator = dofile(luaRoot .. "NativeInteractionCoordinator.lua")
 local NativeRuntimeApi = dofile(luaRoot .. "NativeRuntimeApi.lua")
+local QuickLockpickCoordinator = dofile(
+    luaRoot .. "QuickLockpickCoordinator.lua"
+)
 local NativePresentationBridge = dofile(
     BEST_OF_HANDS_ROOT
         .. "/src/BestOfHands/Mods/BestOfHands/ScriptExtender/Lua/Client/"
@@ -141,6 +144,128 @@ local actor = entity("00000000-0000-0000-0000-000000000001", "0200000100000001")
 local specialist = entity("00000000-0000-0000-0000-000000000002", "0200000100000002")
 local target = entity("00000000-0000-0000-0000-000000000003", "0200000100000003")
 
+test("quick lockpick coalesces failed Uses into one stock client task request", function()
+    local scheduled = {}
+    local sent = {}
+    local locked = true
+    local bridgeReady = true
+    local api = {
+        GetEntityUuid = function(value) return value .. "-uuid" end,
+        GetReservedUserId = function() return 65537 end,
+        IsInCombat = function() return false end,
+        IsLocked = function() return locked end,
+        IsPlayer = function() return true end,
+        MonotonicTime = function() return 25 end,
+        Schedule = function(delay, callback)
+            scheduled[#scheduled + 1] = {
+                callback = callback,
+                delay = delay,
+            }
+        end,
+        SendQuickLockpick = function(_, payload, userId)
+            sent[#sent + 1] = { payload = payload, userId = userId }
+            return true
+        end,
+    }
+    local coordinator = QuickLockpickCoordinator.Create(
+        { QUICK_LOCKPICK_TIMEOUT_MS = 5000 },
+        api,
+        { IsReady = function() return bridgeReady end },
+        {},
+        recordingDiagnostics()
+    )
+
+    assertEqual(true,
+        coordinator.OnUseFinished("actor", "target", 0),
+        "failed locked use accepted")
+    assertEqual(false,
+        coordinator.OnUseFinished("actor", "target", 0),
+        "duplicate use coalesced")
+    assertEqual(1, coordinator.Count(), "one pending request")
+    assertEqual(2, #scheduled, "dispatch and timeout scheduled")
+    assertEqual(0, scheduled[1].delay, "dispatch is deferred one turn")
+    scheduled[1].callback()
+    assertEqual(1, #sent, "one task start sent")
+    assertEqual("start", sent[1].payload.operation, "start operation")
+    assertEqual("actor-uuid", sent[1].payload.actor, "initiator retained")
+    assertEqual("target-uuid", sent[1].payload.target, "target retained")
+    assertEqual(65537, sent[1].userId, "owning client selected")
+
+    assertEqual(true,
+        coordinator.OnNativeRequest("actor", "target"),
+        "native request acknowledges adapter")
+    assertEqual(0, coordinator.Count(), "pending request cleared")
+    assertEqual(2, #sent, "client cleanup sent")
+    assertEqual("cancel", sent[2].payload.operation, "cleanup operation")
+
+    assertEqual(false,
+        coordinator.OnUseFinished("actor", "target", 1),
+        "successful key or use path remains vanilla")
+    bridgeReady = false
+    assertEqual(false,
+        coordinator.OnUseFinished("actor", "target", 0),
+        "missing native bridge is a no-op")
+    bridgeReady = true
+    locked = false
+    assertEqual(false,
+        coordinator.OnUseFinished("actor", "target", 0),
+        "unlocked failed use is not converted")
+end)
+
+test("quick lockpick respects combat, forced turn-based, timeout, and reset", function()
+    local scheduled = {}
+    local sent = {}
+    local inCombat = true
+    local api = {
+        GetEntityUuid = function(value) return value .. "-uuid" end,
+        GetReservedUserId = function() return 65537 end,
+        IsInCombat = function() return inCombat end,
+        IsLocked = function() return true end,
+        IsPlayer = function() return true end,
+        MonotonicTime = function() return 30 end,
+        Schedule = function(delay, callback)
+            scheduled[#scheduled + 1] = {
+                callback = callback,
+                delay = delay,
+            }
+        end,
+        SendQuickLockpick = function(_, payload)
+            sent[#sent + 1] = payload
+            return true
+        end,
+    }
+    local coordinator = QuickLockpickCoordinator.Create(
+        { QUICK_LOCKPICK_TIMEOUT_MS = 5000 },
+        api,
+        { IsReady = function() return true end },
+        {},
+        recordingDiagnostics()
+    )
+    assertEqual(false,
+        coordinator.OnUseFinished("actor", "target", 0),
+        "combat blocks quick entry")
+    inCombat = false
+    coordinator.OnEnteredForceTurnBased("actor")
+    assertEqual(false,
+        coordinator.OnUseFinished("actor", "target", 0),
+        "forced turn-based blocks quick entry")
+    coordinator.OnLeftForceTurnBased("actor")
+    assertEqual(true,
+        coordinator.OnUseFinished("actor", "target", 0),
+        "entry resumes after forced turn-based")
+    scheduled[1].callback()
+    scheduled[2].callback()
+    assertEqual(0, coordinator.Count(), "timeout clears request")
+    assertEqual("cancel", sent[#sent].operation, "timeout cancels client request")
+
+    assertEqual(true,
+        coordinator.OnUseFinished("actor", "other", 0),
+        "second target accepted")
+    coordinator.Clear("test")
+    assertEqual(0, coordinator.Count(), "reset clears all requests")
+    assertEqual("cancel", sent[#sent].operation, "reset cancels client request")
+end)
+
 local function installEntityMock()
     local entities = {
         actor = actor,
@@ -200,6 +325,7 @@ test("native bridge requires a live matching challenge acknowledgement", functio
         "session=123-456",
         "pid=123",
         "hooks=" .. NativeBridge.REQUIRED_HOOKS,
+        "features=" .. NativeBridge.REQUIRED_FEATURES,
         "ack=" .. probe,
         "detail=ok",
         "end=1",
@@ -351,6 +477,7 @@ test("native bridge disables delegation if the acknowledged native session is lo
     files["BestOfHandsNative.status"] = table.concat({
         "protocol=5", "version=2.0.0", "state=ready", "session=session-a",
         "pid=10", "hooks=" .. NativeBridge.REQUIRED_HOOKS,
+        "features=" .. NativeBridge.REQUIRED_FEATURES,
         "ack=" .. probe, "detail=ok", "end=1", "",
     }, "\n")
     scheduled[1]()
@@ -483,6 +610,94 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
         files["BestOfHandsNative.client"]:find("record=7", 1, true),
         "destroyed client mapping removed")
     assertEqual(2, saveCalls, "destroyed mapping written exactly once")
+end)
+
+test("client bridge prepares and cancels BG3's stock lockpick task", function()
+    local actorGuid = "10000000-0000-0000-0000-000000000001"
+    local targetGuid = "10000000-0000-0000-0000-000000000002"
+    local actorEntity = entity(actorGuid, "01c0000100000101")
+    local targetEntity = entity(targetGuid, "01c0000100000102")
+    local targetHandle = setmetatable({
+        GetNetId = function() return 77 end,
+    }, {
+        __tostring = function() return "ComponentHandle (01c0000100000102)" end,
+    })
+    local task = setmetatable({ TaskType = "Lockpick" }, {
+        __tostring = function() return "EclCharacterTaskLockpick (000001d000002000)" end,
+    })
+    local controller = setmetatable({ Tasks = { task } }, {
+        __tostring = function() return "EclInputController (000001d000001000)" end,
+    })
+    actorEntity.ClientCharacter = { InputController = controller }
+    local entities = {
+        [actorGuid] = actorEntity,
+        [targetGuid] = targetEntity,
+        [actorEntity] = actorEntity,
+        [targetEntity] = targetEntity,
+        [targetHandle] = targetEntity,
+    }
+    local files = {
+        ["BestOfHandsNative.actions"] = table.concat({
+            "protocol=5",
+            "pak_version=2.0.0",
+            "probe=test",
+            "native_session=44-55",
+            "trace=0",
+            "end=1",
+            "",
+        }, "\n"),
+    }
+    local handler = nil
+    Ext = {
+        Entity = {
+            Get = function(value) return entities[value] end,
+            UuidToHandle = function(value)
+                return value == targetGuid and targetHandle or nil
+            end,
+            OnCreate = function() return 1 end,
+            OnChange = function() return 2 end,
+            OnDestroy = function() return 3 end,
+        },
+        IO = {
+            LoadFile = function(path) return files[path] end,
+            SaveFile = function(path, value)
+                files[path] = value
+                return true
+            end,
+        },
+        Utils = { Print = function() end },
+    }
+    local channel = {
+        SetHandler = function(_, callback) handler = callback end,
+    }
+    NativePresentationBridge.Start({
+        TRACE_EVENTS = false,
+        VERSION = "2.0.0",
+    }, channel)
+    assertEqual("function", type(handler), "quick-lockpick client handler registered")
+    handler({
+        actor = actorGuid,
+        operation = "start",
+        request = "42-0-1",
+        target = targetGuid,
+    })
+    assertEqual(targetHandle, task.Item, "stock task target")
+    assertEqual(77, task.ItemNetId, "stock task target net id")
+    assertEqual(false, task.LockpickingStarted, "stock task starts fresh")
+    assertEqual(true, task.TargetSelected, "stock task has an explicit target")
+    assertEqual(false, task.CanLockpick, "stock task performs native permission request")
+    assertContains(
+        files["BestOfHandsNative.client"],
+        "quick=42-0-1\t000001d000001000\t000001d000002000"
+            .. "\t01c0000100000101\t01c0000100000102",
+        "native stock-task request"
+    )
+    handler({ operation = "cancel", request = "42-0-1" })
+    assertEqual(
+        nil,
+        files["BestOfHandsNative.client"]:find("quick=42-0-1", 1, true),
+        "canceled stock-task request removed"
+    )
 end)
 
 test("runtime tool precheck uses BG3 party inventory without consuming anything", function()
@@ -1471,7 +1686,7 @@ test("native implementation preserves ownership and authoritative roll results",
         "no finished-event rewriting remains")
 end)
 
-test("v2 bootstrap has no custom roll, completion, tool, or UseFinished path", function()
+test("v2 left-click path starts only BG3's stock task", function()
     local file = assert(io.open(luaRoot .. "Init.lua", "rb"))
     local source = file:read("*a")
     file:close()
@@ -1486,9 +1701,19 @@ test("v2 bootstrap has no custom roll, completion, tool, or UseFinished path", f
     local observerOffset = assert(source:find("interaction.Subscribe()", 1, true))
     assertEqual(true, commandOffset < observerOffset, "diagnostic commands precede observers")
     assertEqual(nil, source:find("RequestActiveRoll", 1, true), "no custom active roll")
-    assertEqual(nil, source:find("UseFinished", 1, true), "no custom left-click completion path")
+    assertContains(source, 'listen("UseFinished"', "failed ordinary Use entry listener")
+    assertContains(source, "quickLockpick.OnUseFinished",
+        "failed Use delegates to the stock-task coordinator")
     assertEqual(nil, source:find("TemplateRemove", 1, true), "no custom tool path")
     assertEqual(nil, source:find("Unlock(", 1, true), "no custom success path")
+
+    local quickFile = assert(io.open(luaRoot .. "QuickLockpickCoordinator.lua", "rb"))
+    local quickSource = quickFile:read("*a")
+    quickFile:close()
+    assertContains(quickSource, 'operation = operation', "targeted client task request")
+    assertEqual(nil, quickSource:find("RequestActiveRoll", 1, true), "coordinator owns no roll")
+    assertEqual(nil, quickSource:find("TemplateRemove", 1, true), "coordinator owns no tools")
+    assertEqual(nil, quickSource:find("Unlock(", 1, true), "coordinator owns no outcome")
 
     local settingsFile = assert(io.open(luaRoot .. "Settings.lua", "rb"))
     local settingsSource = settingsFile:read("*a")

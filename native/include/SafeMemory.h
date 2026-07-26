@@ -4,6 +4,7 @@
 #include <Windows.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <type_traits>
 
@@ -36,6 +37,46 @@ __declspec(noinline) inline bool TryWriteMemory(
         std::memcpy(destination, source, size);
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+__declspec(noinline) inline bool TryGetCharacterTask(
+    std::uintptr_t procedure,
+    void* controller,
+    std::uint32_t taskType,
+    void*& task) noexcept
+{
+    if (procedure == 0 || controller == nullptr) {
+        return false;
+    }
+    __try {
+        using Proc = void* (*)(void*, std::uint32_t);
+        task = reinterpret_cast<Proc>(procedure)(controller, taskType);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        task = nullptr;
+        return false;
+    }
+}
+
+__declspec(noinline) inline bool TrySetRunningTask(
+    std::uintptr_t procedure,
+    void* controller,
+    void* task,
+    bool forceClear,
+    bool& started) noexcept
+{
+    if (procedure == 0 || controller == nullptr || task == nullptr) {
+        return false;
+    }
+    __try {
+        using Proc = bool (*)(void*, void*, bool);
+        started = reinterpret_cast<Proc>(procedure)(
+            controller, task, forceClear);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        started = false;
         return false;
     }
 }

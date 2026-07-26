@@ -49,11 +49,20 @@ struct ClientActionRecord {
     std::uint64_t target{};
 };
 
+struct QuickLockpickRequest {
+    std::string request;
+    std::uint64_t controller{};
+    std::uint64_t task{};
+    std::uint64_t initiator{};
+    std::uint64_t target{};
+};
+
 struct ClientBridgeDocument {
     bool valid{ false };
     bool trace{ false };
     std::string nativeSession;
     std::vector<ClientActionRecord> records;
+    std::vector<QuickLockpickRequest> quickLockpicks;
 };
 
 inline bool ParseUnsigned(std::string_view text, int base, std::uint64_t& value)
@@ -64,6 +73,25 @@ inline bool ParseUnsigned(std::string_view text, int base, std::uint64_t& value)
     }
     auto const result = std::from_chars(text.data(), text.data() + text.size(), value, base);
     return result.ec == std::errc{} && result.ptr == text.data() + text.size();
+}
+
+inline bool IsBridgeToken(std::string_view value)
+{
+    if (value.empty() || value.size() > 128) {
+        return false;
+    }
+    for (auto const character : value) {
+        auto const valid = (character >= 'a' && character <= 'z')
+            || (character >= 'A' && character <= 'Z')
+            || (character >= '0' && character <= '9')
+            || character == '.'
+            || character == '-'
+            || character == '_';
+        if (!valid) {
+            return false;
+        }
+    }
+    return true;
 }
 
 template <std::size_t Count>
@@ -219,6 +247,27 @@ inline ClientBridgeDocument ParseClientBridgeDocument(std::string_view text)
             }
             record.rollUuid.assign(fields[1]);
             document.records.push_back(std::move(record));
+        } else if (line.starts_with("quick=")) {
+            auto const parsedFields =
+                SplitExact<5>(line.substr(6), '\t');
+            if (!parsedFields.has_value()) {
+                return {};
+            }
+            auto const& fields = *parsedFields;
+            QuickLockpickRequest request;
+            request.request.assign(fields[0]);
+            if (!IsBridgeToken(fields[0])
+                || !ParseUnsigned(fields[1], 16, request.controller)
+                || !ParseUnsigned(fields[2], 16, request.task)
+                || !ParseUnsigned(fields[3], 16, request.initiator)
+                || !ParseUnsigned(fields[4], 16, request.target)
+                || request.controller == 0
+                || request.task == 0
+                || request.initiator == 0
+                || request.target == 0) {
+                return {};
+            }
+            document.quickLockpicks.push_back(std::move(request));
         } else if (line == "end=1") {
             complete = true;
         }
@@ -233,6 +282,7 @@ inline ClientBridgeDocument ParseClientBridgeDocument(std::string_view text)
         && !document.nativeSession.empty();
     if (!document.valid) {
         document.records.clear();
+        document.quickLockpicks.clear();
     }
     return document;
 }
