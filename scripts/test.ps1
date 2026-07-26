@@ -2,7 +2,8 @@
 
 [CmdletBinding()]
 param(
-    [switch]$BuildNative
+    [switch]$BuildNative,
+    [switch]$PerformanceDiagnostics
 )
 
 $ErrorActionPreference = 'Stop'
@@ -23,7 +24,9 @@ try {
     }
 
     if ($BuildNative) {
-        & (Join-Path $PSScriptRoot 'build-native.ps1') -Configuration Release
+        & (Join-Path $PSScriptRoot 'build-native.ps1') `
+            -Configuration Release `
+            -PerformanceDiagnostics:$PerformanceDiagnostics
         if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
         }

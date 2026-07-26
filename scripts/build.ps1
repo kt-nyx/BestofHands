@@ -3,6 +3,7 @@
 [CmdletBinding()]
 param(
     [string]$DivinePath = $env:DIVINE_PATH,
+    [switch]$PerformanceDiagnostics,
     [switch]$Install,
     [string]$GameBinPath = $env:BG3_BIN
 )
@@ -17,6 +18,7 @@ $destination = Join-Path $dist $pakName
 & (Join-Path $PSScriptRoot 'validate.ps1')
 & (Join-Path $PSScriptRoot 'build-native.ps1') `
     -Configuration Release `
+    -PerformanceDiagnostics:$PerformanceDiagnostics `
     -Install:$Install `
     -GameBinPath $GameBinPath
 

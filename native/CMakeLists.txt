@@ -5,6 +5,8 @@ cmake_minimum_required(VERSION 3.28)
 project(BestOfHandsNative VERSION 2.0.0 LANGUAGES CXX)
 
 option(BEST_OF_HANDS_BUILD_TESTS "Build native unit tests" ON)
+option(BEST_OF_HANDS_PERF_DIAGNOSTICS
+    "Enable low-overhead per-roll native timing summaries" OFF)
 
 include(CheckIPOSupported)
 check_ipo_supported(RESULT BEST_OF_HANDS_IPO_SUPPORTED)
@@ -20,7 +22,8 @@ set(SAFETYHOOK_FETCH_ZYDIS ON CACHE BOOL "" FORCE)
 FetchContent_Declare(
     safetyhook
     GIT_REPOSITORY "https://github.com/cursey/safetyhook.git"
-    GIT_TAG "v0.7.0"
+    # SafetyHook v0.7.0, pinned to the immutable commit for reproducibility.
+    GIT_TAG "19223663fb8a573253ffb2e82da87cc354bf5c16"
     GIT_SHALLOW ON
     EXCLUDE_FROM_ALL
 )
@@ -34,6 +37,7 @@ target_include_directories(BestOfHandsNative PRIVATE include)
 target_compile_features(BestOfHandsNative PRIVATE cxx_std_23)
 target_link_libraries(BestOfHandsNative PRIVATE safetyhook::safetyhook)
 target_compile_definitions(BestOfHandsNative PRIVATE
+    BEST_OF_HANDS_PERF_DIAGNOSTICS=$<BOOL:${BEST_OF_HANDS_PERF_DIAGNOSTICS}>
     WIN32_LEAN_AND_MEAN
     NOMINMAX
     UNICODE

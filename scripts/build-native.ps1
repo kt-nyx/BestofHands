@@ -4,6 +4,7 @@
 param(
     [ValidateSet('Debug', 'Release', 'RelWithDebInfo')]
     [string]$Configuration = 'Release',
+    [switch]$PerformanceDiagnostics,
     [switch]$Install,
     [string]$GameBinPath = $env:BG3_BIN
 )
@@ -27,8 +28,10 @@ if ($null -eq $cmake) {
     throw 'CMake was not found. Install the C++ CMake tools from Visual Studio.'
 }
 $ctest = Join-Path (Split-Path -Parent $cmake) 'ctest.exe'
+$performanceDiagnosticsValue = if ($PerformanceDiagnostics) { 'ON' } else { 'OFF' }
 
-& $cmake -S $source -B $build -G 'Visual Studio 17 2022' -A x64
+& $cmake -S $source -B $build -G 'Visual Studio 17 2022' -A x64 `
+    "-DBEST_OF_HANDS_PERF_DIAGNOSTICS=$performanceDiagnosticsValue"
 if ($LASTEXITCODE -ne 0) {
     throw 'Native CMake configuration failed.'
 }
@@ -68,6 +71,22 @@ if ($Configuration -eq 'Release') {
         }
     }
     Write-Host 'Verified release DLL contains no disabled native trace payloads.'
+    if (-not $PerformanceDiagnostics) {
+        foreach ($marker in @('perf_diagnostics_enabled', 'roll_profile')) {
+            if ($ascii.Contains($marker)) {
+                throw "Release DLL retained disabled performance payload '$marker': $dll"
+            }
+        }
+        Write-Host 'Verified release DLL contains no disabled performance payloads.'
+    }
+    else {
+        foreach ($marker in @('perf_diagnostics_enabled', 'roll_profile')) {
+            if (-not $ascii.Contains($marker)) {
+                throw "Diagnostic DLL is missing performance payload '$marker': $dll"
+            }
+        }
+        Write-Host 'Verified diagnostic DLL contains the requested performance payloads.'
+    }
 }
 
 Write-Host "Created $dll" -ForegroundColor Green

@@ -214,7 +214,7 @@ function NativePresentationBridge.Start(settings)
         return record
     end
 
-    local function mapClientProfile(entity, component, stage)
+    local function mapClientProfile(entity, component)
         local record = classify(entity, component)
         if record == nil or record.rollUuid == nil then
             return nil
@@ -312,7 +312,7 @@ function NativePresentationBridge.Start(settings)
     end
 
     function instance.GetRecord(entity, component)
-        return mapClientProfile(entity, component, "queried")
+        return mapClientProfile(entity, component)
     end
 
     function instance.RefreshRecord(record)
@@ -351,7 +351,7 @@ function NativePresentationBridge.Start(settings)
     Ext.Entity.OnCreate("RequestedRoll", protected(
         "client_profile_mapping_create_failed",
         function(entity, _, component)
-            mapClientProfile(entity, component, "created")
+            mapClientProfile(entity, component)
         end
     ))
     Ext.Entity.OnChange("RequestedRoll", protected(
@@ -360,7 +360,7 @@ function NativePresentationBridge.Start(settings)
             local rollEntity = Ext.Entity.Get(entity)
             local component = rollEntity and rollEntity.RequestedRoll or nil
             if component ~= nil then
-                mapClientProfile(entity, component, "changed")
+                mapClientProfile(entity, component)
             end
         end
     ))

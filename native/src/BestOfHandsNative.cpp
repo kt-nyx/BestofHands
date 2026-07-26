@@ -669,10 +669,11 @@ std::vector<CachedRollBonusPresentation>
     g_cachedRollBonusPresentations;
 std::vector<std::uintptr_t> g_deferredClientViewModelReleases;
 
-// Temporary low-overhead profiler for the click-to-roll investigation. Hot
-// hooks only touch fixed atomic storage and QueryPerformanceCounter; the
-// worker thread formats and writes a single summary after the roll finishes.
-constexpr bool kPerfDiagnostics = true;
+// The opt-in profiler touches only fixed atomic storage and
+// QueryPerformanceCounter in hot hooks. The worker thread formats and writes
+// one summary after the roll finishes. Normal release builds compile it out.
+constexpr bool kPerfDiagnostics =
+    BEST_OF_HANDS_PERF_DIAGNOSTICS != 0;
 
 enum class PerfMetric : std::size_t {
     MemoryProbe,
@@ -700,14 +701,10 @@ enum class PerfMetric : std::size_t {
     Finalize,
     SnapshotCollection,
     BindPresentation,
-    SetDiceType,
     SetByteProperty,
     SetPresentationType,
-    SetSourceVm,
-    SetNameObject,
     SetNamePresentation,
     SetResolvedValue,
-    SetSelectedResolvedValue,
     Count,
 };
 
@@ -738,14 +735,10 @@ constexpr std::array<std::string_view,
     "finalize",
     "snapshot_collection",
     "bind_presentation",
-    "set_dice_type",
     "set_byte_property",
     "set_presentation_type",
-    "set_source_vm",
-    "set_name_object",
     "set_name_presentation",
     "set_resolved_value",
-    "set_selected_resolved_value",
 };
 static_assert(kPerfMetricNames.size()
     == static_cast<std::size_t>(PerfMetric::Count));

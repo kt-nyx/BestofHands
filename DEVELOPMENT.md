@@ -211,6 +211,12 @@ cannot accidentally restore native trace work on the click-to-roll path.
 available. `!best_of_hands_trace on` enables the lighter Script Extender
 server/client bridge traces only.
 
+The fixed-buffer per-roll timing profiler is also compiled out by default.
+Build with `scripts\build-native.ps1 -PerformanceDiagnostics` (or pass the
+same switch to `test.ps1`/`build.ps1`) to emit one background `PERF` summary
+after each roll. The profiled hooks perform no formatting, allocation, file
+I/O, or diagnostic locking while a roll is active.
+
 The full native/UI instrumentation is preserved on
 `dev/native-hook-tracing`. Use that branch for a diagnostic build when a
 runtime investigation needs hook-level snapshots, phase events, modifier
