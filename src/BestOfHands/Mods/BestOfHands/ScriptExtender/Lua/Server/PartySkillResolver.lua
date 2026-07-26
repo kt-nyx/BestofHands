@@ -16,25 +16,25 @@ function PartySkillResolver.Create(api, diagnostics)
 
     local function eligibility(candidate, initiator, region)
         if not api.IsPartyMember(candidate) then
-            return false, "not_active_party_member"
+            return false
         end
         if not api.IsInPartyWith(candidate, initiator) then
-            return false, "different_party"
+            return false
         end
         if api.IsDead(candidate) then
-            return false, "dead"
+            return false
         end
         if api.IsSummon(candidate) then
-            return false, "summon"
+            return false
         end
-        local unavailable, status = api.HasIneligibleStatus(candidate)
+        local unavailable = api.HasIneligibleStatus(candidate)
         if unavailable then
-            return false, "status_" .. tostring(status)
+            return false
         end
         if region == nil or api.GetRegion(candidate) ~= region then
-            return false, "different_or_unknown_region"
+            return false
         end
-        return true, nil
+        return true
     end
 
     function instance.Resolve(initiator, target, action, requestId)
@@ -59,25 +59,14 @@ function PartySkillResolver.Create(api, diagnostics)
 
         local bestCharacter = initiator
         local bestScore = initiatorScore
-        local candidates = {}
 
         for _, candidate in ipairs(players) do
-            local eligible, reason = eligibility(candidate, initiator, region)
+            local eligible = eligibility(candidate, initiator, region)
             local score = nil
             if eligible then
                 score = api.CalculateSleightOfHand(candidate)
                 eligible = type(score) == "number"
-                if not eligible then
-                    reason = "score_unavailable"
-                end
             end
-
-            candidates[#candidates + 1] = {
-                character = candidate,
-                eligible = eligible,
-                reason = reason,
-                score = score,
-            }
 
             if eligible and (score > bestScore or (score == bestScore and candidate == initiator)) then
                 bestCharacter = candidate
@@ -93,18 +82,20 @@ function PartySkillResolver.Create(api, diagnostics)
             specialist = bestCharacter,
             specialistScore = bestScore,
             target = target,
-            candidates = candidates,
         }
 
-        diagnostics.Trace("skill_resolved", {
-            action = action,
-            actor = initiator,
-            actor_score = initiatorScore,
-            request_id = requestId,
-            specialist = bestCharacter,
-            specialist_score = bestScore,
-            target = target,
-        })
+        if type(diagnostics.IsTraceEnabled) ~= "function"
+            or diagnostics.IsTraceEnabled() then
+            diagnostics.Trace("skill_resolved", {
+                action = action,
+                actor = initiator,
+                actor_score = initiatorScore,
+                request_id = requestId,
+                specialist = bestCharacter,
+                specialist_score = bestScore,
+                target = target,
+            })
+        end
         return result
     end
 

@@ -674,6 +674,12 @@ end
 
 test("native bridge requires a live matching challenge acknowledgement", function()
     installEntityMock()
+    local entityGets = 0
+    local getEntity = Ext.Entity.Get
+    Ext.Entity.Get = function(value)
+        entityGets = entityGets + 1
+        return getEntity(value)
+    end
     local files = {}
     local loads = {}
     local saves = {}
@@ -732,6 +738,8 @@ test("native bridge requires a live matching challenge acknowledgement", functio
         target = "target",
     })
     assertEqual(true, written, reason or "record written")
+    assertEqual(3, entityGets,
+        "record identity resolution reads each server entity once")
     assertContains(files["BestOfHandsNative.actions"],
         "record=9\tlockpick\t0200000100000001\t0200000100000002\t0200000100000003\t0\t0",
         "native action record")
@@ -763,6 +771,16 @@ test("native bridge requires a live matching challenge acknowledgement", functio
     assertContains(files["BestOfHandsNative.actions"],
         "record=9\tlockpick\t0200000100000001\t0200000100000002\t0200000100000003\t0200000200000009\t0200000200000010",
         "correlated finished-event record")
+    local loadsAfterFinished = loads["BestOfHandsNative.status"]
+    local savesAfterFinished = saves["BestOfHandsNative.actions"]
+    local duplicateFinished, duplicateFinishedReason =
+        bridge.SetFinishedEvent(9, finished)
+    assertEqual(true, duplicateFinished,
+        duplicateFinishedReason or "duplicate finished event accepted")
+    assertEqual(loadsAfterFinished, loads["BestOfHandsNative.status"],
+        "unchanged finished-event correlation does not reread native status")
+    assertEqual(savesAfterFinished, saves["BestOfHandsNative.actions"],
+        "unchanged finished-event correlation does not rewrite actions")
     local presentationWritten, presentationReason = bridge.SetPresentation(9, 1)
     assertEqual(true, presentationWritten, presentationReason or "presentation written")
     assertContains(
@@ -805,6 +823,55 @@ test("native bridge requires a live matching challenge acknowledgement", functio
     assertEqual(0, warnings, "no warning")
 end)
 
+test("native bridge cannot report ready when its session acknowledgement write fails", function()
+    installEntityMock()
+    local files = {}
+    local scheduled = {}
+    local saveCalls = 0
+    local warnings = 0
+    Ext.IO = {
+        LoadFile = function(path) return files[path] end,
+        SaveFile = function(path, value)
+            saveCalls = saveCalls + 1
+            if saveCalls == 2 then
+                return false
+            end
+            files[path] = value
+            return true
+        end,
+    }
+    Ext.Utils = { MonotonicTime = function() return 42 end }
+    Osi = {
+        GetHostCharacter = function() return "actor" end,
+        OpenMessageBox = function() warnings = warnings + 1 end,
+    }
+    local diagnostics, records = recordingDiagnostics()
+    local bridge = NativeBridge.Create({
+        NATIVE_HANDSHAKE_ATTEMPTS = 1,
+        NATIVE_HANDSHAKE_POLL_MS = 1,
+        TRACE_EVENTS = false,
+        VERSION = "2.0.0",
+    }, {
+        Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
+    }, diagnostics)
+    bridge.BeginHandshake()
+    local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
+    files["BestOfHandsNative.status"] = table.concat({
+        "protocol=7", "version=2.0.0", "state=ready", "session=session-a",
+        "pid=10", "hooks=" .. NativeBridge.REQUIRED_HOOKS,
+        "features=" .. NativeBridge.REQUIRED_FEATURES,
+        "ack=" .. probe, "detail=ok", "end=1", "",
+    }, "\n")
+    scheduled[1]()
+    assertEqual(false, bridge.IsReady(),
+        "failed session publication leaves delegation disabled")
+    assertEqual("bridge_write_failed", bridge.GetStatus().state,
+        "failed acknowledgement write remains the reported state")
+    assertEqual(1, warnings, "failed acknowledgement write warns once")
+    assertEqual(nil, findRecord(records, "native_bridge_ready"),
+        "failed acknowledgement write is never logged as ready")
+end)
+
 test("production handshake omits the retired observation-only hook", function()
     assertEqual(nil,
         NativeBridge.REQUIRED_HOOKS:find(
@@ -840,7 +907,7 @@ test("native bridge fails closed and warns once when the DLL is unavailable", fu
     assertEqual(1, warnings, "one warning")
 end)
 
-test("native bridge disables delegation if the acknowledged native session is lost", function()
+test("native bridge disables delegation if its acknowledgement is replaced", function()
     installEntityMock()
     local files = {}
     local scheduled = {}
@@ -873,8 +940,10 @@ test("native bridge disables delegation if the acknowledged native session is lo
     scheduled[1]()
     assertEqual(true, bridge.IsReady(), "initially ready")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=7", "version=2.0.0", "state=waiting_for_server", "session=session-a",
-        "pid=10", "hooks=none", "ack=" .. probe, "detail=world changed", "end=1", "",
+        "protocol=7", "version=2.0.0", "state=ready", "session=session-a",
+        "pid=10", "hooks=" .. NativeBridge.REQUIRED_HOOKS,
+        "features=" .. NativeBridge.REQUIRED_FEATURES,
+        "ack=replaced-probe", "detail=another bridge replaced the ack", "end=1", "",
     }, "\n")
     local written, reason = bridge.Upsert({
         action = "disarm", id = 3, initiator = "actor", specialist = "best", target = "target",
@@ -906,6 +975,8 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
     local entityGets = 0
     local printCalls = 0
     local saveCalls = 0
+    local clientSaveFailuresRemaining = 0
+    local timers = {}
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
             "protocol=7",
@@ -947,11 +1018,24 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
             LoadFile = function(path) return files[path] end,
             SaveFile = function(path, value)
                 saveCalls = saveCalls + 1
+                if path == "BestOfHandsNative.client"
+                    and clientSaveFailuresRemaining > 0 then
+                    clientSaveFailuresRemaining =
+                        clientSaveFailuresRemaining - 1
+                    return false
+                end
                 files[path] = value
                 return true
             end,
         },
-        Timer = { WaitFor = function() end },
+        Timer = {
+            WaitFor = function(delay, callback)
+                timers[#timers + 1] = {
+                    callback = callback,
+                    delay = delay,
+                }
+            end,
+        },
         Utils = { Print = function() printCalls = printCalls + 1 end },
     }
     local bridge = NativePresentationBridge.Start({
@@ -995,11 +1079,25 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
             .. "\t" .. clientTarget.handle,
         "client bridge record"
     )
+    clientSaveFailuresRemaining = 2
     callbacks.RequestedRollDestroy(clientRoll, nil, component)
+    assertContains(files["BestOfHandsNative.client"], "record=7",
+        "failed mapping removal leaves the last published document intact")
+    assertEqual(1, #timers,
+        "failed mapping removal schedules one bounded retry")
+    assertEqual(250, timers[1].delay,
+        "client profile retry uses bounded backoff")
+    table.remove(timers, 1).callback()
+    assertEqual(1, #timers,
+        "a repeated failure remains coalesced to one retry")
+    assertEqual(1000, timers[1].delay,
+        "repeated client profile failures back off exponentially")
+    table.remove(timers, 1).callback()
     assertEqual(nil,
         files["BestOfHandsNative.client"]:find("record=7", 1, true),
-        "destroyed client mapping removed")
-    assertEqual(2, saveCalls, "destroyed mapping written exactly once")
+        "destroyed client mapping is removed after retry")
+    assertEqual(4, saveCalls,
+        "destroyed mapping performs two failed writes and one recovery write")
 end)
 
 test("client bridge prepares and queues BG3's stock lockpick task", function()
@@ -1039,6 +1137,8 @@ test("client bridge prepares and queues BG3's stock lockpick task", function()
     }
     local handler = nil
     local serverMessages = {}
+    local failNextClientSave = false
+    local timers = {}
     Ext = {
         Entity = {
             Get = function(value) return entities[value] end,
@@ -1052,8 +1152,21 @@ test("client bridge prepares and queues BG3's stock lockpick task", function()
         IO = {
             LoadFile = function(path) return files[path] end,
             SaveFile = function(path, value)
+                if path == "BestOfHandsNative.client"
+                    and failNextClientSave then
+                    failNextClientSave = false
+                    return false
+                end
                 files[path] = value
                 return true
+            end,
+        },
+        Timer = {
+            WaitFor = function(delay, callback)
+                timers[#timers + 1] = {
+                    callback = callback,
+                    delay = delay,
+                }
             end,
         },
         Utils = { Print = function() end },
@@ -1106,11 +1219,19 @@ test("client bridge prepares and queues BG3's stock lockpick task", function()
         "quick=42-0-1",
         "unknown cancellation cannot remove another request"
     )
+    failNextClientSave = true
     handler({ operation = "cancel", request = "42-0-1" })
+    assertContains(files["BestOfHandsNative.client"], "quick=42-0-1",
+        "failed cancellation write leaves the published request intact")
+    assertEqual(1, #timers,
+        "failed fallback cancellation schedules one bounded retry")
+    assertEqual(250, timers[1].delay,
+        "fallback cancellation retry uses bounded backoff")
+    timers[1].callback()
     assertEqual(
         nil,
         (files["BestOfHandsNative.client"] or ""):find("quick=", 1, true),
-        "cancel removes the native bridge request"
+        "cancel removes the native bridge request after retry"
     )
 end)
 
@@ -1224,6 +1345,22 @@ test("client bridge rejects malformed or unpublishable fallback requests", funct
     assertEqual("rejected",
         start("invalid-net-id", actorGuid, targetGuid).operation,
         "non-numeric target network ID is rejected")
+    targetNetId = -1
+    assertEqual("rejected",
+        start("negative-net-id", actorGuid, targetGuid).operation,
+        "negative target network ID is rejected")
+    targetNetId = 1.5
+    assertEqual("rejected",
+        start("fractional-net-id", actorGuid, targetGuid).operation,
+        "fractional target network ID is rejected")
+    targetNetId = math.huge
+    assertEqual("rejected",
+        start("infinite-net-id", actorGuid, targetGuid).operation,
+        "infinite target network ID is rejected")
+    targetNetId = 0 / 0
+    assertEqual("rejected",
+        start("nan-net-id", actorGuid, targetGuid).operation,
+        "NaN target network ID is rejected")
     targetNetId = "throw"
     local messagesBeforeNetIdError = #messages
     handler({
@@ -1436,7 +1573,13 @@ test("client left-click snapshot isolates actors, keys, targets, and sessions", 
     invalidTarget.Lock = { Key_M = "" }
     keyedTarget.GetNetId = function() return 111 end
     freeTarget.GetNetId = function() return 112 end
-    invalidTarget.GetNetId = function() return 0 end
+    local invalidTargetNetId = 0
+    invalidTarget.GetNetId = function()
+        if invalidTargetNetId == "throw" then
+            error("simulated snapshot NetID failure")
+        end
+        return invalidTargetNetId
+    end
     keyEntity.Key = { Key = "KEYED_TARGET" }
     keyEntity.InventoryTopOwner = { TopOwner = outsider }
 
@@ -1551,6 +1694,22 @@ test("client left-click snapshot isolates actors, keys, targets, and sessions", 
     assertEqual(nil,
         snapshot():find("locked=" .. invalidTarget.handle, 1, true),
         "invalid network ID is excluded")
+    for _, invalidNetId in ipairs({
+        -1,
+        1.5,
+        math.huge,
+        0 / 0,
+        "not-a-number",
+        "throw",
+    }) do
+        invalidTargetNetId = invalidNetId
+        callbacks.LockChange(invalidTarget)
+        flush()
+        assertEqual(nil,
+            snapshot():find("locked=" .. invalidTarget.handle, 1, true),
+            "non-positive, non-integral, and unreadable NetIDs stay excluded")
+    end
+    invalidTargetNetId = 0
 
     keyEntity.InventoryTopOwner.TopOwner = actorA
     callbacks.InventoryTopOwnerChange(keyEntity)
@@ -1677,6 +1836,22 @@ test("client left-click snapshot isolates actors, keys, targets, and sessions", 
     table.remove(timers, 1).callback()
     assertContains(snapshot(), "native_session=session-c",
         "snapshot write retry recovers without another component event")
+
+    local getAllEntities = Ext.Entity.GetAllEntitiesWithComponent
+    Ext.Entity.GetAllEntitiesWithComponent = function(component)
+        if component == "Lock" then
+            error("simulated entity enumeration failure")
+        end
+        return getAllEntities(component)
+    end
+    callbacks.LockChange(freeTarget)
+    flush()
+    assertEqual(1, #timers,
+        "entity enumeration failure enters bounded snapshot retry")
+    Ext.Entity.GetAllEntitiesWithComponent = getAllEntities
+    table.remove(timers, 1).callback()
+    assertContains(snapshot(), "native_session=session-c",
+        "snapshot retry recovers after entity enumeration resumes")
 end)
 
 test("runtime tool precheck uses BG3 party inventory without consuming anything", function()
@@ -1734,6 +1909,29 @@ test("runtime tool precheck uses BG3 party inventory without consuming anything"
     api.RejectNativeActionWithoutTool("disarm", "actor", "trap")
     assertEqual("disarm", responses[2].action, "disarm response database")
     assertEqual(0, responses[2].result, "disarm rejection result")
+end)
+
+test("runtime player enumeration deduplicates database rows", function()
+    Osi = {
+        DB_Players = {
+            Get = function()
+                return {
+                    { "actor" },
+                    { "best" },
+                    { "actor" },
+                    { "" },
+                    { "best" },
+                    { "other" },
+                }
+            end,
+        },
+    }
+    local api = NativeRuntimeApi.Create({}, recordingDiagnostics())
+    local players = api.GetPlayers()
+    assertEqual(3, #players, "only unique non-empty players returned")
+    assertEqual("actor", players[1], "first occurrence order retained")
+    assertEqual("best", players[2], "second unique player retained")
+    assertEqual("other", players[3], "third unique player retained")
 end)
 
 local function makeCoordinator(options)
@@ -2103,6 +2301,34 @@ test("a RequestedRoll Canceled flag cannot tear down a retryable native mapping"
     assertEqual(timerCount, #timers, "canceled flag schedules no cleanup")
     assertEqual(1, coordinator.Count(), "mapping remains available")
     assertEqual(0, #removed, "bridge mapping remains available")
+end)
+
+test("requested-roll change observation is inert while tracing is disabled", function()
+    local coordinator, _, _, _, records = makeCoordinator({ trace = false })
+    coordinator.OnNativeRequest("lockpick", "actor", "target", 24)
+    local rollEntity = entity(
+        "00000000-0000-0000-0000-000000000040",
+        "0200000200000040"
+    )
+    local requestedRoll = {
+        FixedRollBonuses = {},
+        ResolvedRollBonuses = {},
+        RollUuid = "00000000-0000-0000-0000-000000000041",
+        Roller = actor,
+        Subject = target,
+    }
+    rollEntity.RequestedRoll = requestedRoll
+    coordinator.OnRequestedRoll(rollEntity, requestedRoll)
+    for index = 1, 30 do
+        coordinator.OnRequestedRollChanged(rollEntity, requestedRoll, index)
+    end
+    assertEqual(nil, findRecord(records, "native_requested_roll_state"),
+        "trace-disabled changes emit no requested-roll snapshots")
+    assertEqual(nil,
+        findRecord(records, "native_requested_roll_state_suppressed"),
+        "trace-disabled changes maintain no suppression diagnostics")
+    assertEqual(1, coordinator.Count(),
+        "diagnostic changes do not affect the functional mapping")
 end)
 
 test("direct specialist rolls produce bounded vanilla reference comparison traces", function()

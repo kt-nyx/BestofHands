@@ -21,10 +21,13 @@ function NativeRuntimeApi.Create(settings, diagnostics)
         return safe(diagnostics, "DB_Players.Get", {}, function()
             local rows = Osi.DB_Players:Get(nil) or {}
             local players = {}
+            local seen = {}
             for _, row in pairs(rows) do
                 local value = row[1]
-                if value ~= nil and tostring(value) ~= "" then
-                    players[#players + 1] = tostring(value)
+                local player = value ~= nil and tostring(value) or ""
+                if player ~= "" and not seen[player] then
+                    seen[player] = true
+                    players[#players + 1] = player
                 end
             end
             return players

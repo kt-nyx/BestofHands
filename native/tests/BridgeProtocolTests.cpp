@@ -286,6 +286,28 @@ int main()
     assert(client.lockedTargets.size() == 1);
     assert(client.lockedTargets[0].target == 0x01c000010000f15cULL);
     assert(client.lockedTargets[0].netId == 1125899906937610ULL);
+    auto const crlfClient = ParseClientBridgeDocument(
+        "protocol=7\r\n"
+        "pak_version=2.0.0\r\n"
+        "native_session=crlf-session\r\n"
+        "eligible=1\t1\r\n"
+        "locked=2\t3\r\n"
+        "end=1\r\n");
+    assert(crlfClient.valid);
+    assert(crlfClient.nativeSession == "crlf-session");
+    assert(crlfClient.leftClickInitiators.size() == 1);
+    assert(crlfClient.lockedTargets.size() == 1);
+    auto const emptyClient = ParseClientBridgeDocument(
+        "protocol=7\n"
+        "pak_version=2.0.0\n"
+        "native_session=empty-session\n"
+        "end=1\n");
+    assert(emptyClient.valid);
+    assert(!emptyClient.trace);
+    assert(emptyClient.records.empty());
+    assert(emptyClient.quickLockpicks.empty());
+    assert(emptyClient.leftClickInitiators.empty());
+    assert(emptyClient.lockedTargets.empty());
     assert(!ParseClientBridgeDocument(
         "protocol=7\npak_version=2.0.0\nnative_session=x\n"
         "eligible=1\t2\nend=1\n").valid);

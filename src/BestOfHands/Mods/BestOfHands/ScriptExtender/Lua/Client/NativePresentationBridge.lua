@@ -6,6 +6,7 @@ local CLIENT_FILE = "BestOfHandsNative.client"
 local LEFT_CLICK_FILE = "BestOfHandsNative.leftclick"
 local PROTOCOL = "7"
 local GUID_PATTERN = "%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x"
+local SAVE_RETRY_DELAYS_MS = { 250, 1000, 5000 }
 
 local function objectGuid(value)
     if value == nil then
@@ -74,6 +75,17 @@ local function stableValue(value)
     return tostring(value):gsub("[\r\n|]", " ")
 end
 
+local function positiveInteger(value)
+    local number = tonumber(value)
+    if number == nil
+        or number <= 0
+        or number >= math.huge
+        or number % 1 ~= 0 then
+        return nil
+    end
+    return number
+end
+
 local function write(event, fields)
     local keys = {}
     for key, _ in pairs(fields or {}) do
@@ -104,6 +116,37 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
     local lastLeftClickPayload = ""
     local traceEnabled = settings.TRACE_EVENTS == true
     local scheduleLeftClickSnapshot
+    local saveClientRecords
+    local clientRecordsSaveRetryPending = false
+    local clientRecordsSaveRetryAttempt = 0
+
+    local function scheduleClientRecordsSaveRetry()
+        if clientRecordsSaveRetryPending then
+            return
+        end
+        clientRecordsSaveRetryPending = true
+        clientRecordsSaveRetryAttempt = math.min(
+            clientRecordsSaveRetryAttempt + 1,
+            #SAVE_RETRY_DELAYS_MS
+        )
+        local function retry()
+            clientRecordsSaveRetryPending = false
+            saveClientRecords()
+        end
+        if Ext.Timer ~= nil
+            and type(Ext.Timer.WaitFor) == "function" then
+            Ext.Timer.WaitFor(
+                SAVE_RETRY_DELAYS_MS[clientRecordsSaveRetryAttempt],
+                retry
+            )
+        elseif clientRecordsSaveRetryAttempt == 1
+            and type(Ext.OnNextTick) == "function" then
+            Ext.OnNextTick(retry)
+        else
+            clientRecordsSaveRetryPending = false
+            clientRecordsSaveRetryAttempt = 0
+        end
+    end
 
     local function loadActionText()
         local ok, text = pcall(Ext.IO.LoadFile, ACTION_FILE)
@@ -171,7 +214,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
         return records
     end
 
-    local function saveClientRecords()
+    saveClientRecords = function()
         if lastSession == "" then
             return false
         end
@@ -223,8 +266,10 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
                 error = ok and "save_returned_false" or result,
                 file = CLIENT_FILE,
             })
+            scheduleClientRecordsSaveRetry()
             return false
         end
+        clientRecordsSaveRetryAttempt = 0
         return true
     end
 
@@ -345,7 +390,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
             local ok, netId = pcall(function()
                 return entity:GetNetId()
             end)
-            netId = ok and tonumber(netId) or nil
+            netId = ok and positiveInteger(netId) or nil
             local guid = objectGuid(entityGuid(entity))
             local handleKey = handle and handle:lower() or nil
             local invalidated = (handleKey ~= nil
@@ -568,11 +613,12 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
         local netIdOk, rawTargetNetId = pcall(function()
             return targetHandle:GetNetId()
         end)
-        local targetNetId = netIdOk and tonumber(rawTargetNetId) or nil
+        local targetNetId = netIdOk
+            and positiveInteger(rawTargetNetId)
+            or nil
         if initiatorHandle == nil
             or targetEntityHandle == nil
-            or targetNetId == nil
-            or targetNetId <= 0 then
+            or targetNetId == nil then
             return false, "lockpick_identity_unavailable"
         end
 
@@ -718,6 +764,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
     ))
 
     local snapshotRefreshPending = false
+    local snapshotRetryAttempt = 0
     local function runLeftClickSnapshotRefresh()
         snapshotRefreshPending = false
         local ok, refreshed = xpcall(
@@ -734,12 +781,24 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
                 return
             end
             snapshotRefreshPending = true
+            snapshotRetryAttempt = math.min(
+                snapshotRetryAttempt + 1,
+                #SAVE_RETRY_DELAYS_MS
+            )
             if Ext.Timer ~= nil
                 and type(Ext.Timer.WaitFor) == "function" then
-                Ext.Timer.WaitFor(250, runLeftClickSnapshotRefresh)
-            else
+                Ext.Timer.WaitFor(
+                    SAVE_RETRY_DELAYS_MS[snapshotRetryAttempt],
+                    runLeftClickSnapshotRefresh
+                )
+            elseif snapshotRetryAttempt == 1
+                and type(Ext.OnNextTick) == "function" then
                 Ext.OnNextTick(runLeftClickSnapshotRefresh)
+            else
+                snapshotRefreshPending = false
             end
+        else
+            snapshotRetryAttempt = 0
         end
     end
     scheduleLeftClickSnapshot = function()

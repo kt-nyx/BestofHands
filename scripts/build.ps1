@@ -18,9 +18,7 @@ $destination = Join-Path $dist $pakName
 & (Join-Path $PSScriptRoot 'validate.ps1')
 & (Join-Path $PSScriptRoot 'build-native.ps1') `
     -Configuration Release `
-    -PerformanceDiagnostics:$PerformanceDiagnostics `
-    -Install:$Install `
-    -GameBinPath $GameBinPath
+    -PerformanceDiagnostics:$PerformanceDiagnostics
 
 $candidates = @(
     $DivinePath,
@@ -140,6 +138,38 @@ if ($Install) {
         throw "BG3 Mods directory was not found: $modsDirectory"
     }
 
-    Copy-Item -LiteralPath $destination -Destination (Join-Path $modsDirectory $pakName) -Force
+    if ([string]::IsNullOrWhiteSpace($GameBinPath)) {
+        $GameBinPath = 'Z:\Games\SteamLibrary\steamapps\common\Baldurs Gate 3\bin'
+    }
+    $resolvedGameBin = [IO.Path]::GetFullPath($GameBinPath)
+    if (-not (Test-Path -LiteralPath (Join-Path $resolvedGameBin 'bg3_dx11.exe') -PathType Leaf) -and
+        -not (Test-Path -LiteralPath (Join-Path $resolvedGameBin 'bg3.exe') -PathType Leaf)) {
+        throw "BG3 executable was not found under: $resolvedGameBin"
+    }
+
+    $dll = Join-Path $root 'build\native\bin\NativeMods\BestOfHandsNative.dll'
+    if (-not (Test-Path -LiteralPath $dll -PathType Leaf)) {
+        throw "Native build output was not found: $dll"
+    }
+    $nativeMods = Join-Path $resolvedGameBin 'NativeMods'
+    New-Item -ItemType Directory -Path $nativeMods -Force | Out-Null
+
+    $installedDll = Join-Path $nativeMods 'BestOfHandsNative.dll'
+    $installedPak = Join-Path $modsDirectory $pakName
+    Copy-Item -LiteralPath $dll -Destination $installedDll -Force
+    Copy-Item -LiteralPath $destination -Destination $installedPak -Force
+
+    $sourceDllHash = (Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash
+    $installedDllHash = (Get-FileHash -LiteralPath $installedDll -Algorithm SHA256).Hash
+    $installedPakHash = (Get-FileHash -LiteralPath $installedPak -Algorithm SHA256).Hash
+    if ($installedDllHash -ne $sourceDllHash) {
+        throw "Installed BestOfHandsNative.dll differs from the verified build output."
+    }
+    if ($installedPakHash -ne $hash) {
+        throw "Installed $pakName differs from the verified package."
+    }
+
+    Write-Host "Installed BestOfHandsNative.dll to $nativeMods" -ForegroundColor Green
     Write-Host "Installed $pakName to $modsDirectory" -ForegroundColor Green
+    Write-Host 'Verified installed DLL and PAK hashes.' -ForegroundColor Green
 }

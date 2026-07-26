@@ -113,30 +113,36 @@ local function listen(name, arity, timing, handler)
 end
 
 listen("RequestCanLockpick", 3, "before", function(character, item, requestId)
-    diagnostics.Trace("request_can_lockpick", {
-        actor = character,
-        request_id = requestId,
-        target = item,
-    })
+    if diagnostics.IsTraceEnabled() then
+        diagnostics.Trace("request_can_lockpick", {
+            actor = character,
+            request_id = requestId,
+            target = item,
+        })
+    end
     quickLockpick.OnNativeRequest(character, item)
     interaction.OnNativeRequest("lockpick", character, item, requestId)
 end)
 
 listen("RequestCanDisarmTrap", 3, "before", function(character, item, requestId)
-    diagnostics.Trace("request_can_disarm", {
-        actor = character,
-        request_id = requestId,
-        target = item,
-    })
+    if diagnostics.IsTraceEnabled() then
+        diagnostics.Trace("request_can_disarm", {
+            actor = character,
+            request_id = requestId,
+            target = item,
+        })
+    end
     interaction.OnNativeRequest("disarm", character, item, requestId)
 end)
 
 listen("RequestProcessed", 3, "after", function(character, requestId, result)
-    diagnostics.Trace("request_processed", {
-        actor = character,
-        request_id = requestId,
-        result = result,
-    })
+    if diagnostics.IsTraceEnabled() then
+        diagnostics.Trace("request_processed", {
+            actor = character,
+            request_id = requestId,
+            result = result,
+        })
+    end
 end)
 
 listen("StartedLockpicking", 2, "after", function(character, item)
@@ -158,11 +164,13 @@ listen("StoppedDisarmingTrap", 2, "after", function(character, item)
 end)
 
 listen("UseFinished", 3, "before", function(character, item, success)
-    diagnostics.Trace("use_finished", {
-        actor = character,
-        success = success,
-        target = item,
-    })
+    if diagnostics.IsTraceEnabled() then
+        diagnostics.Trace("use_finished", {
+            actor = character,
+            success = success,
+            target = item,
+        })
+    end
     quickLockpick.OnUseFinished(character, item, success)
 end)
 

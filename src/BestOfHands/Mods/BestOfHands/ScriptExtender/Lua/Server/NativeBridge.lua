@@ -42,7 +42,19 @@ local function parseDocument(text)
     return result
 end
 
+local function safeField(value, field)
+    local ok, result = pcall(function() return value[field] end)
+    return ok and result or nil
+end
+
 local function entityHandle(value)
+    if value == nil then
+        return nil
+    end
+    local direct = tostring(value):match("Entity %((%x+)%)")
+    if direct ~= nil then
+        return direct
+    end
     local ok, entity = pcall(Ext.Entity.Get, value)
     if not ok or entity == nil then
         return nil
@@ -50,12 +62,30 @@ local function entityHandle(value)
     return tostring(entity):match("Entity %((%x+)%)")
 end
 
-local function entityGuid(value)
-    local ok, result = pcall(function()
-        local entity = Ext.Entity.Get(value)
-        return entity and entity.Uuid and tostring(entity.Uuid.EntityUuid) or nil
-    end)
-    return ok and result or nil
+local function entityIdentity(value)
+    if value == nil then
+        return nil, nil
+    end
+    local handle = tostring(value):match("Entity %((%x+)%)")
+    local uuidComponent = safeField(value, "Uuid")
+    local uuid = uuidComponent
+        and safeField(uuidComponent, "EntityUuid")
+        or nil
+    if handle ~= nil and uuid ~= nil then
+        return handle, tostring(uuid)
+    end
+    local ok, entity = pcall(Ext.Entity.Get, value)
+    if not ok or entity == nil then
+        return handle, uuid ~= nil and tostring(uuid) or nil
+    end
+    handle = handle or tostring(entity):match("Entity %((%x+)%)")
+    if uuid == nil then
+        uuidComponent = safeField(entity, "Uuid")
+        uuid = uuidComponent
+            and safeField(uuidComponent, "EntityUuid")
+            or nil
+    end
+    return handle, uuid ~= nil and tostring(uuid) or nil
 end
 
 local function stableRecords(records)
@@ -95,6 +125,7 @@ function NativeBridge.Create(settings, api, diagnostics)
     local detail = "handshake has not started"
     local warningShown = false
     local handshakeGeneration = 0
+    local visibleWarning
 
     local function save()
         local lines = {
@@ -130,12 +161,15 @@ function NativeBridge.Create(settings, api, diagnostics)
             ready = false
             state = "bridge_write_failed"
             detail = "Script Extender could not write the native bridge file"
+            if visibleWarning ~= nil then
+                visibleWarning()
+            end
             return false
         end
         return true
     end
 
-    local function visibleWarning()
+    visibleWarning = function()
         if warningShown then
             return
         end
@@ -170,6 +204,7 @@ function NativeBridge.Create(settings, api, diagnostics)
             and status.hooks == REQUIRED_HOOKS
             and status.features == REQUIRED_FEATURES
             and status.session == nativeSession
+            and status.ack == probe
             and status["end"] == "1"
         if not current then
             ready = false
@@ -208,7 +243,9 @@ function NativeBridge.Create(settings, api, diagnostics)
             ready = true
             state = "ready"
             detail = status.detail
-            save()
+            if not save() then
+                return
+            end
             diagnostics.Info("native_bridge_ready", {
                 hooks = status.hooks,
                 native_pid = status.pid,
@@ -244,7 +281,6 @@ function NativeBridge.Create(settings, api, diagnostics)
         detail = "waiting for BestOfHandsNative.dll"
         probe = uniqueProbe(handshakeGeneration)
         if not save() then
-            visibleWarning()
             return false
         end
         poll(handshakeGeneration, settings.NATIVE_HANDSHAKE_ATTEMPTS)
@@ -257,19 +293,16 @@ function NativeBridge.Create(settings, api, diagnostics)
 
     function instance.SetTrace(enabled)
         trace = enabled == true
-        save()
+        return save()
     end
 
     function instance.Upsert(record)
         if not ready or not nativeStatusIsCurrent() then
             return false, "native_bridge_not_ready"
         end
-        local initiatorHandle = entityHandle(record.initiator)
-        local specialistHandle = entityHandle(record.specialist)
-        local targetHandle = entityHandle(record.target)
-        local initiatorUuid = entityGuid(record.initiator)
-        local specialistUuid = entityGuid(record.specialist)
-        local targetUuid = entityGuid(record.target)
+        local initiatorHandle, initiatorUuid = entityIdentity(record.initiator)
+        local specialistHandle, specialistUuid = entityIdentity(record.specialist)
+        local targetHandle, targetUuid = entityIdentity(record.target)
         if initiatorHandle == nil
             or specialistHandle == nil
             or targetHandle == nil
@@ -355,7 +388,7 @@ function NativeBridge.Create(settings, api, diagnostics)
     end
 
     function instance.SetFinishedEvent(id, eventEntity)
-        if not ready or not nativeStatusIsCurrent() then
+        if not ready then
             return false, "native_bridge_not_ready"
         end
         local record = records[id]
@@ -366,6 +399,12 @@ function NativeBridge.Create(settings, api, diagnostics)
         if finishedEventHandle == nil then
             return false, "finished_event_handle_unavailable"
         end
+        if record.finishedEventHandle == finishedEventHandle then
+            return true, nil, finishedEventHandle
+        end
+        if not nativeStatusIsCurrent() then
+            return false, "native_bridge_not_ready"
+        end
         record.finishedEventHandle = finishedEventHandle
         if not save() then
             return false, "native_bridge_write_failed"
@@ -374,17 +413,26 @@ function NativeBridge.Create(settings, api, diagnostics)
     end
 
     function instance.Remove(id)
-        if records[id] == nil then
+        local record = records[id]
+        if record == nil then
             return false
         end
         records[id] = nil
-        save()
+        if not save() then
+            records[id] = record
+            return false
+        end
         return true
     end
 
     function instance.Clear()
+        local previous = records
         records = {}
-        save()
+        if not save() then
+            records = previous
+            return false
+        end
+        return true
     end
 
     function instance.GetStatus()

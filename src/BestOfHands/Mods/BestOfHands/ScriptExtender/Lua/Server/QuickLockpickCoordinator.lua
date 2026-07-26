@@ -21,6 +21,11 @@ function QuickLockpickCoordinator.Create(
     local generation = 0
     local sequence = 0
 
+    local function traceEnabled()
+        return type(diagnostics.IsTraceEnabled) ~= "function"
+            or diagnostics.IsTraceEnabled()
+    end
+
     local function requestId()
         sequence = sequence + 1
         local clock = api.MonotonicTime()
@@ -57,12 +62,14 @@ function QuickLockpickCoordinator.Create(
         pending[key] = nil
         pendingByRequest[record.id] = nil
         send(record, "cancel")
-        diagnostics.Trace("quick_lockpick_cleared", {
-            actor = record.actor,
-            reason = reason,
-            request = record.id,
-            target = record.target,
-        })
+        if traceEnabled() then
+            diagnostics.Trace("quick_lockpick_cleared", {
+                actor = record.actor,
+                reason = reason,
+                request = record.id,
+                target = record.target,
+            })
+        end
         return true
     end
 
@@ -99,10 +106,12 @@ function QuickLockpickCoordinator.Create(
         end
 
         if pending[key] ~= nil then
-            diagnostics.Trace("quick_lockpick_duplicate_ignored", {
-                actor = actor,
-                target = target,
-            })
+            if traceEnabled() then
+                diagnostics.Trace("quick_lockpick_duplicate_ignored", {
+                    actor = actor,
+                    target = target,
+                })
+            end
             return false
         end
 
@@ -293,10 +302,12 @@ function QuickLockpickCoordinator.Create(
         for _, record in ipairs(records) do
             send(record, "cancel")
         end
-        diagnostics.Trace("quick_lockpick_reset", {
-            reason = reason,
-            records = #records,
-        })
+        if traceEnabled() then
+            diagnostics.Trace("quick_lockpick_reset", {
+                reason = reason,
+                records = #records,
+            })
+        end
     end
 
     function instance.Count()
