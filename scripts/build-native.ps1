@@ -67,7 +67,7 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Native unit tests failed.'
 }
 
-$dll = Join-Path $build 'bin\NativeMods\BestOfHandsNative.dll'
+$dll = Join-Path $build 'bin\NativeMods\BestofHands.dll'
 if (-not (Test-Path -LiteralPath $dll -PathType Leaf)) {
     throw "Native build did not produce the expected DLL: $dll"
 }
@@ -127,6 +127,11 @@ if ($Install) {
     }
     $nativeMods = Join-Path $resolvedGameBin 'NativeMods'
     New-Item -ItemType Directory -Path $nativeMods -Force | Out-Null
-    Copy-Item -LiteralPath $dll -Destination (Join-Path $nativeMods 'BestOfHandsNative.dll') -Force
-    Write-Host "Installed BestOfHandsNative.dll to $nativeMods" -ForegroundColor Green
+    $legacyDll = Join-Path $nativeMods 'BestOfHandsNative.dll'
+    if (Test-Path -LiteralPath $legacyDll -PathType Leaf) {
+        Remove-Item -LiteralPath $legacyDll -Force
+        Write-Host "Removed obsolete $legacyDll" -ForegroundColor Yellow
+    }
+    Copy-Item -LiteralPath $dll -Destination (Join-Path $nativeMods 'BestofHands.dll') -Force
+    Write-Host "Installed BestofHands.dll to $nativeMods" -ForegroundColor Green
 }

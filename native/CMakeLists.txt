@@ -2,7 +2,7 @@
 
 cmake_minimum_required(VERSION 3.28)
 
-project(BestOfHandsNative VERSION 2.0.0 LANGUAGES CXX)
+project(BestOfHandsNative VERSION 2.0.1 LANGUAGES CXX RC)
 
 option(BEST_OF_HANDS_BUILD_TESTS "Build native unit tests" ON)
 option(BEST_OF_HANDS_PERF_DIAGNOSTICS
@@ -29,8 +29,21 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(safetyhook)
 
+set(BEST_OF_HANDS_NOTICES_PATH
+    "${PROJECT_SOURCE_DIR}/../THIRD_PARTY_NOTICES.txt")
+if(NOT EXISTS "${BEST_OF_HANDS_NOTICES_PATH}")
+    message(FATAL_ERROR
+        "Third-party notices were not found: ${BEST_OF_HANDS_NOTICES_PATH}")
+endif()
+configure_file(
+    resources/BestofHands.rc.in
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/BestofHands.rc"
+    @ONLY
+)
+
 add_library(BestOfHandsNative SHARED
     src/BestOfHandsNative.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/BestofHands.rc"
 )
 
 target_include_directories(BestOfHandsNative PRIVATE include)
@@ -51,7 +64,7 @@ endif()
 
 set_target_properties(BestOfHandsNative PROPERTIES
     INTERPROCEDURAL_OPTIMIZATION_RELEASE "${BEST_OF_HANDS_IPO_SUPPORTED}"
-    OUTPUT_NAME "BestOfHandsNative"
+    OUTPUT_NAME "BestofHands"
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/NativeMods"
     RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/bin/NativeMods"

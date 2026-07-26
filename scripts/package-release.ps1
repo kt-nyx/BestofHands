@@ -39,7 +39,7 @@ if ([string]::IsNullOrWhiteSpace($PakPath)) {
     $PakPath = Join-Path $dist $pakName
 }
 if ([string]::IsNullOrWhiteSpace($NativeDllPath)) {
-    $NativeDllPath = Join-Path $root 'build\native\bin\NativeMods\BestOfHandsNative.dll'
+    $NativeDllPath = Join-Path $root 'build\native\bin\NativeMods\BestofHands.dll'
 }
 $PakPath = [IO.Path]::GetFullPath($PakPath)
 $NativeDllPath = [IO.Path]::GetFullPath($NativeDllPath)
@@ -55,14 +55,113 @@ if ([IO.Path]::GetFileName($PakPath) -cne $pakName) {
 if (-not (Test-Path -LiteralPath $NativeDllPath -PathType Leaf)) {
     throw "Verified native DLL not found: $NativeDllPath. Run scripts\build.ps1 first."
 }
-if ([IO.Path]::GetFileName($NativeDllPath) -cne 'BestOfHandsNative.dll') {
-    throw "Native input must be named exactly BestOfHandsNative.dll: $NativeDllPath"
+if ([IO.Path]::GetFileName($NativeDllPath) -cne 'BestofHands.dll') {
+    throw "Native input must be named exactly BestofHands.dll: $NativeDllPath"
 }
 if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
     throw "Module metadata not found: $metadataPath"
 }
 if (-not (Test-Path -LiteralPath $noticesPath -PathType Leaf)) {
     throw "Third-party notices not found: $noticesPath"
+}
+
+if ($null -eq ('BestOfHands.ReleaseResourceReader' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace BestOfHands
+{
+    public static class ReleaseResourceReader
+    {
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern IntPtr LoadLibraryEx(
+            string fileName,
+            IntPtr file,
+            uint flags);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr FindResource(
+            IntPtr module,
+            IntPtr name,
+            IntPtr type);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern uint SizeofResource(
+            IntPtr module,
+            IntPtr resource);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr LoadResource(
+            IntPtr module,
+            IntPtr resource);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr LockResource(IntPtr resourceData);
+
+        [DllImport("kernel32.dll")]
+        public static extern bool FreeLibrary(IntPtr module);
+    }
+}
+'@
+}
+
+function Get-NativeResourceBytes {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][int]$ResourceId
+    )
+
+    $loadLibraryAsDataFile = 0x00000002
+    $rtRcData = 10
+    $module = [BestOfHands.ReleaseResourceReader]::LoadLibraryEx(
+        $Path,
+        [IntPtr]::Zero,
+        $loadLibraryAsDataFile
+    )
+    if ($module -eq [IntPtr]::Zero) {
+        $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "Could not open native DLL resources (Win32 $errorCode): $Path"
+    }
+
+    try {
+        $resource = [BestOfHands.ReleaseResourceReader]::FindResource(
+            $module,
+            [IntPtr]$ResourceId,
+            [IntPtr]$rtRcData
+        )
+        if ($resource -eq [IntPtr]::Zero) {
+            $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            throw "Native DLL resource $ResourceId was not found (Win32 $errorCode): $Path"
+        }
+
+        $resourceSize = [BestOfHands.ReleaseResourceReader]::SizeofResource(
+            $module,
+            $resource
+        )
+        $loadedResource = [BestOfHands.ReleaseResourceReader]::LoadResource(
+            $module,
+            $resource
+        )
+        $resourcePointer = [BestOfHands.ReleaseResourceReader]::LockResource(
+            $loadedResource
+        )
+        if ($resourceSize -eq 0 -or $resourcePointer -eq [IntPtr]::Zero) {
+            throw "Native DLL resource $ResourceId is empty or unreadable: $Path"
+        }
+
+        $bytes = [byte[]]::new([int]$resourceSize)
+        [Runtime.InteropServices.Marshal]::Copy(
+            $resourcePointer,
+            $bytes,
+            0,
+            [int]$resourceSize
+        )
+        return $bytes
+    }
+    finally {
+        [BestOfHands.ReleaseResourceReader]::FreeLibrary($module) | Out-Null
+    }
 }
 
 [xml]$metadata = Get-Content -LiteralPath $metadataPath -Raw
@@ -117,8 +216,7 @@ try {
     Copy-Item -LiteralPath $PakPath -Destination (Join-Path $staging $pakName)
     $nativeStage = Join-Path $staging 'bin\NativeMods'
     New-Item -ItemType Directory -Path $nativeStage -Force | Out-Null
-    Copy-Item -LiteralPath $NativeDllPath -Destination (Join-Path $nativeStage 'BestOfHandsNative.dll')
-    Copy-Item -LiteralPath $noticesPath -Destination (Join-Path $staging 'THIRD_PARTY_NOTICES.txt')
+    Copy-Item -LiteralPath $NativeDllPath -Destination (Join-Path $nativeStage 'BestofHands.dll')
 
     $infoPath = Join-Path $staging 'info.json'
     $infoJson = $info | ConvertTo-Json -Depth 8 -Compress
@@ -129,8 +227,7 @@ try {
     )
     $releaseTimestamp = [DateTimeOffset]::Parse($created).UtcDateTime
     (Get-Item -LiteralPath (Join-Path $staging $pakName)).LastWriteTimeUtc = $releaseTimestamp
-    (Get-Item -LiteralPath (Join-Path $nativeStage 'BestOfHandsNative.dll')).LastWriteTimeUtc = $releaseTimestamp
-    (Get-Item -LiteralPath (Join-Path $staging 'THIRD_PARTY_NOTICES.txt')).LastWriteTimeUtc = $releaseTimestamp
+    (Get-Item -LiteralPath (Join-Path $nativeStage 'BestofHands.dll')).LastWriteTimeUtc = $releaseTimestamp
     (Get-Item -LiteralPath $infoPath).LastWriteTimeUtc = $releaseTimestamp
 
     New-Item -ItemType Directory -Path $dist -Force | Out-Null
@@ -148,8 +245,7 @@ try {
         Sort-Object
     $expectedFiles = @(
         'BestofHands.pak',
-        'THIRD_PARTY_NOTICES.txt',
-        'bin/NativeMods/BestOfHandsNative.dll',
+        'bin/NativeMods/BestofHands.dll',
         'info.json'
     ) | Sort-Object
     $difference = Compare-Object -ReferenceObject $expectedFiles -DifferenceObject $actualFiles
@@ -163,17 +259,19 @@ try {
     if ($sourcePakHash -ne $extractedPakHash) {
         throw 'The PAK in the release archive differs from the verified build.'
     }
-    $extractedDll = Join-Path $verification 'bin\NativeMods\BestOfHandsNative.dll'
+    $extractedDll = Join-Path $verification 'bin\NativeMods\BestofHands.dll'
     $sourceDllHash = (Get-FileHash -LiteralPath $NativeDllPath -Algorithm SHA256).Hash
     $extractedDllHash = (Get-FileHash -LiteralPath $extractedDll -Algorithm SHA256).Hash
     if ($sourceDllHash -ne $extractedDllHash) {
         throw 'The native DLL in the release archive differs from the verified build.'
     }
-    $extractedNotices = Join-Path $verification 'THIRD_PARTY_NOTICES.txt'
-    $sourceNoticesHash = (Get-FileHash -LiteralPath $noticesPath -Algorithm SHA256).Hash
-    $extractedNoticesHash = (Get-FileHash -LiteralPath $extractedNotices -Algorithm SHA256).Hash
-    if ($sourceNoticesHash -ne $extractedNoticesHash) {
-        throw 'The third-party notices in the release archive differ from source.'
+
+    $sourceNotices = [IO.File]::ReadAllBytes($noticesPath)
+    $embeddedNotices = Get-NativeResourceBytes -Path $extractedDll -ResourceId 101
+    if ($sourceNotices.Length -ne $embeddedNotices.Length -or
+        [Convert]::ToBase64String($sourceNotices) -cne
+            [Convert]::ToBase64String($embeddedNotices)) {
+        throw 'The third-party notices embedded in the native DLL differ from source.'
     }
 
     $extractedInfo = Get-Content -LiteralPath (Join-Path $verification 'info.json') -Raw |
@@ -221,6 +319,6 @@ finally {
 
 Write-Host "Created $destination" -ForegroundColor Green
 Write-Host "Created $checksumDestination" -ForegroundColor Green
-Write-Host 'Verified release archive allowlist: PAK, native DLL, notices, and info.json.' -ForegroundColor Green
-Write-Host 'Verified archived PAK, native DLL, and notices byte-for-byte and info.json identity/MD5 against source.' -ForegroundColor Green
+Write-Host 'Verified release archive allowlist: PAK, native DLL, and info.json.' -ForegroundColor Green
+Write-Host 'Verified archived PAK and native DLL byte-for-byte, embedded notices, and info.json identity/MD5 against source.' -ForegroundColor Green
 Write-Host "SHA-256: $zipHash"

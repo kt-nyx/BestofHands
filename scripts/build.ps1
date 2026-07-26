@@ -147,14 +147,19 @@ if ($Install) {
         throw "BG3 executable was not found under: $resolvedGameBin"
     }
 
-    $dll = Join-Path $root 'build\native\bin\NativeMods\BestOfHandsNative.dll'
+    $dll = Join-Path $root 'build\native\bin\NativeMods\BestofHands.dll'
     if (-not (Test-Path -LiteralPath $dll -PathType Leaf)) {
         throw "Native build output was not found: $dll"
     }
     $nativeMods = Join-Path $resolvedGameBin 'NativeMods'
     New-Item -ItemType Directory -Path $nativeMods -Force | Out-Null
 
-    $installedDll = Join-Path $nativeMods 'BestOfHandsNative.dll'
+    $legacyDll = Join-Path $nativeMods 'BestOfHandsNative.dll'
+    if (Test-Path -LiteralPath $legacyDll -PathType Leaf) {
+        Remove-Item -LiteralPath $legacyDll -Force
+        Write-Host "Removed obsolete $legacyDll" -ForegroundColor Yellow
+    }
+    $installedDll = Join-Path $nativeMods 'BestofHands.dll'
     $installedPak = Join-Path $modsDirectory $pakName
     Copy-Item -LiteralPath $dll -Destination $installedDll -Force
     Copy-Item -LiteralPath $destination -Destination $installedPak -Force
@@ -163,13 +168,13 @@ if ($Install) {
     $installedDllHash = (Get-FileHash -LiteralPath $installedDll -Algorithm SHA256).Hash
     $installedPakHash = (Get-FileHash -LiteralPath $installedPak -Algorithm SHA256).Hash
     if ($installedDllHash -ne $sourceDllHash) {
-        throw "Installed BestOfHandsNative.dll differs from the verified build output."
+        throw "Installed BestofHands.dll differs from the verified build output."
     }
     if ($installedPakHash -ne $hash) {
         throw "Installed $pakName differs from the verified package."
     }
 
-    Write-Host "Installed BestOfHandsNative.dll to $nativeMods" -ForegroundColor Green
+    Write-Host "Installed BestofHands.dll to $nativeMods" -ForegroundColor Green
     Write-Host "Installed $pakName to $modsDirectory" -ForegroundColor Green
     Write-Host 'Verified installed DLL and PAK hashes.' -ForegroundColor Green
 }

@@ -177,7 +177,7 @@ function NativeBridge.Create(settings, api, diagnostics)
         local message = table.concat({
             "Best of Hands 2.0 is disabled for this session.",
             "",
-            "The required BestOfHandsNative.dll did not report compatible server profile, roll-math, and client roll-presentation hooks.",
+            "The required BestofHands.dll did not report compatible server profile, roll-math, and client roll-presentation hooks.",
             "Install the complete archive and update Native Mod Loader after game patches.",
             "",
             "Details: " .. tostring(state) .. " - " .. tostring(detail),
@@ -278,7 +278,7 @@ function NativeBridge.Create(settings, api, diagnostics)
         records = {}
         nativeSession = ""
         state = "waiting_for_native_ack"
-        detail = "waiting for BestOfHandsNative.dll"
+        detail = "waiting for BestofHands.dll"
         probe = uniqueProbe(handshakeGeneration)
         if not save() then
             return false

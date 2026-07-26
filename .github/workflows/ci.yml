@@ -192,10 +192,11 @@ jobs:
           file_id: ${{ vars.NEXUSMODS_FILE_ID }}
           filename: dist/${{ needs.verify.outputs.archive }}
           description: |-
-            - Rebuilt lockpick and trap-disarm delegation around native BG3 action hooks.
-            - Uses exactly the selected specialist's native modifier profile without initiator stacking.
-            - Preserves native retries, outcomes, crime context, and tool handling.
-            - Requires BG3 Script Extender and Native Mod Loader.
+            IMPORTANT:
+            You need to MANUALLY install the .dll in the downloaded .zip file after you install this mod via your mod manager! BG3MM will not install it for you!
+
+            Place the .dll in: [BG3 folder]/bin/NativeMods
+            Create the folder if it doesn't exist yet.
           version: ${{ needs.verify.outputs.version }}
           display_name: Best of Hands - Quick Lockpick and Disarm
           category: main

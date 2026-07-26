@@ -16,7 +16,9 @@ $licensePath = Join-Path $root 'LICENSE'
 $readmePath = Join-Path $root 'README.md'
 $developmentPath = Join-Path $root 'DEVELOPMENT.md'
 $noticesPath = Join-Path $root 'THIRD_PARTY_NOTICES.txt'
+$workflowPath = Join-Path $root '.github\workflows\ci.yml'
 $nativeCmakePath = Join-Path $root 'native\CMakeLists.txt'
+$nativeResourcePath = Join-Path $root 'native\resources\BestofHands.rc.in'
 $nativeHeaderPath = Join-Path $root 'native\include\BridgeProtocol.h'
 $nativeQuickLockpickHeaderPath = Join-Path $root 'native\include\QuickLockpickState.h'
 $nativeSourcePath = Join-Path $root 'native\src\BestOfHandsNative.cpp'
@@ -33,7 +35,9 @@ $requiredFiles = @(
     $readmePath,
     $developmentPath,
     $noticesPath,
+    $workflowPath,
     $nativeCmakePath,
+    $nativeResourcePath,
     $nativeHeaderPath,
     $nativeQuickLockpickHeaderPath,
     $nativeSourcePath,
@@ -103,6 +107,9 @@ $toolVersions = Get-Content -LiteralPath $toolVersionsPath -Raw | ConvertFrom-Js
 if ($toolVersions.bg3ScriptExtender.requiredApiVersion -ne $config.RequiredVersion) {
     throw 'tools/tool-versions.json and Config.json disagree on the Script Extender API floor.'
 }
+if ($toolVersions.bg3NativeModLoader.installPath -cne 'bin/NativeMods/BestofHands.dll') {
+    throw 'The native install path must use the shipped BestofHands.dll filename.'
+}
 if ($toolVersions.nativeBuildDependencies.safetyHook -ne '0.7.0' -or
     $toolVersions.nativeBuildDependencies.zydis -ne '4.1.0' -or
     $toolVersions.nativeBuildDependencies.zycore -ne '1.5.0') {
@@ -116,6 +123,18 @@ if ($cmakeVersion -notmatch '^\d+\.\d+\.\d+$' -or
     $cmakeArchive -cne "cmake-$cmakeVersion-windows-x86_64.zip" -or
     $cmakeArchiveSha256 -notmatch '^[0-9a-f]{64}$') {
     throw 'Pinned native CMake toolchain metadata is missing or invalid.'
+}
+$workflowText = Get-Content -LiteralPath $workflowPath -Raw
+$expectedNexusDescription = @'
+          description: |-
+            IMPORTANT:
+            You need to MANUALLY install the .dll in the downloaded .zip file after you install this mod via your mod manager! BG3MM will not install it for you!
+
+            Place the .dll in: [BG3 folder]/bin/NativeMods
+            Create the folder if it doesn't exist yet.
+'@
+if (-not $workflowText.Contains($expectedNexusDescription)) {
+    throw 'The Nexus release file description differs from the approved manual-install text.'
 }
 
 $semanticVersion = (Get-Content -LiteralPath $versionPath -Raw).Trim()
@@ -189,7 +208,7 @@ $commentCapableSource = @(
     Get-ChildItem -LiteralPath (Join-Path $root 'native') -File -Recurse |
         Where-Object { $_.Extension -in @('.cpp', '.h') }
     Get-Item -LiteralPath $nativeCmakePath
-    Get-Item -LiteralPath (Join-Path $root '.github\workflows\ci.yml')
+    Get-Item -LiteralPath $workflowPath
 )
 foreach ($sourceFile in $commentCapableSource) {
     $content = Get-Content -LiteralPath $sourceFile.FullName -Raw
@@ -367,6 +386,17 @@ if ($nativeHeader -notmatch ('kPluginVersion\s*=\s*"' + [regex]::Escape($semanti
 $nativeCmake = Get-Content -LiteralPath $nativeCmakePath -Raw
 if ($nativeCmake -notmatch ('project\(BestOfHandsNative VERSION ' + [regex]::Escape($semanticVersion))) {
     throw "Native CMake project does not expose version $semanticVersion."
+}
+if ($nativeCmake -notmatch 'OUTPUT_NAME\s+"BestofHands"') {
+    throw 'Native CMake output must be named BestofHands.dll.'
+}
+if ($nativeCmake -notmatch 'resources/BestofHands\.rc\.in' -or
+    $nativeCmake -notmatch 'generated/BestofHands\.rc') {
+    throw 'Native CMake must compile the generated third-party-notices resource.'
+}
+$nativeResource = Get-Content -LiteralPath $nativeResourcePath -Raw
+if ($nativeResource -notmatch 'RCDATA\s+"@BEST_OF_HANDS_NOTICES_PATH@"') {
+    throw 'The native resource template must embed THIRD_PARTY_NOTICES.txt.'
 }
 $nativeSource = Get-Content -LiteralPath $nativeSourcePath -Raw
 $nativeQuickLockpickHeader = Get-Content -LiteralPath $nativeQuickLockpickHeaderPath -Raw

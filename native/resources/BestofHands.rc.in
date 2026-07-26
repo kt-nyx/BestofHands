@@ -1,0 +1,5 @@
+// SPDX-License-Identifier: Unlicense
+
+// Keep the third-party license text inside the shipped DLL so the combined
+// archive does not need a separate notices file.
+101 RCDATA "@BEST_OF_HANDS_NOTICES_PATH@"

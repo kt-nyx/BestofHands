@@ -9,7 +9,7 @@
   },
   "bg3NativeModLoader": {
     "required": true,
-    "installPath": "bin/NativeMods/BestOfHandsNative.dll"
+    "installPath": "bin/NativeMods/BestofHands.dll"
   },
   "nativeBuildDependencies": {
     "safetyHook": "0.7.0",

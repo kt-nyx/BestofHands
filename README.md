@@ -40,17 +40,20 @@ The download contains both parts of the mod:
 
 ```text
 BestofHands.pak
-THIRD_PARTY_NOTICES.txt
-bin\NativeMods\BestOfHandsNative.dll
+bin\NativeMods\BestofHands.dll
 ```
 
 Install BG3 Script Extender and Native Mod Loader first, then:
 
 1. Import `BestofHands.zip` into BG3 Mod Manager, move *Best of Hands - Quick Lockpick & Disarm* to Active Mods, and export the load order.
-2. Open the same ZIP and copy `bin\NativeMods\BestOfHandsNative.dll` to your game's `Baldurs Gate 3\bin\NativeMods` folder.
+2. Open the same ZIP and copy `bin\NativeMods\BestofHands.dll` to your game's `Baldurs Gate 3\bin\NativeMods` folder.
 3. Start or reload a game. A visible warning means the native half did not load correctly.
 
 BG3 Mod Manager handles the PAK but should not be assumed to install the DLL. Vortex users may install and deploy the combined archive normally, then confirm that the DLL reached the folder above and that the PAK is active.
+
+When updating from version 2.0.0, remove the obsolete
+`BestOfHandsNative.dll` from `Baldurs Gate 3\bin\NativeMods` before starting
+the game. Do not leave both DLL filenames installed.
 
 ## Compatibility
 
@@ -66,7 +69,7 @@ The DLL supports only executable builds whose native layouts were validated. A B
 
 ## Uninstallation
 
-Finish or cancel any active lockpick/disarm roll, exit the game, deactivate the PAK, and remove `BestOfHandsNative.dll` from `Baldurs Gate 3\bin\NativeMods`. Best of Hands adds no items, spells, passives, statuses, world objects, or permanent character bonuses.
+Finish or cancel any active lockpick/disarm roll, exit the game, deactivate the PAK, and remove `BestofHands.dll` from `Baldurs Gate 3\bin\NativeMods`. Best of Hands adds no items, spells, passives, statuses, world objects, or permanent character bonuses.
 
 For an extra check before removal, enable the Script Extender console and run `!best_of_hands_status`. An idle session reports `pending_delegations=0` and `legacy_assistance_cleanup=0`.
 
@@ -91,3 +94,5 @@ Thank you to the following authors and projects, which inspired or informed Best
 ## License
 
 Best of Hands is released under [The Unlicense](https://unlicense.org/). You may copy, modify, fork, redistribute, sell, relicense, or incorporate it without permission or credit. You do not need to publish source, use the same license, or notify the author.
+
+Third-party license notices are embedded in `BestofHands.dll`.

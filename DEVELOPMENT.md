@@ -97,7 +97,7 @@ PAK / server Lua
     +-- PartySkillResolver.lua
     +-- QuickLockpickCoordinator.lua -- failed-Use fallback + success invalidation
     +-- NativeInteractionCoordinator.lua
-    +-- NativeBridge.lua <---- files ----> BestOfHandsNative.dll
+    +-- NativeBridge.lua <---- files ----> BestofHands.dll
     +-- NativeRuntimeApi.lua
     +-- LegacyAssistanceCleanup.lua
     `-- Diagnostics.lua
@@ -213,7 +213,7 @@ Do not change the module UUID during ordinary development.
 
 Pinned tool versions and hashes are recorded in `tools/tool-versions.json`. Do not commit build output, downloaded tools, game data, saves, PAKs, ZIPs, or runtime logs.
 
-The native build fetches and statically links the pinned SafetyHook and Zydis versions. They are build dependencies only; users do not install separate SafetyHook or Zydis DLLs. Their notices are included in `THIRD_PARTY_NOTICES.txt` and the combined release archive.
+The native build fetches and statically links the pinned SafetyHook and Zydis versions. They are build dependencies only; users do not install separate SafetyHook or Zydis DLLs. Their notices are maintained in `THIRD_PARTY_NOTICES.txt` and embedded into the shipped DLL as a Windows resource.
 
 ## Validation
 
@@ -256,9 +256,8 @@ Outputs:
 dist\BestofHands.pak
 dist\BestofHands.zip
   BestofHands.pak
-  THIRD_PARTY_NOTICES.txt
   info.json
-  bin\NativeMods\BestOfHandsNative.dll
+  bin\NativeMods\BestofHands.dll
 ```
 
 The scripts enforce exact allowlists, extract and byte-verify the PAK, verify that the DLL is AMD64, expand and byte-verify the release ZIP, and print SHA-256 hashes. Build and package do not edit the player's load order. `-Install` copies the outputs but still does not launch BG3.
