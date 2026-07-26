@@ -86,6 +86,7 @@ Ext.RegisterConsoleCommand("best_of_hands_trace", function(_, value)
         or value == "1"
         or value == "true"
     diagnostics.SetTrace(enabled)
+    interaction.SetTrace(enabled)
     bridge.SetTrace(enabled)
     if enabled then
         local fields = statusFields()

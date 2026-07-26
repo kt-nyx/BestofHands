@@ -307,6 +307,15 @@ foreach ($requiredClientPresentationSurface in @(
 if ($clientPresentationText.Contains('component.AdvantageType =')) {
     throw 'Client presentation bridge must not mutate replicated RequestedRoll advantage state.'
 }
+$clientTraceWrites = [regex]::Matches(
+    $clientPresentationText,
+    'write\("TRACE"'
+)
+if ($clientTraceWrites.Count -ne 1 -or
+    $clientPresentationText -notmatch
+        'local function trace\([\s\S]*?if not traceEnabled then[\s\S]*?loadActionText\(\)') {
+    throw 'Client TRACE output must pass only through the fail-closed trace gate.'
+}
 
 $runtimeApiPath = Join-Path $moduleRoot 'ScriptExtender\Lua\Server\NativeRuntimeApi.lua'
 $runtimeApiText = Get-Content -LiteralPath $runtimeApiPath -Raw
@@ -352,6 +361,9 @@ if ($nativeCmake -notmatch ('project\(BestOfHandsNative VERSION ' + [regex]::Esc
 }
 $nativeSource = Get-Content -LiteralPath $nativeSourcePath -Raw
 $nativeQuickLockpickHeader = Get-Content -LiteralPath $nativeQuickLockpickHeaderPath -Raw
+if ($nativeSource.Contains('Log("INFO", "native_quick_lockpick_started"')) {
+    throw 'Routine native quick-lockpick monitoring must not use an always-on INFO log.'
+}
 foreach ($requiredNativeMarker in @(
     'ProfileUiMidHook',
     'ProfileMathMidHook',
@@ -440,6 +452,9 @@ foreach ($requiredQuickLockpickContract in @(
 }
 if ($sourceText.Contains('QUICK_LOCKPICK_DIAGNOSTICS')) {
     throw 'Production Lua retains the retired always-on quick-lockpick diagnostics switch.'
+}
+if ($sourceText -match 'TRACE_EVENTS\s*=\s*true') {
+    throw 'Production Lua must default all trace switches to disabled.'
 }
 foreach ($removedProductionTraceHook in @(
     'ClientRollPhaseMidHook',

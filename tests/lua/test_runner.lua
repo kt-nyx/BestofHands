@@ -2,6 +2,7 @@
 
 local luaRoot = BEST_OF_HANDS_ROOT .. "/src/BestOfHands/Mods/BestOfHands/ScriptExtender/Lua/Server/"
 local PartySkillResolver = dofile(luaRoot .. "PartySkillResolver.lua")
+local Diagnostics = dofile(luaRoot .. "Diagnostics.lua")
 local LegacyAssistanceCleanup = dofile(luaRoot .. "LegacyAssistanceCleanup.lua")
 local NativeBridge = dofile(luaRoot .. "NativeBridge.lua")
 local NativeInteractionCoordinator = dofile(luaRoot .. "NativeInteractionCoordinator.lua")
@@ -85,6 +86,31 @@ local function resolverApi(scores, overrides)
     }
 end
 
+test("production diagnostics default off and obey the runtime trace toggle", function()
+    local lines = {}
+    local diagnostics = Diagnostics.Create({
+        LOG_PREFIX = "best_of_hands",
+        TRACE_EVENTS = false,
+    }, function(line)
+        lines[#lines + 1] = line
+    end)
+    assertEqual(false, diagnostics.IsTraceEnabled(), "trace defaults off")
+    diagnostics.Trace("suppressed", { value = 1 })
+    assertEqual(0, #lines, "default-off trace emits nothing")
+    diagnostics.Info("ordinary_info", {})
+    assertContains(lines[1], "|INFO|ordinary_info",
+        "ordinary diagnostics remain available")
+    diagnostics.SetTrace(true)
+    diagnostics.Trace("enabled", { value = 2 })
+    assertContains(lines[#lines], "|TRACE|enabled",
+        "explicit toggle enables trace output")
+    diagnostics.SetTrace(false)
+    local countAfterDisable = #lines
+    diagnostics.Trace("suppressed_again", { value = 3 })
+    assertEqual(countAfterDisable, #lines,
+        "explicit disable immediately suppresses trace output")
+end)
+
 test("resolver selects the highest eligible raw Sleight of Hand profile", function()
     local resolver = PartySkillResolver.Create(
         resolverApi({ actor = 1, best = 13, other = 4 }),
@@ -167,12 +193,13 @@ test("quick lockpick accepts one correlated native task request", function()
             return true
         end,
     }
+    local diagnostics, diagnosticRecords = recordingDiagnostics(false)
     local coordinator = QuickLockpickCoordinator.Create(
         { QUICK_LOCKPICK_TIMEOUT_MS = 5000 },
         api,
         { IsReady = function() return bridgeReady end },
         {},
-        recordingDiagnostics()
+        diagnostics
     )
 
     assertEqual(true,
@@ -210,6 +237,12 @@ test("quick lockpick accepts one correlated native task request", function()
             request = sent[1].payload.request,
         }, 65537),
         "duplicate acknowledgement is ignored")
+    assertEqual(nil,
+        findRecord(diagnosticRecords, "quick_lockpick_task_requested"),
+        "trace-off emits no quick-lockpick request monitoring")
+    assertEqual(nil,
+        findRecord(diagnosticRecords, "quick_lockpick_task_queued"),
+        "trace-off emits no quick-lockpick queue monitoring")
 
     assertEqual(true,
         coordinator.OnNativeRequest("actor", "target"),
@@ -974,6 +1007,7 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
     local callbacks = {}
     local entityGets = 0
     local printCalls = 0
+    local printedLines = {}
     local saveCalls = 0
     local clientSaveFailuresRemaining = 0
     local timers = {}
@@ -1036,7 +1070,12 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
                 }
             end,
         },
-        Utils = { Print = function() printCalls = printCalls + 1 end },
+        Utils = {
+            Print = function(line)
+                printCalls = printCalls + 1
+                printedLines[#printedLines + 1] = line
+            end,
+        },
     }
     local bridge = NativePresentationBridge.Start({
         TRACE_EVENTS = false,
@@ -1071,6 +1110,15 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
     )
     bridge.RefreshRecord(record)
     assertEqual(2, record.presentationAdvantage, "presentation state refreshes after modifier observation")
+    files["BestOfHandsNative.actions"] =
+        files["BestOfHandsNative.actions"]:gsub("trace=0", "trace=1")
+    bridge.RefreshRecord(record)
+    assertEqual(true, bridge.IsTraceEnabled(),
+        "client observes an explicitly enabled server trace flag")
+    files["BestOfHandsNative.actions"] =
+        files["BestOfHandsNative.actions"]:gsub("trace=1", "trace=0")
+    assertEqual(false, bridge.IsTraceEnabled(),
+        "client immediately observes an explicitly disabled server trace flag")
     assertContains(
         files["BestOfHandsNative.client"],
         "record=7\t" .. clientRoll.guid
@@ -1083,6 +1131,13 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
     callbacks.RequestedRollDestroy(clientRoll, nil, component)
     assertContains(files["BestOfHandsNative.client"], "record=7",
         "failed mapping removal leaves the last published document intact")
+    assertContains(printedLines[#printedLines],
+        "|ERROR|client_profile_bridge_write_failed",
+        "trace-off failures use an error level rather than a trace level")
+    for _, line in ipairs(printedLines) do
+        assertEqual(nil, line:find("|TRACE|", 1, true),
+            "trace-off client output contains no trace records")
+    end
     assertEqual(1, #timers,
         "failed mapping removal schedules one bounded retry")
     assertEqual(250, timers[1].delay,
@@ -2152,6 +2207,14 @@ test("trace suppression never stops functional presentation updates", function()
         "late advantage changes remain functional")
     assertEqual(nil, findRecord(records, "native_modifier_trace_suppressed"),
         "trace-disabled runs do not maintain suppression diagnostics")
+    for _, event in ipairs({
+        "native_delegation_armed",
+        "native_roll_correlated",
+        "native_modifiers_observed",
+    }) do
+        assertEqual(nil, findRecord(records, event),
+            "trace-disabled runs emit no " .. event .. " monitoring")
+    end
 end)
 
 test("trace-enabled suppression remains observational after its limit", function()
@@ -2329,6 +2392,31 @@ test("requested-roll change observation is inert while tracing is disabled", fun
         "trace-disabled changes maintain no suppression diagnostics")
     assertEqual(1, coordinator.Count(),
         "diagnostic changes do not affect the functional mapping")
+end)
+
+test("disabling tracing clears in-flight vanilla reference observations", function()
+    local coordinator = makeCoordinator({
+        initiatorIsSpecialist = true,
+        trace = true,
+    })
+    assertEqual(false,
+        coordinator.OnNativeRequest("disarm", "actor", "target", 25),
+        "direct specialist request remains vanilla")
+    coordinator.SetTrace(false)
+    local rollEntity = entity(
+        "00000000-0000-0000-0000-000000000042",
+        "0200000200000042"
+    )
+    local requestedRoll = {
+        FixedRollBonuses = {},
+        ResolvedRollBonuses = {},
+        RollUuid = "00000000-0000-0000-0000-000000000043",
+        Roller = actor,
+        Subject = target,
+    }
+    rollEntity.RequestedRoll = requestedRoll
+    assertEqual(false, coordinator.OnRequestedRoll(rollEntity, requestedRoll),
+        "trace-off no longer correlates an earlier reference observation")
 end)
 
 test("direct specialist rolls produce bounded vanilla reference comparison traces", function()

@@ -1431,15 +1431,17 @@ void ProcessQuickLockpick(void* controller) noexcept
             return;
         }
 
-        Log("INFO", "native_quick_lockpick_started",
-            "request=" + request->request
-            + "|initiator=" + Hex(request->initiator)
-            + "|target=" + Hex(request->target)
-            + "|task=stock_client_lockpick"
-            + "|activation=engine_set_running_task"
-            + "|controller="
-            + Hex(reinterpret_cast<std::uintptr_t>(controller))
-            + "|task_pointer=" + Hex(*lockpickTask));
+        if (TraceEnabled()) {
+            Log("TRACE", "native_quick_lockpick_started",
+                "request=" + request->request
+                + "|initiator=" + Hex(request->initiator)
+                + "|target=" + Hex(request->target)
+                + "|task=stock_client_lockpick"
+                + "|activation=engine_set_running_task"
+                + "|controller="
+                + Hex(reinterpret_cast<std::uintptr_t>(controller))
+                + "|task_pointer=" + Hex(*lockpickTask));
+        }
     } catch (...) {
         Log("ERROR", "native_quick_lockpick_rejected",
             "request=" + (request.has_value()

@@ -454,15 +454,21 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
         if tool == nil then
             local responsePublished, notificationShown =
                 api.RejectNativeActionWithoutTool(action, actor, target)
-            local trace = responsePublished and diagnostics.Info or diagnostics.Error
-            trace("native_tool_unavailable_rejected", {
+            local fields = {
                 action = action,
                 actor = actor,
                 notification_shown = notificationShown and 1 or 0,
                 request_id = requestId,
                 response_published = responsePublished and 1 or 0,
                 target = target,
-            })
+            }
+            if not responsePublished then
+                diagnostics.Error("native_tool_unavailable_rejected", fields)
+            elseif not notificationShown then
+                diagnostics.Warn("native_tool_unavailable_rejected", fields)
+            elseif traceEnabled() then
+                diagnostics.Trace("native_tool_unavailable_rejected", fields)
+            end
             -- Do not arm delegation. The custom result is consumed by the
             -- existing vanilla PROC_Process* rule, which reports
             -- RequestProcessed(..., 0) and prevents an empty-tool roll.
@@ -548,19 +554,21 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
         end
         record.handles = handles
         pendingByTarget[key] = record
-        diagnostics.Info("native_delegation_armed", {
-            action = action,
-            actor = actor,
-            actor_handle = handles.initiatorHandle,
-            actor_score = record.initiatorScore,
-            delegation_id = record.delegationId,
-            request_id = requestId,
-            specialist = record.specialist,
-            specialist_handle = handles.specialistHandle,
-            specialist_score = record.specialistScore,
-            target = target,
-            target_handle = handles.targetHandle,
-        })
+        if traceEnabled() then
+            diagnostics.Trace("native_delegation_armed", {
+                action = action,
+                actor = actor,
+                actor_handle = handles.initiatorHandle,
+                actor_score = record.initiatorScore,
+                delegation_id = record.delegationId,
+                request_id = requestId,
+                specialist = record.specialist,
+                specialist_handle = handles.specialistHandle,
+                specialist_score = record.specialistScore,
+                target = target,
+                target_handle = handles.targetHandle,
+            })
+        end
 
         api.Schedule(settings.NATIVE_ACTION_TIMEOUT_MS, function()
             if pendingByTarget[key] == record then
@@ -616,19 +624,25 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
         local ownerMatchesInitiator = sameObject(actor, record.initiator)
             or sameObject(entityGuid(actor), record.initiator)
             or sameObject(actor, entityGuid(record.initiator))
-        local trace = ownerMatchesInitiator and diagnostics.Info or diagnostics.Error
-        trace("native_delegated_roll_result", {
-            action = record.action,
-            actor = actor,
-            criticality = criticality,
-            delegation_id = record.delegationId,
-            event_name = eventName,
-            is_active = isActive,
-            owner_matches_initiator = ownerMatchesInitiator and 1 or 0,
-            result = result,
-            specialist = record.specialist,
-            target = target,
-        })
+        if not ownerMatchesInitiator or traceEnabled() then
+            local resultFields = {
+                action = record.action,
+                actor = actor,
+                criticality = criticality,
+                delegation_id = record.delegationId,
+                event_name = eventName,
+                is_active = isActive,
+                owner_matches_initiator = ownerMatchesInitiator and 1 or 0,
+                result = result,
+                specialist = record.specialist,
+                target = target,
+            }
+            if ownerMatchesInitiator then
+                diagnostics.Trace("native_delegated_roll_result", resultFields)
+            else
+                diagnostics.Error("native_delegated_roll_result", resultFields)
+            end
+        end
         if not ownerMatchesInitiator then
             -- This result cannot complete the initiator-owned native action.
             -- Retain the record so a subsequent correct result can be observed,
@@ -772,18 +786,20 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
             return false
         end
         record.phase = "roll_correlated"
-        diagnostics.Info("native_roll_correlated", {
-            action = record.action,
-            actor = record.initiator,
-            delegation_id = record.delegationId,
-            roll_actor_after = entityGuid(component.Roller),
-            roll_actor_before = observedActor,
-            roll_entity = record.rollEntity,
-            roll_handle = rollHandle,
-            roll_uuid = record.rollUuid,
-            specialist = record.specialist,
-            target = record.target,
-        })
+        if traceEnabled() then
+            diagnostics.Trace("native_roll_correlated", {
+                action = record.action,
+                actor = record.initiator,
+                delegation_id = record.delegationId,
+                roll_actor_after = entityGuid(component.Roller),
+                roll_actor_before = observedActor,
+                roll_entity = record.rollEntity,
+                roll_handle = rollHandle,
+                roll_uuid = record.rollUuid,
+                specialist = record.specialist,
+                target = record.target,
+            })
+        end
         traceRequestedRollState(diagnostics, record, entity, component, "created", nil)
         return true
     end
@@ -889,7 +905,7 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
         local requestedRoll = nil
         local observedActor = nil
         local observedDuringNativeCall = false
-        if traceThisChange or not record.modifiersObservedLogged then
+        if tracing and (traceThisChange or not record.modifiersObservedLogged) then
             pcall(function()
                 local rollEntity = Ext.Entity.Get(entity)
                 requestedRoll = rollEntity and rollEntity.RequestedRoll or nil
@@ -914,9 +930,9 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
             end
         end
         record.phase = "modifiers_observed"
-        if not record.modifiersObservedLogged then
+        if tracing and not record.modifiersObservedLogged then
             record.modifiersObservedLogged = true
-            diagnostics.Info("native_modifiers_observed", {
+            diagnostics.Trace("native_modifiers_observed", {
                 action = record.action,
                 actor = record.initiator,
                 changed_fields = changedFields,
@@ -1142,7 +1158,7 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
             })
             return false
         end
-        if retargeted > 0 then
+        if retargeted > 0 and tracing then
             local rewritten = {}
             for index, initialTarget in pairs(
                 safeField(component, "Targets") or {}
@@ -1154,7 +1170,7 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
                     tostring(entityGuid(value) or value)
                 )
             end
-            diagnostics.Info("native_roll_bonus_retargeted", {
+            diagnostics.Trace("native_roll_bonus_retargeted", {
                 action = record.action,
                 caster = entityGuid(caster) or caster,
                 delegation_id = record.delegationId,
@@ -1292,11 +1308,13 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
                 })
                 return false
             end
-            diagnostics.Trace("entity_observer_registered", {
-                component = componentName,
-                deferred = deferred and 1 or 0,
-                subscription = subscriptionOrError,
-            })
+            if traceEnabled() then
+                diagnostics.Trace("entity_observer_registered", {
+                    component = componentName,
+                    deferred = deferred and 1 or 0,
+                    subscription = subscriptionOrError,
+                })
+            end
             return true
         end
 
@@ -1317,11 +1335,13 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
                 })
                 return false
             end
-            diagnostics.Trace("entity_observer_registered", {
-                component = componentName,
-                observer = "change",
-                subscription = subscriptionOrError,
-            })
+            if traceEnabled() then
+                diagnostics.Trace("entity_observer_registered", {
+                    component = componentName,
+                    observer = "change",
+                    subscription = subscriptionOrError,
+                })
+            end
             return true
         end
 
@@ -1342,11 +1362,13 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
                 })
                 return false
             end
-            diagnostics.Trace("entity_observer_registered", {
-                component = componentName,
-                observer = "destroy",
-                subscription = subscriptionOrError,
-            })
+            if traceEnabled() then
+                diagnostics.Trace("entity_observer_registered", {
+                    component = componentName,
+                    observer = "destroy",
+                    subscription = subscriptionOrError,
+                })
+            end
             return true
         end
 
@@ -1432,6 +1454,23 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
             count = count + 1
         end
         return count
+    end
+
+    function instance.SetTrace(enabled)
+        if enabled then
+            return
+        end
+        local references = {}
+        for _, record in pairs(referencesByTarget) do
+            references[#references + 1] = record
+        end
+        for _, record in ipairs(references) do
+            clearReference(record, "trace_disabled")
+        end
+        for _, record in pairs(pendingByTarget) do
+            record.modifierTraceCount = nil
+            record.requestedRollTraceCount = nil
+        end
     end
 
     function instance.Clear(reason)

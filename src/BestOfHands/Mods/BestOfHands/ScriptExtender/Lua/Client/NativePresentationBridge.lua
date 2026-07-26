@@ -86,7 +86,7 @@ local function positiveInteger(value)
     return number
 end
 
-local function write(event, fields)
+local function write(level, event, fields)
     local keys = {}
     for key, _ in pairs(fields or {}) do
         keys[#keys + 1] = key
@@ -96,7 +96,7 @@ local function write(event, fields)
     for _, key in ipairs(keys) do
         values[#values + 1] = tostring(key) .. "=" .. stableValue(fields[key])
     end
-    local line = "[best_of_hands_client]|TRACE|" .. event
+    local line = "[best_of_hands_client]|" .. level .. "|" .. event
     if #values > 0 then
         line = line .. "|" .. table.concat(values, "|")
     end
@@ -151,6 +151,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
     local function loadActionText()
         local ok, text = pcall(Ext.IO.LoadFile, ACTION_FILE)
         if not ok or type(text) ~= "string" then
+            traceEnabled = false
             return nil
         end
         local protocol = text:match("[\r\n]?protocol=([^\r\n]+)")
@@ -158,14 +159,16 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
         local probe = text:match("[\r\n]?probe=([^\r\n]+)") or ""
         local session = text:match("[\r\n]?native_session=([^\r\n]+)") or ""
         local complete = text:match("[\r\n]end=1[\r\n]?") ~= nil
-        traceEnabled = text:match("[\r\n]?trace=(%d)") == "1"
+        local requestedTrace = text:match("[\r\n]?trace=(%d)") == "1"
         if protocol ~= PROTOCOL
             or version ~= settings.VERSION
             or probe == ""
             or session == ""
             or not complete then
+            traceEnabled = false
             return nil
         end
+        traceEnabled = requestedTrace
         if lastSession ~= session or lastProbe ~= probe then
             lastSession = session
             lastProbe = probe
@@ -178,6 +181,18 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
             lastLeftClickPayload = ""
         end
         return text
+    end
+
+    local function trace(event, fields)
+        if not traceEnabled then
+            return
+        end
+        -- The server console command writes the authoritative trace flag to
+        -- the action document. Revalidate it before every opt-in client trace
+        -- so `best_of_hands_trace off` cannot leave stale client tracing active.
+        if loadActionText() ~= nil and traceEnabled then
+            write("TRACE", event, fields)
+        end
     end
 
     local function loadActions()
@@ -262,7 +277,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
             table.concat(lines, "\n") .. "\n"
         )
         if not ok or result == false then
-            write("client_profile_bridge_write_failed", {
+            write("ERROR", "client_profile_bridge_write_failed", {
                 error = ok and "save_returned_false" or result,
                 file = CLIENT_FILE,
             })
@@ -320,7 +335,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
             payload
         )
         if not ok or result == false then
-            write("client_left_click_bridge_write_failed", {
+            write("ERROR", "client_left_click_bridge_write_failed", {
                 error = ok and "save_returned_false" or result,
                 file = LEFT_CLICK_FILE,
             })
@@ -473,7 +488,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
         if initiatorHandle == nil
             or specialistHandle == nil
             or targetHandle == nil then
-            write("client_profile_mapping_failed", {
+            write("ERROR", "client_profile_mapping_failed", {
                 action = record.action,
                 delegation_id = record.delegationId,
                 initiator_handle = initiatorHandle,
@@ -500,7 +515,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
             or previous.specialistHandle ~= mapped.specialistHandle
             or previous.targetHandle ~= mapped.targetHandle then
             if saveClientRecords() and traceEnabled then
-                write("client_profile_mapping_written", {
+                trace("client_profile_mapping_written", {
                     action = record.action,
                     delegation_id = record.delegationId,
                     initiator_handle = mapped.initiatorHandle,
@@ -540,7 +555,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
         clientRecords[record.delegationId] = nil
         local saved = removed == nil or saveClientRecords()
         if traceEnabled then
-            write("client_profile_mapping_removed", {
+            trace("client_profile_mapping_removed", {
                 action = record.action,
                 delegation_id = record.delegationId,
                 reason = "requested_roll_destroyed",
@@ -576,6 +591,9 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
     end
 
     function instance.IsTraceEnabled()
+        if traceEnabled then
+            loadActionText()
+        end
         return traceEnabled
     end
 
@@ -584,7 +602,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
             local ok, errorMessage = xpcall(
                 callback, debug.traceback, ...)
             if not ok then
-                write(event, { error = errorMessage })
+                write("ERROR", event, { error = errorMessage })
             end
         end
     end
@@ -644,7 +662,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
             return false, "server_ack_failed"
         end
         if traceEnabled then
-            write("client_quick_lockpick_queued", {
+            trace("client_quick_lockpick_queued", {
                 actor = data.actor,
                 request = data.request,
                 target = data.target,
@@ -686,7 +704,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
             scheduleLeftClickSnapshot()
         end
         if traceEnabled then
-            write("client_left_click_target_invalidated", {
+            trace("client_left_click_target_invalidated", {
                 saved = saved and 1 or 0,
                 target = targetGuid,
                 target_handle = handle,
@@ -722,7 +740,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
                 end
                 local started, reason = prepareQuickLockpick(data)
                 if not started then
-                    write("client_quick_lockpick_rejected", {
+                    write("WARN", "client_quick_lockpick_rejected", {
                         actor = data.actor,
                         reason = reason,
                         request = data.request,
@@ -772,7 +790,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
             debug.traceback
         )
         if not ok then
-            write("client_left_click_snapshot_failed", {
+            write("ERROR", "client_left_click_snapshot_failed", {
                 error = refreshed,
             })
         end
@@ -860,7 +878,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
     end
 
     if traceEnabled then
-        write("client_profile_bridge_ready", {
+        trace("client_profile_bridge_ready", {
             file = CLIENT_FILE,
             protocol = PROTOCOL,
             presentation_probe = "dc_active_roll_trace",

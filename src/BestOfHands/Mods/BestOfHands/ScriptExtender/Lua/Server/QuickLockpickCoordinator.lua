@@ -156,12 +156,14 @@ function QuickLockpickCoordinator.Create(
                 clearRecord(record, "client_message_failed")
                 return
             end
-            diagnostics.Info("quick_lockpick_task_requested", {
-                actor = actor,
-                request = record.id,
-                target = target,
-                user_id = userId,
-            })
+            if traceEnabled() then
+                diagnostics.Trace("quick_lockpick_task_requested", {
+                    actor = actor,
+                    request = record.id,
+                    target = target,
+                    user_id = userId,
+                })
+            end
         end)
 
         api.Schedule(settings.QUICK_LOCKPICK_TIMEOUT_MS, function()
@@ -194,11 +196,13 @@ function QuickLockpickCoordinator.Create(
         end
 
         record.clientQueued = true
-        diagnostics.Info("quick_lockpick_task_queued", {
-            actor = record.actor,
-            request = record.id,
-            target = record.target,
-        })
+        if traceEnabled() then
+            diagnostics.Trace("quick_lockpick_task_queued", {
+                actor = record.actor,
+                request = record.id,
+                target = record.target,
+            })
+        end
         return true
     end
 

@@ -64,6 +64,7 @@ if ($Configuration -eq 'Release') {
     $forbiddenTraceMarkers = @(
         'native_profile_source_selected'
         'native_client_'
+        'native_quick_lockpick_started'
     )
     foreach ($marker in $forbiddenTraceMarkers) {
         if ($ascii.Contains($marker)) {
