@@ -13,7 +13,7 @@
 
 namespace best_of_hands {
 
-inline constexpr std::string_view kProtocolVersion = "5";
+inline constexpr std::string_view kProtocolVersion = "7";
 inline constexpr std::string_view kPluginVersion = "2.0.0";
 
 enum class ActionKind {
@@ -51,10 +51,19 @@ struct ClientActionRecord {
 
 struct QuickLockpickRequest {
     std::string request;
-    std::uint64_t controller{};
-    std::uint64_t task{};
     std::uint64_t initiator{};
     std::uint64_t target{};
+    std::uint64_t targetNetId{};
+};
+
+struct LeftClickInitiator {
+    std::uint64_t initiator{};
+    bool eligible{};
+};
+
+struct LockedTarget {
+    std::uint64_t target{};
+    std::uint64_t netId{};
 };
 
 struct ClientBridgeDocument {
@@ -63,6 +72,8 @@ struct ClientBridgeDocument {
     std::string nativeSession;
     std::vector<ClientActionRecord> records;
     std::vector<QuickLockpickRequest> quickLockpicks;
+    std::vector<LeftClickInitiator> leftClickInitiators;
+    std::vector<LockedTarget> lockedTargets;
 };
 
 inline bool ParseUnsigned(std::string_view text, int base, std::uint64_t& value)
@@ -249,7 +260,7 @@ inline ClientBridgeDocument ParseClientBridgeDocument(std::string_view text)
             document.records.push_back(std::move(record));
         } else if (line.starts_with("quick=")) {
             auto const parsedFields =
-                SplitExact<5>(line.substr(6), '\t');
+                SplitExact<4>(line.substr(6), '\t');
             if (!parsedFields.has_value()) {
                 return {};
             }
@@ -257,17 +268,47 @@ inline ClientBridgeDocument ParseClientBridgeDocument(std::string_view text)
             QuickLockpickRequest request;
             request.request.assign(fields[0]);
             if (!IsBridgeToken(fields[0])
-                || !ParseUnsigned(fields[1], 16, request.controller)
-                || !ParseUnsigned(fields[2], 16, request.task)
-                || !ParseUnsigned(fields[3], 16, request.initiator)
-                || !ParseUnsigned(fields[4], 16, request.target)
-                || request.controller == 0
-                || request.task == 0
+                || !ParseUnsigned(fields[1], 16, request.initiator)
+                || !ParseUnsigned(fields[2], 16, request.target)
+                || !ParseUnsigned(fields[3], 10, request.targetNetId)
                 || request.initiator == 0
-                || request.target == 0) {
+                || request.target == 0
+                || request.targetNetId == 0) {
                 return {};
             }
             document.quickLockpicks.push_back(std::move(request));
+        } else if (line.starts_with("eligible=")) {
+            auto const parsedFields =
+                SplitExact<2>(line.substr(9), '\t');
+            if (!parsedFields.has_value()) {
+                return {};
+            }
+            auto const& fields = *parsedFields;
+            LeftClickInitiator initiator;
+            std::uint64_t eligible{};
+            if (!ParseUnsigned(fields[0], 16, initiator.initiator)
+                || !ParseUnsigned(fields[1], 10, eligible)
+                || initiator.initiator == 0
+                || eligible > 1) {
+                return {};
+            }
+            initiator.eligible = eligible == 1;
+            document.leftClickInitiators.push_back(initiator);
+        } else if (line.starts_with("locked=")) {
+            auto const parsedFields =
+                SplitExact<2>(line.substr(7), '\t');
+            if (!parsedFields.has_value()) {
+                return {};
+            }
+            auto const& fields = *parsedFields;
+            LockedTarget target;
+            if (!ParseUnsigned(fields[0], 16, target.target)
+                || !ParseUnsigned(fields[1], 10, target.netId)
+                || target.target == 0
+                || target.netId == 0) {
+                return {};
+            }
+            document.lockedTargets.push_back(target);
         } else if (line == "end=1") {
             complete = true;
         }
@@ -283,6 +324,8 @@ inline ClientBridgeDocument ParseClientBridgeDocument(std::string_view text)
     if (!document.valid) {
         document.records.clear();
         document.quickLockpicks.clear();
+        document.leftClickInitiators.clear();
+        document.lockedTargets.clear();
     }
     return document;
 }

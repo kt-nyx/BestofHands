@@ -19,14 +19,19 @@ using namespace best_of_hands;
 
 namespace {
 
-void* MockGetCharacterTask(void* controller, std::uint32_t taskType)
+bool TestSetRunningTask(void* controller, void* task, bool forceClear)
 {
-    return taskType == 15 ? controller : nullptr;
+    return controller == reinterpret_cast<void*>(0x1234)
+        && task == reinterpret_cast<void*>(0x5678)
+        && forceClear;
 }
 
-bool MockSetRunningTask(void* controller, void* task, bool forceClear)
+void* TestGetCharacterTask(void* controller, std::uint32_t taskType)
 {
-    return controller == task && forceClear;
+    return controller == reinterpret_cast<void*>(0x1234)
+            && taskType == 15
+        ? reinterpret_cast<void*>(0x5678)
+        : nullptr;
 }
 
 }
@@ -42,20 +47,37 @@ int main()
     assert(readableValue == replacementValue);
     assert(!SafeRead(nullptr, observedValue));
     assert(!SafeWrite(nullptr, replacementValue));
-    void* invokedTask{};
-    assert(TryGetCharacterTask(
-        reinterpret_cast<std::uintptr_t>(&MockGetCharacterTask),
-        &readableValue, 15, invokedTask));
-    assert(invokedTask == &readableValue);
     bool taskStarted{};
-    assert(TrySetRunningTask(
-        reinterpret_cast<std::uintptr_t>(&MockSetRunningTask),
-        &readableValue, invokedTask, true, taskStarted));
+    assert(TryInvokeSetRunningTask(
+        reinterpret_cast<std::uintptr_t>(&TestSetRunningTask),
+        reinterpret_cast<void*>(0x1234),
+        reinterpret_cast<void*>(0x5678),
+        true,
+        taskStarted));
     assert(taskStarted);
-    assert(!TryGetCharacterTask(0, &readableValue, 15, invokedTask));
-    assert(!TrySetRunningTask(
-        0, &readableValue, invokedTask, true, taskStarted));
-
+    assert(!TryInvokeSetRunningTask(
+        0,
+        reinterpret_cast<void*>(0x1234),
+        reinterpret_cast<void*>(0x5678),
+        true,
+        taskStarted));
+    void* stockTask{};
+    assert(TryGetCharacterTask(
+        reinterpret_cast<std::uintptr_t>(&TestGetCharacterTask),
+        reinterpret_cast<void*>(0x1234),
+        15,
+        stockTask));
+    assert(stockTask == reinterpret_cast<void*>(0x5678));
+    assert(!TryGetCharacterTask(
+        0,
+        reinterpret_cast<void*>(0x1234),
+        15,
+        stockTask));
+    assert(!TryGetCharacterTask(
+        reinterpret_cast<std::uintptr_t>(&TestGetCharacterTask),
+        nullptr,
+        15,
+        stockTask));
     auto* inaccessible = VirtualAlloc(
         nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
     assert(inaccessible != nullptr);
@@ -138,9 +160,12 @@ int main()
     assert(!ParseUnsigned("-1", 10, unsignedValue));
     assert(!ParseUnsigned("1x", 10, unsignedValue));
     assert(!ParseUnsigned("18446744073709551616", 10, unsignedValue));
+    assert(IsBridgeToken("42-1-7"));
+    assert(!IsBridgeToken(""));
+    assert(!IsBridgeToken("request|unsafe"));
 
     auto const valid = ParseBridgeDocument(
-        "protocol=5\n"
+        "protocol=7\n"
         "pak_version=2.0.0\n"
         "probe=abc-123\n"
         "native_session=44-55\n"
@@ -170,32 +195,32 @@ int main()
     assert(!ParseBridgeDocument(
         "protocol=1\npak_version=2.0.0\nprobe=x\nend=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=5\npak_version=2.0.0\nprobe=x\n"
+        "protocol=7\npak_version=2.0.0\nprobe=x\n"
         "record=1\tlockpick\tnot-hex\t2\t3\t0\t0\t0\ta\tb\tc\t-1\nend=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=5\npak_version=2.0.0\nprobe=x\n"
+        "protocol=7\npak_version=2.0.0\nprobe=x\n"
         "record=0\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t-1\nend=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=5\npak_version=2.0.0\nprobe=x\n"
+        "protocol=7\npak_version=2.0.0\nprobe=x\n"
         "record=1\tlockpick\t1\t2\t3\nend=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=5\npak_version=2.0.0\nprobe=x\n"
+        "protocol=7\npak_version=2.0.0\nprobe=x\n"
         "record=1\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t0\textra\n"
         "end=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=5\npak_version=2.0.0\nprobe=x\n"
+        "protocol=7\npak_version=2.0.0\nprobe=x\n"
         "record=1\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t3\n"
         "end=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=5\npak_version=2.0.0\nprobe=x\n"
+        "protocol=7\npak_version=2.0.0\nprobe=x\n"
         "record=1\tunknown\t1\t2\t3\t0\t0\t0\ta\tb\tc\t-1\n"
         "end=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=5\npak_version=2.0.0\nprobe=x\n"
+        "protocol=7\npak_version=2.0.0\nprobe=x\n"
         "record=1\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t-2\n"
         "end=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=5\npak_version=2.0.0\nprobe=x\n"
+        "protocol=7\npak_version=2.0.0\nprobe=x\n"
         "record=1\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t-1\n").valid);
 
     RequestedRollIdentity identity{
@@ -218,54 +243,70 @@ int main()
     assert(!MatchProfileSource(duplicateRecords, identity).has_value());
 
     auto const client = ParseClientBridgeDocument(
-        "protocol=5\n"
+        "protocol=7\n"
         "pak_version=2.0.0\n"
         "native_session=44-55\n"
         "trace=1\n"
         "record=7\t4dc3ec09-e11d-e030-cac3-99253090aaf8\t01c0000100000085\t01c00001000000d4\t01c000010000f15c\n"
-        "quick=42-1-7\t000001d000001000\t000001d000002000\t01c0000100000085\t01c000010000f15c\n"
+        "quick=100-2-3\t01c0000100000085\t01c000010000f15c\t1125899906937610\n"
+        "eligible=01c0000100000085\t1\n"
+        "locked=01c000010000f15c\t1125899906937610\n"
         "end=1\n");
     assert(client.valid);
     assert(client.trace);
     assert(client.nativeSession == "44-55");
     assert(client.records.size() == 1);
     assert(client.quickLockpicks.size() == 1);
-    assert(client.quickLockpicks[0].request == "42-1-7");
-    assert(client.quickLockpicks[0].controller == 0x000001d000001000ULL);
-    assert(client.quickLockpicks[0].task == 0x000001d000002000ULL);
+    assert(client.quickLockpicks[0].request == "100-2-3");
     assert(client.quickLockpicks[0].initiator == 0x01c0000100000085ULL);
     assert(client.quickLockpicks[0].target == 0x01c000010000f15cULL);
+    assert(client.quickLockpicks[0].targetNetId
+        == 1125899906937610ULL);
+    assert(client.leftClickInitiators.size() == 1);
+    assert(client.leftClickInitiators[0].initiator
+        == 0x01c0000100000085ULL);
+    assert(client.leftClickInitiators[0].eligible);
+    assert(client.lockedTargets.size() == 1);
+    assert(client.lockedTargets[0].target == 0x01c000010000f15cULL);
+    assert(client.lockedTargets[0].netId == 1125899906937610ULL);
     assert(!ParseClientBridgeDocument(
-        "protocol=5\npak_version=2.0.0\n"
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
+        "eligible=1\t2\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
+        "eligible=0\t1\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
+        "locked=1\t0\nend=1\n").valid);
+    auto const wideNetId = ParseClientBridgeDocument(
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
+        "locked=1\t4294967296\nend=1\n");
+    assert(wideNetId.valid);
+    assert(wideNetId.lockedTargets[0].netId == 4294967296ULL);
+    assert(!ParseClientBridgeDocument(
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
+        "quick=bad token\t1\t2\t3\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
+        "quick=request\t0\t2\t3\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
+        "quick=request\t1\t2\nend=1\n").valid);
+    assert(!ParseClientBridgeDocument(
+        "protocol=7\npak_version=2.0.0\n"
         "record=7\tuuid\t1\t2\t3\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=5\npak_version=2.0.0\nnative_session=x\n"
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
         "record=0\tuuid\t1\t2\t3\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=5\npak_version=2.0.0\nnative_session=x\n"
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
         "record=7\tuuid\t1\t0\t3\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=5\npak_version=2.0.0\nnative_session=x\n"
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
         "record=7\tuuid\t1\t2\tnot-hex\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=5\npak_version=2.0.0\nnative_session=x\n"
+        "protocol=7\npak_version=2.0.0\nnative_session=x\n"
         "record=7\tuuid\t1\t2\t3\textra\nend=1\n").valid);
-    assert(!ParseClientBridgeDocument(
-        "protocol=5\npak_version=2.0.0\nnative_session=x\n"
-        "quick=request\t0\t2\t3\t4\nend=1\n").valid);
-    assert(!ParseClientBridgeDocument(
-        "protocol=5\npak_version=2.0.0\nnative_session=x\n"
-        "quick=request\t1\t2\t3\nend=1\n").valid);
-    assert(!ParseClientBridgeDocument(
-        "protocol=5\npak_version=2.0.0\nnative_session=x\n"
-        "quick=\t1\t2\t3\t4\nend=1\n").valid);
-    assert(!ParseClientBridgeDocument(
-        "protocol=5\npak_version=2.0.0\nnative_session=x\n"
-        "quick=request|unsafe\t1\t2\t3\t4\nend=1\n").valid);
-    assert(IsBridgeToken("42-1-7"));
-    assert(!IsBridgeToken(""));
-    assert(!IsBridgeToken("request|unsafe"));
-
     RequestedRollIdentity clientIdentity{
         .roll = 0x01c0000200000100ULL,
         .roller = 0x01c0000100000085ULL,

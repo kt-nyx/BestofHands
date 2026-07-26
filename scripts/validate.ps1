@@ -219,7 +219,6 @@ $forbiddenOptionalIntegrationMarkers = @(
     'TemplateAddTo(',
     'TemplateRemoveFromParty(',
     'AddExplorationExperience(',
-    'GAMEPLAY_LockPicking',
     '"Disarm Trap"'
 )
 foreach ($marker in $forbiddenOptionalIntegrationMarkers) {
@@ -292,10 +291,10 @@ foreach ($requiredClientPresentationSurface in @(
     'BestOfHandsNative.client',
     'client_profile_mapping_written',
     'client_profile_mapping_removed',
-    'client_quick_lockpick_requested',
+    'client_quick_lockpick_queued',
     'dc_active_roll_trace',
-    'task.TargetSelected = true',
-    '"quick=" .. record.request',
+    'saveLeftClickSnapshot',
+    'SendToServer',
     'rollUuid',
     'specialistHandle'
 )) {
@@ -320,6 +319,24 @@ foreach ($requiredMissingToolSurface in @(
 )) {
     if (-not $runtimeApiText.Contains($requiredMissingToolSurface)) {
         throw "The no-tool rejection path is missing '$requiredMissingToolSurface'."
+    }
+}
+foreach ($requiredQuickLockpickSurface in @(
+    '"quick=" .. record.request',
+    'operation = "queued"',
+    '"eligible=" .. record.initiator',
+    'tostring(record.targetNetId)'
+)) {
+    if (-not $clientPresentationText.Contains($requiredQuickLockpickSurface)) {
+        throw "The native quick-lockpick queue path is missing '$requiredQuickLockpickSurface'."
+    }
+}
+foreach ($forbiddenMappedTaskWrite in @(
+    'controller.RunningTask = task',
+    'controller.IsNewTaskStarted = true'
+)) {
+    if ($clientPresentationText.Contains($forbiddenMappedTaskWrite)) {
+        throw "Lua must not bypass BG3's native task lifecycle with '$forbiddenMappedTaskWrite'."
     }
 }
 
@@ -369,16 +386,39 @@ foreach ($requiredNativeMarker in @(
     'ProfileScope::Client',
     'component_owner_unchanged=1',
     'requested_roll_owner_mutation=0',
-    'ClientInputUpdateDetour',
-    'TrySetRunningTask',
-    'kClientControllerSetRunningTaskVtableIndex',
-    'stock_client_lockpick',
+    'native_profile_substitution',
     'quick_lockpick_task_adapter',
+    'ClientInputControllerUpdateDetour',
+    'TryInvokeSetRunningTask',
+    'TryGetCharacterTask',
+    'kClientGetCharacterTaskSignature',
+    'clientGetCharacterTaskRva',
+    'kClientInputControllerUpdateSignature',
+    'kClientSetRunningTaskSignature',
+    'FindStockCharacterTask',
+    'activation=engine_set_running_task',
     'unsupported_game_build'
 )) {
     if (-not $nativeSource.Contains($requiredNativeMarker)) {
         throw "Native source is missing required fail-closed marker '$requiredNativeMarker'."
     }
+}
+foreach ($forbiddenQuickLockpickNativeSurface in @(
+    'kClientControllerUpdateVtableIndex',
+    'kClientControllerSetRunningTaskVtableIndex',
+    'ReadClientControllerMethod',
+    'kClientControllerTasksOffset',
+    'kClientCharacterTaskTypeOffset',
+    'QuickLockpickActivation',
+    'QuickLockpickDiagnostic',
+    'native_left_click_snapshot_refreshed'
+)) {
+    if ($nativeSource.Contains($forbiddenQuickLockpickNativeSurface) -or $nativeHeader.Contains($forbiddenQuickLockpickNativeSurface)) {
+        throw "Native source retains guessed quick-lockpick ABI '$forbiddenQuickLockpickNativeSurface'."
+    }
+}
+if ($sourceText.Contains('QUICK_LOCKPICK_DIAGNOSTICS')) {
+    throw 'Production Lua retains the retired always-on quick-lockpick diagnostics switch.'
 }
 foreach ($removedProductionTraceHook in @(
     'ClientRollPhaseMidHook',
@@ -394,6 +434,16 @@ if ($nativeSource -notmatch 'constexpr bool TraceEnabled\(\) noexcept\s*\{\s*ret
 }
 if ($nativeSource -match 'PatchDisarm|PatchLockpick|PatchRequestedRoll|RouteFinishedEvent') {
     throw 'Native v2 must not mutate action-specific disarm or lockpick ownership state.'
+}
+if ($nativeSource.Contains('ClientSetRunningTaskDetour')) {
+    throw 'Native v2 must not retain the bypassed public SetRunningTask interception path.'
+}
+if (-not $nativeSource.Contains('ClientTaskSelectionMidHook') -or
+    -not $nativeSource.Contains('kClientTaskSelectionSignature')) {
+    throw 'Native left-click lockpicking must use the signature-guarded internal task-selection boundary.'
+}
+if ($nativeSource.Contains('0x01b3a2d2')) {
+    throw 'Native left-click lockpicking must intercept before BG3 retires non-winning task readiness.'
 }
 if ($nativeSource -notmatch 'safetyhook::create_mid') {
     throw 'Native v2 must install validated mid-function profile hooks.'

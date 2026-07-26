@@ -4,7 +4,7 @@ local NativeBridge = {}
 
 local ACTION_FILE = "BestOfHandsNative.actions"
 local STATUS_FILE = "BestOfHandsNative.status"
-local PROTOCOL = "5"
+local PROTOCOL = "7"
 local REQUIRED_HOOKS =
     "profile_ui,profile_math,client_roll_presentation,"
     .. "client_roll_aggregate,client_roll_start,"
@@ -22,7 +22,8 @@ local REQUIRED_HOOKS =
     .. ",client_roll_bonus_presentation_transfer"
     .. ",client_roll_bonus_reconcile_end"
     .. ",client_roll_finalize"
-local REQUIRED_FEATURES = "quick_lockpick_task_adapter"
+local REQUIRED_FEATURES =
+    "native_profile_substitution,quick_lockpick_task_adapter"
 
 NativeBridge.REQUIRED_HOOKS = REQUIRED_HOOKS
 NativeBridge.REQUIRED_FEATURES = REQUIRED_FEATURES

@@ -41,26 +41,10 @@ __declspec(noinline) inline bool TryWriteMemory(
     }
 }
 
-__declspec(noinline) inline bool TryGetCharacterTask(
-    std::uintptr_t procedure,
-    void* controller,
-    std::uint32_t taskType,
-    void*& task) noexcept
-{
-    if (procedure == 0 || controller == nullptr) {
-        return false;
-    }
-    __try {
-        using Proc = void* (*)(void*, std::uint32_t);
-        task = reinterpret_cast<Proc>(procedure)(controller, taskType);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        task = nullptr;
-        return false;
-    }
-}
-
-__declspec(noinline) inline bool TrySetRunningTask(
+// Invoke the build-validated ecl::InputController::SetRunningTask routine
+// without allowing a game-side access violation to unwind through the native
+// mod. The routine's ABI is bool(controller, task, forceClear).
+__declspec(noinline) inline bool TryInvokeSetRunningTask(
     std::uintptr_t procedure,
     void* controller,
     void* task,
@@ -77,6 +61,28 @@ __declspec(noinline) inline bool TrySetRunningTask(
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         started = false;
+        return false;
+    }
+}
+
+// Invoke ecl::InputController::GetCharacterTask through the controller's
+// validated virtual method. The caller obtains the method from a real native
+// controller and verifies that it belongs to the selected game image.
+__declspec(noinline) inline bool TryGetCharacterTask(
+    std::uintptr_t procedure,
+    void* controller,
+    std::uint32_t taskType,
+    void*& task) noexcept
+{
+    if (procedure == 0 || controller == nullptr) {
+        return false;
+    }
+    __try {
+        using Proc = void* (*)(void*, std::uint32_t);
+        task = reinterpret_cast<Proc>(procedure)(controller, taskType);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        task = nullptr;
         return false;
     }
 }

@@ -12,6 +12,7 @@ return {
     NATIVE_HANDSHAKE_ATTEMPTS = 40,
     NATIVE_HANDSHAKE_POLL_MS = 250,
     QUICK_LOCKPICK_TIMEOUT_MS = 5000,
+    QUICK_LOCKPICK_NATIVE_SUPPRESSION_MS = 2000,
     TRACE_EVENTS = false,
 
     -- Base-game tool roots. These are used only as a conservative delegation

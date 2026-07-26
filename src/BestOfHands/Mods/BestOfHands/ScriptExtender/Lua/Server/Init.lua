@@ -34,6 +34,20 @@ local quickLockpick = QuickLockpickCoordinator.Create(
     Channels.QuickLockpick,
     diagnostics
 )
+Channels.QuickLockpick:SetHandler(function(data, userId)
+    local ok, errorMessage = xpcall(
+        quickLockpick.OnClientMessage,
+        debug.traceback,
+        data,
+        userId
+    )
+    if not ok then
+        diagnostics.Error("quick_lockpick_client_reply_failed", {
+            error = errorMessage,
+            user_id = userId,
+        })
+    end
+end)
 local rollRouterAvailable = false
 
 local function statusFields()
@@ -126,10 +140,12 @@ listen("RequestProcessed", 3, "after", function(character, requestId, result)
 end)
 
 listen("StartedLockpicking", 2, "after", function(character, item)
+    quickLockpick.OnNativeStarted(character, item)
     interaction.OnNativeStarted("lockpick", character, item)
 end)
 
 listen("StoppedLockpicking", 2, "after", function(character, item)
+    quickLockpick.OnNativeStopped(character, item)
     interaction.OnNativeStopped("lockpick", character, item)
 end)
 
@@ -168,6 +184,12 @@ listen("RollResult", 6, "after", function(eventName, character, subject, result,
         criticality
     )
     if handled then
+        if eventName == "GAMEPLAY_LockPicking" and result == 1 then
+            -- The client Lock component can outlive the authoritative success
+            -- callback briefly. Remove this target from native left-click
+            -- eligibility before the player's next ordinary open attempt.
+            quickLockpick.OnLockpickSucceeded(character, subject)
+        end
         if diagnostics.IsTraceEnabled() then
             -- The coordinator may schedule terminal cleanup on the next tick.
             -- Queue the diagnostic snapshot afterward so pending counts
