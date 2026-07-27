@@ -583,23 +583,32 @@ foreach ($requiredNotice in @('SafetyHook 0.7.0', 'Boost Software License',
     }
 }
 
-$creditSurfaces = @($readmePath)
-$requiredCredits = @(
-    'Auto Lockpicking',
-    'Volitio',
-    'Use Best Sleight of Hand',
-    'JonHinkerton',
-    'Best in Party Skills',
-    'imCioco',
-    'Eternal Lockpick',
-    'Eternal Trap Disarm Kit',
-    'SwissFred'
+$creditRequirements = @(
+    @{
+        Path = $readmePath
+        Credits = @(
+            'Auto Lockpicking',
+            'Volitio',
+            'Use Best Sleight of Hand',
+            'JonHinkerton',
+            'Best in Party Skills',
+            'imCioco'
+        )
+    },
+    @{
+        Path = $developmentPath
+        Credits = @(
+            'Eternal Lockpick',
+            'Eternal Trap Disarm Kit',
+            'SwissFred'
+        )
+    }
 )
-foreach ($surface in $creditSurfaces) {
-    $content = Get-Content -LiteralPath $surface -Raw
-    foreach ($credit in $requiredCredits) {
+foreach ($requirement in $creditRequirements) {
+    $content = Get-Content -LiteralPath $requirement.Path -Raw
+    foreach ($credit in $requirement.Credits) {
         if (-not $content.Contains($credit)) {
-            throw "Required reference credit '$credit' is missing from $surface"
+            throw "Required reference credit '$credit' is missing from $($requirement.Path)"
         }
     }
 }
@@ -616,4 +625,4 @@ Write-Host "Module UUID: $uuid"
 Write-Host "Version: $semanticVersion ($version)"
 Write-Host "Script Extender API floor: $($config.RequiredVersion)"
 Write-Host "Package allowlist: $($expectedPackageFiles.Count) files"
-Write-Host "Documentation credit surfaces: $($creditSurfaces.Count)"
+Write-Host "Documentation credit surfaces: $($creditRequirements.Count)"

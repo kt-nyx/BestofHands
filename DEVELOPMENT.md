@@ -339,4 +339,4 @@ The first native release is 2.0.0 because it introduces a new required loader an
 
 ## Licensing and reference boundary
 
-Best of Hands acknowledges Auto Lockpicking by Volitio, Use Best Sleight of Hand by JonHinkerton, Best in Party Skills by imCioco, and Eternal Lockpick and Eternal Trap Disarm Kit by SwissFred. Do not copy their source, assets, statuses, localization, or metadata. Public acknowledgements and reuse terms are in [README.md](README.md) and [LICENSE](LICENSE).
+Best of Hands acknowledges Auto Lockpicking by Volitio, Use Best Sleight of Hand by JonHinkerton, Best in Party Skills by imCioco, and Eternal Lockpick and Eternal Trap Disarm Kit by SwissFred. Do not copy their source, assets, statuses, localization, or metadata. User-facing acknowledgements are in [README.md](README.md); additional project acknowledgements and reuse terms are maintained here and in [LICENSE](LICENSE).
