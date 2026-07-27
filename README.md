@@ -34,7 +34,7 @@ The party member with highest modifiers is calculated when you start the roll so
 7. Drag the **bin** folder from the ZIP file into your game folder.
 8. Profit!
 
-### [Manual Install (for my freaks <3)](https://bg3.wiki/wiki/Modding:Installing_mods#Manually)
+[Manual Install (for my freaks <3)](https://bg3.wiki/wiki/Modding:Installing_mods#Manually)
 
 ## Compatibility
 Best of Hands should be compatible with pretty much everything, so long as it doesn't overlap directly with lockpick/disarm behaviour (e.g. [Auto Lockpicking](https://www.nexusmods.com/baldursgate3/mods/6188), [Use Best Sleight of Hand](https://www.nexusmods.com/baldursgate3/mods/5036)) or mods that alter *all* ability checks (e.g. [Best in Party Skills](https://www.nexusmods.com/baldursgate3/mods/20091)).
