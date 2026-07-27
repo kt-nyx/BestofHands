@@ -2,10 +2,7 @@
 <p align="center"><strong>Does your soul burn with the fires of Avernus every time you have to click <u><em>twice</em></u> to pick a lock?</strong></p>
 <p align="center"><strong>Now you can leave it in the <em>Best of Hands</em>.</strong></p>
 
----
-
 ## Description
-
 Best of Hands is a simple, focused QoL mod for lockpicking and trap disarming:
 
 - Simply **left-click any locked chest or door** and you will attempt a lockpick. *No more lockpicking from the dropdown menu!*
@@ -19,17 +16,11 @@ This mod *only* affects lockpicking and trap disarming. It does *not* share best
 
 The party member with highest modifiers is calculated when you start the roll so that you always use the best roller. For example, if Astarion has +3 from Dex and +3 from Sleight of Hand proficiency (total +6), but Shadowheart has a temporary total of +8 from Bardic Inspiration, Shadowheart's modifiers will be used for the roll.
 
----
-
 ## Requirements
-
 - [BG3 Script Extender](https://github.com/Norbyte/bg3se/releases/latest)
 - [Native Mod Loader](https://www.nexusmods.com/baldursgate3/mods/944)
 
----
-
 ## Installation
-
 **Before you do anything, install [BG3 Script Extender](https://github.com/Norbyte/bg3se/releases/latest) and [Native Mod Loader](https://www.nexusmods.com/baldursgate3/mods/944).**
 
 **And use [BG3 Mod Manager](https://github.com/LaughingLeader/BG3ModManager/releases/latest) ya animal!**
@@ -45,15 +36,10 @@ The party member with highest modifiers is calculated when you start the roll so
 
 ### [Manual Install (for my freaks <3)](https://bg3.wiki/wiki/Modding:Installing_mods#Manually)
 
----
-
 ## Compatibility
-
 Best of Hands should be compatible with pretty much everything, so long as it doesn't overlap directly with lockpick/disarm behaviour (e.g. [Auto Lockpicking](https://www.nexusmods.com/baldursgate3/mods/6188), [Use Best Sleight of Hand](https://www.nexusmods.com/baldursgate3/mods/5036)) or mods that alter *all* ability checks (e.g. [Best in Party Skills](https://www.nexusmods.com/baldursgate3/mods/20091)).
 
 It works with party limit mods; so long as the character you want for lockpick/disarm checks is *in your active party*, their stats will be used for the roll.
-
----
 
 ## Uninstallation
 
@@ -69,10 +55,7 @@ If you want to be *super* safe though:
 6. Export the updated load order, launch BG3, and load the new save.
 7. ...un-profit?
 
----
-
 ## Why Not The *Other* Mods?
-
 Other mods have fixed these issues separately before, namely [Auto Lockpicking](https://www.nexusmods.com/baldursgate3/mods/6188) and [Use Best Sleight of Hand](https://www.nexusmods.com/baldursgate3/mods/5036), but:
 
 - *Auto Lockpicking*'s implementation is, in Volitio's own words, "shitty" (sorry) and works very inconsistently, or not at all for some people (me) on the latest patch.
@@ -82,10 +65,7 @@ Other mods have fixed these issues separately before, namely [Auto Lockpicking](
 
 It's up to you what you use, but this is why I initially created this mod for my own playthrough.
 
----
-
 ## Thanks <3
-
 Thank you so much to the following mod authors for making these mods, which inspired and informed the development of Best of Hands:
 
 - [BG3 Script Extender](https://www.nexusmods.com/baldursgate3/mods/2172) by the marvelous Norbyte
@@ -94,12 +74,5 @@ Thank you so much to the following mod authors for making these mods, which insp
 - [Use Best Sleight of Hand](https://www.nexusmods.com/baldursgate3/mods/5036) by JonHinkerton
 - [Best in Party Skills](https://www.nexusmods.com/baldursgate3/mods/20091) by imCioco
 
----
-
-## [GitHub Repo](https://github.com/kt-nyx/BestofHands)
-
----
-
 ## License
-
 Best of Hands is released under [The Unlicense](https://unlicense.org/). You may copy, modify, fork, redistribute, sell, relicense, or incorporate it without permission or credit. You do not need to publish source, use the same license, or notify the author.
