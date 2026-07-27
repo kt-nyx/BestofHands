@@ -21,9 +21,7 @@ The party member with highest modifiers is calculated when you start the roll so
 - [Native Mod Loader](https://www.nexusmods.com/baldursgate3/mods/944)
 
 ## Installation
-**Before you do anything, install [BG3 Script Extender](https://github.com/Norbyte/bg3se/releases/latest) and [Native Mod Loader](https://www.nexusmods.com/baldursgate3/mods/944).**
-
-**And use [BG3 Mod Manager](https://github.com/LaughingLeader/BG3ModManager/releases/latest) ya animal!**
+**Before you do anything, install [BG3 Script Extender](https://github.com/Norbyte/bg3se/releases/latest) and [Native Mod Loader](https://www.nexusmods.com/baldursgate3/mods/944)... and use [BG3 Mod Manager](https://github.com/LaughingLeader/BG3ModManager/releases/latest) ya animal!**
 
 1. Download this mod manually.
 2. In BG3 Mod Manager, select **File > Import Mod** and choose the downloaded `BestofHands.zip`.
@@ -33,8 +31,6 @@ The party member with highest modifiers is calculated when you start the roll so
 6. Open the downloaded `BestofHands.zip`.
 7. Drag the **bin** folder from the ZIP file into your game folder.
 8. Profit!
-
-[Manual Install (for my freaks <3)](https://bg3.wiki/wiki/Modding:Installing_mods#Manually)
 
 ## Compatibility
 Best of Hands should be compatible with pretty much everything, so long as it doesn't overlap directly with lockpick/disarm behaviour (e.g. [Auto Lockpicking](https://www.nexusmods.com/baldursgate3/mods/6188), [Use Best Sleight of Hand](https://www.nexusmods.com/baldursgate3/mods/5036)) or mods that alter *all* ability checks (e.g. [Best in Party Skills](https://www.nexusmods.com/baldursgate3/mods/20091)).
