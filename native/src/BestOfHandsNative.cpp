@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Unlicense
 #include "BridgeProtocol.h"
 #include "FixedSnapshot.h"
+#include "NativeStartupGate.h"
 #include "ProfileRouting.h"
 #include "QuickLockpickState.h"
 #include "SafeMemory.h"
@@ -1130,6 +1131,52 @@ bool IsReadable(void const* pointer, std::size_t size = 1)
     return end >= start && end <= regionEnd;
 }
 
+bool IsCommittedDataRange(void const* pointer, std::size_t size)
+{
+    if (pointer == nullptr || size == 0) {
+        return false;
+    }
+    MEMORY_BASIC_INFORMATION info{};
+    if (VirtualQuery(pointer, &info, sizeof(info)) == 0
+        || info.State != MEM_COMMIT
+        || (info.Type != MEM_PRIVATE && info.Type != MEM_MAPPED)
+        || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+        return false;
+    }
+    auto const start = reinterpret_cast<std::uintptr_t>(pointer);
+    auto const end = start + size;
+    auto const regionEnd =
+        reinterpret_cast<std::uintptr_t>(info.BaseAddress)
+        + info.RegionSize;
+    return end >= start && end <= regionEnd;
+}
+
+bool IsExecutableGameAddress(void const* pointer)
+{
+    if (pointer == nullptr || g_build == nullptr) {
+        return false;
+    }
+    auto const address = reinterpret_cast<std::uintptr_t>(pointer);
+    auto const base = reinterpret_cast<std::uintptr_t>(g_gameModule);
+    auto const end = base + g_build->imageSize;
+    if (end < base || address < base || address >= end) {
+        return false;
+    }
+    MEMORY_BASIC_INFORMATION info{};
+    if (VirtualQuery(pointer, &info, sizeof(info)) == 0
+        || info.State != MEM_COMMIT
+        || info.Type != MEM_IMAGE
+        || info.AllocationBase != g_gameModule
+        || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+        return false;
+    }
+    auto const protection = info.Protect & 0xff;
+    return protection == PAGE_EXECUTE
+        || protection == PAGE_EXECUTE_READ
+        || protection == PAGE_EXECUTE_READWRITE
+        || protection == PAGE_EXECUTE_WRITECOPY;
+}
+
 template <class T>
 bool Read(void const* pointer, T& value)
 {
@@ -1997,7 +2044,8 @@ void WriteCurrentStatus(std::string_view ack)
         WriteStatus("hook_install_failed", failure, ack);
     } else if (!g_codeHooksReady.load()) {
         WriteStatus("installing_hooks",
-            "installing validated profile and client presentation hooks", ack);
+            "current Lua bridge confirmed; installing validated native hooks",
+            ack);
     } else {
         WriteStatus("waiting_for_server",
             "waiting for the server entity world; client presentation hook validated",
@@ -6447,6 +6495,9 @@ bool InstallCodeHooks(std::string& failure)
 
 bool WritePointer(void** slot, void* value)
 {
+    if (!IsCommittedDataRange(slot, sizeof(void*))) {
+        return false;
+    }
     DWORD previous{};
     if (VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &previous) == FALSE) {
         return false;
@@ -6461,13 +6512,19 @@ bool WritePointer(void** slot, void* value)
 void RefreshingModifierSystemHook(void* system, void* world, void* gameTime)
 {
     RefreshDocument(false);
-    g_modifierOriginal(system, world, gameTime);
+    auto const original = g_modifierOriginal;
+    if (original != nullptr) {
+        original(system, world, gameTime);
+    }
 }
 
 void RefreshingRollSystemHook(void* system, void* world, void* gameTime)
 {
     RefreshDocument(false);
-    g_rollOriginal(system, world, gameTime);
+    auto const original = g_rollOriginal;
+    if (original != nullptr) {
+        original(system, world, gameTime);
+    }
 }
 
 bool PatchSystem(std::string_view name, void* world, std::uintptr_t indexRva,
@@ -6490,17 +6547,46 @@ bool PatchSystem(std::string_view name, void* world, std::uintptr_t indexRva,
             + std::to_string(index) + ",count=" + std::to_string(count);
         return false;
     }
-    auto const entry = static_cast<std::byte*>(entries)
-        + static_cast<std::size_t>(index) * kSystemEntrySize;
+    auto const slotOffset = boh::SystemUpdateSlotOffset(
+        static_cast<std::uint32_t>(index),
+        count,
+        kSystemEntrySize,
+        kSystemEntryUpdateOffset);
+    if (!slotOffset.has_value()) {
+        failure = std::string(name) + "_system_update_slot_invalid";
+        return false;
+    }
+    auto updateSlot = reinterpret_cast<void**>(
+        static_cast<std::byte*>(entries) + *slotOffset);
+    if (!IsCommittedDataRange(updateSlot, sizeof(void*))) {
+        failure = std::string(name)
+            + "_system_update_slot_not_committed_data";
+        return false;
+    }
     void* update{};
-    if (!Read(entry + kSystemEntryUpdateOffset, update) || update == nullptr) {
+    if (!Read(updateSlot, update) || update == nullptr) {
         failure = std::string(name) + "_system_update_unreadable";
         return false;
     }
-    auto updateSlot = reinterpret_cast<void**>(entry + kSystemEntryUpdateOffset);
-    original = reinterpret_cast<SystemUpdateProc>(update);
+    if (!IsExecutableGameAddress(update)) {
+        failure = std::string(name)
+            + "_system_update_not_game_executable";
+        return false;
+    }
+    auto const candidateOriginal =
+        reinterpret_cast<SystemUpdateProc>(update);
+    if (original != nullptr && original != candidateOriginal) {
+        failure = std::string(name) + "_system_original_changed";
+        return false;
+    }
+    auto const publishedOriginal = original == nullptr;
+    if (publishedOriginal) {
+        original = candidateOriginal;
+    }
     if (!WritePointer(updateSlot, reinterpret_cast<void*>(hook))) {
-        original = nullptr;
+        if (publishedOriginal) {
+            original = nullptr;
+        }
         failure = std::string(name) + "_system_update_write_failed";
         return false;
     }
@@ -6509,6 +6595,135 @@ bool PatchSystem(std::string_view name, void* world, std::uintptr_t indexRva,
         "system=" + std::string(name)
         + "|index=" + std::to_string(index)
         + "|update=" + Hex(reinterpret_cast<std::uintptr_t>(update)));
+    return true;
+}
+
+bool ValidateInstalledSystemHooks(void* world, std::string& failure)
+{
+    if (world == nullptr || world != g_serverWorld.load()) {
+        failure = "installed_hook_world_mismatch";
+        return false;
+    }
+    if (g_modifierUpdateSlot == nullptr
+        || g_rollUpdateSlot == nullptr
+        || !IsCommittedDataRange(g_modifierUpdateSlot, sizeof(void*))
+        || !IsCommittedDataRange(g_rollUpdateSlot, sizeof(void*))) {
+        failure = "installed_hook_slots_unavailable";
+        return false;
+    }
+
+    void* modifierCurrent{};
+    void* rollCurrent{};
+    if (!Read(g_modifierUpdateSlot, modifierCurrent)
+        || !Read(g_rollUpdateSlot, rollCurrent)) {
+        failure = "installed_hook_slots_unreadable";
+        return false;
+    }
+
+    auto const modifierOriginal =
+        reinterpret_cast<std::uintptr_t>(g_modifierOriginal);
+    auto const rollOriginal =
+        reinterpret_cast<std::uintptr_t>(g_rollOriginal);
+    if (!boh::InstalledSystemHookPointersMatch(
+            reinterpret_cast<std::uintptr_t>(modifierCurrent),
+            reinterpret_cast<std::uintptr_t>(rollCurrent),
+            reinterpret_cast<std::uintptr_t>(
+                &RefreshingModifierSystemHook),
+            reinterpret_cast<std::uintptr_t>(
+                &RefreshingRollSystemHook),
+            modifierOriginal,
+            rollOriginal)) {
+        failure = "installed_hook_pointer_mismatch";
+        return false;
+    }
+    if (!IsExecutableGameAddress(
+            reinterpret_cast<void const*>(modifierOriginal))
+        || !IsExecutableGameAddress(
+            reinterpret_cast<void const*>(rollOriginal))) {
+        failure = "installed_hook_originals_not_game_executable";
+        return false;
+    }
+    return true;
+}
+
+bool ValidateWorldHookTarget(void* world, std::string& failure)
+{
+    if (!IsCommittedDataRange(
+            world, kWorldSystemsCountOffset + sizeof(std::uint32_t))) {
+        failure = "world_not_committed_data";
+        return false;
+    }
+
+    auto const base = reinterpret_cast<std::uintptr_t>(g_gameModule);
+    std::int32_t modifierIndex{};
+    std::int32_t rollIndex{};
+    std::uint32_t firstCount{};
+    std::uint32_t secondCount{};
+    void* firstEntries{};
+    void* secondEntries{};
+    if (!Read(reinterpret_cast<void const*>(
+            base + g_build->modifierSystemIndexRva), modifierIndex)
+        || !Read(reinterpret_cast<void const*>(
+            base + g_build->rollSystemIndexRva), rollIndex)
+        || modifierIndex < 0
+        || rollIndex < 0
+        || modifierIndex == rollIndex
+        || !Read(At<std::uint32_t>(
+            world, kWorldSystemsCountOffset), firstCount)
+        || !Read(At<void*>(
+            world, kWorldSystemsBufferOffset), firstEntries)
+        || firstCount == 0
+        || firstCount > 4096
+        || static_cast<std::uint32_t>(modifierIndex) >= firstCount
+        || static_cast<std::uint32_t>(rollIndex) >= firstCount
+        || firstEntries == nullptr) {
+        failure = "world_system_metadata_invalid";
+        return false;
+    }
+
+    auto const modifierSlotOffset = boh::SystemUpdateSlotOffset(
+        static_cast<std::uint32_t>(modifierIndex),
+        firstCount,
+        kSystemEntrySize,
+        kSystemEntryUpdateOffset);
+    auto const rollSlotOffset = boh::SystemUpdateSlotOffset(
+        static_cast<std::uint32_t>(rollIndex),
+        firstCount,
+        kSystemEntrySize,
+        kSystemEntryUpdateOffset);
+    if (!modifierSlotOffset.has_value() || !rollSlotOffset.has_value()) {
+        failure = "world_system_update_slots_invalid";
+        return false;
+    }
+
+    auto const modifierSlot = static_cast<std::byte*>(firstEntries)
+        + *modifierSlotOffset;
+    auto const rollSlot = static_cast<std::byte*>(firstEntries)
+        + *rollSlotOffset;
+    if (!IsCommittedDataRange(modifierSlot, sizeof(void*))
+        || !IsCommittedDataRange(rollSlot, sizeof(void*))) {
+        failure = "world_system_update_slots_not_committed_data";
+        return false;
+    }
+    void* modifierUpdate{};
+    void* rollUpdate{};
+    if (!Read(modifierSlot, modifierUpdate)
+        || !Read(rollSlot, rollUpdate)
+        || !IsExecutableGameAddress(modifierUpdate)
+        || !IsExecutableGameAddress(rollUpdate)) {
+        failure = "world_system_updates_not_game_executable";
+        return false;
+    }
+
+    if (!Read(At<std::uint32_t>(
+            world, kWorldSystemsCountOffset), secondCount)
+        || !Read(At<void*>(
+            world, kWorldSystemsBufferOffset), secondEntries)
+        || secondCount != firstCount
+        || secondEntries != firstEntries) {
+        failure = "world_system_metadata_unstable";
+        return false;
+    }
     return true;
 }
 
@@ -6530,8 +6745,6 @@ void RestoreSystemHooks()
     }
     g_rollUpdateSlot = nullptr;
     g_modifierUpdateSlot = nullptr;
-    g_rollOriginal = nullptr;
-    g_modifierOriginal = nullptr;
     g_hooksReady.store(false);
 }
 
@@ -6604,7 +6817,19 @@ void* ServerWorld()
     void* world{};
     if (!Read(reinterpret_cast<void const*>(base + g_build->serverGlobalRva), server)
         || server == nullptr
+        || !IsCommittedDataRange(
+            At<void*>(server, g_build->serverWorldOffset), sizeof(void*))
         || !Read(At<void*>(server, g_build->serverWorldOffset), world)) {
+        return nullptr;
+    }
+    void* confirmedServer{};
+    void* confirmedWorld{};
+    if (!Read(reinterpret_cast<void const*>(
+            base + g_build->serverGlobalRva), confirmedServer)
+        || confirmedServer != server
+        || !Read(At<void*>(
+            confirmedServer, g_build->serverWorldOffset), confirmedWorld)
+        || confirmedWorld != world) {
         return nullptr;
     }
     return world;
@@ -6629,6 +6854,8 @@ DWORD WINAPI Worker(void*)
         root / L"Script Extender" / L"BestOfHandsNative.leftclick";
     g_statusPath = root / L"Script Extender" / L"BestOfHandsNative.status";
     g_logPath = root / L"Script Extender Logs" / L"BestOfHandsNative.log";
+    auto const actionWriteTimeAtStartup = LastWrite(g_actionPath);
+    g_actionWriteTime = actionWriteTimeAtStartup;
     LARGE_INTEGER qpcFrequency{};
     if (QueryPerformanceFrequency(&qpcFrequency)) {
         g_perfQpcFrequency.store(
@@ -6668,21 +6895,29 @@ DWORD WINAPI Worker(void*)
     }
 
     std::string failure;
-    if (!InstallCodeHooks(failure)) {
-        SetHookFailure(failure);
-        WriteCurrentStatus("");
-        Log("ERROR", "native_hook_install_failed", "detail=" + failure);
-        return 3;
-    }
-    WriteStatus("waiting_for_server",
-        "validated profile and client presentation hooks; waiting for the server entity world",
+    WriteStatus("waiting_for_bridge",
+        "native hooks are dormant until the matching Lua bridge sends a current challenge",
         "");
 
     void* lastObservedWorld{};
+    void* lastRejectedWorld{};
+    std::string lastRejectedReason;
     std::string lastLoggedFailure;
+    bool currentChallengeObserved = false;
+    boh::StableWorldCandidateGate worldGate;
     auto currentAck = []() {
         std::shared_lock lock(g_documentMutex);
         return g_document.probe;
+    };
+    auto bridgeAllowsNativeHooks = [&currentChallengeObserved]() {
+        std::shared_lock lock(g_documentMutex);
+        return boh::BridgeDocumentAllowsNativeHooks(
+            g_document, currentChallengeObserved);
+    };
+    auto bridgeAllowsWorldHooks = []() {
+        std::shared_lock lock(g_documentMutex);
+        return boh::BridgeDocumentAllowsWorldHooks(
+            g_document, g_sessionUtf8);
     };
 
     while (!g_stop.load()) {
@@ -6692,7 +6927,77 @@ DWORD WINAPI Worker(void*)
         RefreshDocument(false, false);
         RefreshClientDocument(false);
         RefreshLeftClickDocument(false);
-        auto const world = ServerWorld();
+        if (!currentChallengeObserved
+            && LastWrite(g_actionPath) != actionWriteTimeAtStartup) {
+            currentChallengeObserved = true;
+        }
+        if (!g_codeHooksReady.load()) {
+            if (!bridgeAllowsNativeHooks()) {
+                worldGate.Reset();
+                FlushCompletedPerfRolls();
+                Sleep(25);
+                continue;
+            }
+            failure.clear();
+            if (!InstallCodeHooks(failure)) {
+                SetHookFailure(failure);
+                WriteCurrentStatus(currentAck());
+                Log("ERROR", "native_hook_install_failed",
+                    "detail=" + failure);
+                return 3;
+            }
+            WriteCurrentStatus(currentAck());
+        }
+        auto const bridgeReady = bridgeAllowsWorldHooks();
+        auto const observationEnabled =
+            g_hooksReady.load() || bridgeReady;
+        void* candidateWorld{};
+        std::string rejection;
+        if (observationEnabled) {
+            candidateWorld = ServerWorld();
+            auto const installedHooks = g_hooksReady.load();
+            auto const installedWorld = g_serverWorld.load();
+            if (candidateWorld != nullptr
+                && installedHooks
+                && candidateWorld == installedWorld
+                && !ValidateInstalledSystemHooks(
+                    candidateWorld, rejection)) {
+                Log("ERROR", "installed_hook_integrity_lost",
+                    "detail=" + rejection + "|world="
+                    + Hex(reinterpret_cast<std::uintptr_t>(
+                        candidateWorld)));
+                SetHookFailure(rejection);
+                g_hooksReady.store(false);
+                WriteCurrentStatus(currentAck());
+                return 4;
+            }
+            if (candidateWorld != nullptr
+                && (!installedHooks || candidateWorld != installedWorld)
+                && !ValidateWorldHookTarget(candidateWorld, rejection)) {
+                if (candidateWorld != lastRejectedWorld
+                    || rejection != lastRejectedReason) {
+                    Log("ERROR", "server_world_rejected",
+                        "detail=" + rejection + "|world="
+                        + Hex(reinterpret_cast<std::uintptr_t>(
+                            candidateWorld)));
+                    lastRejectedWorld = candidateWorld;
+                    lastRejectedReason = rejection;
+                }
+                candidateWorld = nullptr;
+            } else if (candidateWorld != nullptr) {
+                lastRejectedWorld = nullptr;
+                lastRejectedReason.clear();
+            }
+        }
+        auto const decision = worldGate.Observe(
+            reinterpret_cast<std::uintptr_t>(candidateWorld),
+            observationEnabled);
+        if (!decision.ready) {
+            FlushCompletedPerfRolls();
+            Sleep(25);
+            continue;
+        }
+        auto const world = reinterpret_cast<void*>(decision.value);
         if (world != lastObservedWorld) {
             Log("INFO", world != nullptr ? "server_world_found"
                                           : "server_world_unavailable",
@@ -6700,13 +7005,16 @@ DWORD WINAPI Worker(void*)
             lastObservedWorld = world;
         }
         auto const hookedWorld = g_serverWorld.load();
-        if (g_hooksReady.load() && world != hookedWorld) {
+        if (boh::ShouldRetireInstalledWorld(
+                g_hooksReady.load(),
+                reinterpret_cast<std::uintptr_t>(hookedWorld),
+                reinterpret_cast<std::uintptr_t>(world))) {
             // The retired world owns the old systems buffer. Do not write back
-            // into it; discard those slots and arm against the replacement.
+            // into it. Discard only its slots; the hook call targets remain
+            // callable until the process ends or a replacement world safely
+            // republishes the same verified originals.
             g_modifierUpdateSlot = nullptr;
             g_rollUpdateSlot = nullptr;
-            g_modifierOriginal = nullptr;
-            g_rollOriginal = nullptr;
             g_serverWorld.store(nullptr);
             g_hooksReady.store(false);
             SetHookFailure({});

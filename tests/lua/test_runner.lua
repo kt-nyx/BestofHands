@@ -7,6 +7,7 @@ local LegacyAssistanceCleanup = dofile(luaRoot .. "LegacyAssistanceCleanup.lua")
 local NativeBridge = dofile(luaRoot .. "NativeBridge.lua")
 local NativeInteractionCoordinator = dofile(luaRoot .. "NativeInteractionCoordinator.lua")
 local NativeRuntimeApi = dofile(luaRoot .. "NativeRuntimeApi.lua")
+local Settings = dofile(luaRoot .. "Settings.lua")
 local QuickLockpickCoordinator = dofile(
     luaRoot .. "QuickLockpickCoordinator.lua"
 )
@@ -741,7 +742,7 @@ test("native bridge requires a live matching challenge acknowledgement", functio
         NATIVE_HANDSHAKE_ATTEMPTS = 2,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.0.1",
+        VERSION = "2.1.0",
     }
     local bridge = NativeBridge.Create(settings, api, recordingDiagnostics())
     bridge.BeginHandshake()
@@ -749,7 +750,7 @@ test("native bridge requires a live matching challenge acknowledgement", functio
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
         "protocol=7",
-        "version=2.0.1",
+        "version=2.1.0",
         "state=ready",
         "session=123-456",
         "pid=123",
@@ -883,14 +884,14 @@ test("native bridge cannot report ready when its session acknowledgement write f
         NATIVE_HANDSHAKE_ATTEMPTS = 1,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.0.1",
+        VERSION = "2.1.0",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, diagnostics)
     bridge.BeginHandshake()
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=7", "version=2.0.1", "state=ready", "session=session-a",
+        "protocol=7", "version=2.1.0", "state=ready", "session=session-a",
         "pid=10", "hooks=" .. NativeBridge.REQUIRED_HOOKS,
         "features=" .. NativeBridge.REQUIRED_FEATURES,
         "ack=" .. probe, "detail=ok", "end=1", "",
@@ -930,7 +931,7 @@ test("native bridge fails closed and warns once when the DLL is unavailable", fu
         NATIVE_HANDSHAKE_ATTEMPTS = 1,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.0.1",
+        VERSION = "2.1.0",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, recordingDiagnostics())
@@ -958,14 +959,14 @@ test("native bridge disables delegation if its acknowledgement is replaced", fun
         NATIVE_HANDSHAKE_ATTEMPTS = 1,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.0.1",
+        VERSION = "2.1.0",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, recordingDiagnostics())
     bridge.BeginHandshake()
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=7", "version=2.0.1", "state=ready", "session=session-a",
+        "protocol=7", "version=2.1.0", "state=ready", "session=session-a",
         "pid=10", "hooks=" .. NativeBridge.REQUIRED_HOOKS,
         "features=" .. NativeBridge.REQUIRED_FEATURES,
         "ack=" .. probe, "detail=ok", "end=1", "",
@@ -973,7 +974,7 @@ test("native bridge disables delegation if its acknowledgement is replaced", fun
     scheduled[1]()
     assertEqual(true, bridge.IsReady(), "initially ready")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=7", "version=2.0.1", "state=ready", "session=session-a",
+        "protocol=7", "version=2.1.0", "state=ready", "session=session-a",
         "pid=10", "hooks=" .. NativeBridge.REQUIRED_HOOKS,
         "features=" .. NativeBridge.REQUIRED_FEATURES,
         "ack=replaced-probe", "detail=another bridge replaced the ack", "end=1", "",
@@ -1014,7 +1015,7 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
             "protocol=7",
-            "pak_version=2.0.1",
+            "pak_version=2.1.0",
             "probe=test",
             "native_session=44-55",
             "trace=0",
@@ -1079,7 +1080,7 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
     }
     local bridge = NativePresentationBridge.Start({
         TRACE_EVENTS = false,
-        VERSION = "2.0.1",
+        VERSION = "2.1.0",
     })
     local component = {
         RollContext = 5,
@@ -1182,7 +1183,7 @@ test("client bridge prepares and queues BG3's stock lockpick task", function()
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
             "protocol=7",
-            "pak_version=2.0.1",
+            "pak_version=2.1.0",
             "probe=test",
             "native_session=44-55",
             "trace=0",
@@ -1234,7 +1235,7 @@ test("client bridge prepares and queues BG3's stock lockpick task", function()
     }
     NativePresentationBridge.Start({
         TRACE_EVENTS = false,
-        VERSION = "2.0.1",
+        VERSION = "2.1.0",
     }, channel)
     assertEqual("function", type(handler), "quick-lockpick client handler registered")
     handler({
@@ -1311,7 +1312,7 @@ test("client bridge rejects malformed or unpublishable fallback requests", funct
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
             "protocol=7",
-            "pak_version=2.0.1",
+            "pak_version=2.1.0",
             "probe=test",
             "native_session=44-55",
             "trace=0",
@@ -1356,7 +1357,7 @@ test("client bridge rejects malformed or unpublishable fallback requests", funct
     }
     NativePresentationBridge.Start({
         TRACE_EVENTS = false,
-        VERSION = "2.0.1",
+        VERSION = "2.1.0",
     }, channel)
 
     local function start(request, actor, targetValue)
@@ -1489,7 +1490,7 @@ test("client bridge publishes pre-use left-click interception state", function()
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
             "protocol=7",
-            "pak_version=2.0.1",
+            "pak_version=2.1.0",
             "probe=test",
             "native_session=44-55",
             "trace=0",
@@ -1540,7 +1541,7 @@ test("client bridge publishes pre-use left-click interception state", function()
     }
     NativePresentationBridge.Start({
         TRACE_EVENTS = false,
-        VERSION = "2.0.1",
+        VERSION = "2.1.0",
     }, channel)
     table.remove(nextTicks, 1)()
     assertContains(
@@ -1658,7 +1659,7 @@ test("client left-click snapshot isolates actors, keys, targets, and sessions", 
     local function actions(session)
         return table.concat({
             "protocol=7",
-            "pak_version=2.0.1",
+            "pak_version=2.1.0",
             "probe=test",
             "native_session=" .. session,
             "trace=0",
@@ -1721,7 +1722,7 @@ test("client left-click snapshot isolates actors, keys, targets, and sessions", 
     }
     NativePresentationBridge.Start({
         TRACE_EVENTS = false,
-        VERSION = "2.0.1",
+        VERSION = "2.1.0",
     }, channel)
 
     local function flush()
@@ -1913,6 +1914,11 @@ test("runtime tool precheck uses BG3 party inventory without consuming anything"
     local queried = {}
     local responses = {}
     local errors = {}
+    Ext = {
+        Mod = {
+            IsModLoaded = function() return false end,
+        },
+    }
     Osi = {
         DB_CustomDisarmTrapResponse = function(character, target, result)
             responses[#responses + 1] = {
@@ -1964,6 +1970,219 @@ test("runtime tool precheck uses BG3 party inventory without consuming anything"
     api.RejectNativeActionWithoutTool("disarm", "actor", "trap")
     assertEqual("disarm", responses[2].action, "disarm response database")
     assertEqual(0, responses[2].result, "disarm rejection result")
+end)
+
+test("optional tool providers are independently gated by loaded module", function()
+    local lockpickProvider =
+        Settings.OPTIONAL_ACTION_TOOL_PROVIDERS.lockpick[1]
+    local disarmProvider =
+        Settings.OPTIONAL_ACTION_TOOL_PROVIDERS.disarm[1]
+
+    local function inspect(loadedModules)
+        local queried = {}
+        Ext = {
+            Mod = {
+                IsModLoaded = function(moduleUuid)
+                    return loadedModules[moduleUuid] == true
+                end,
+            },
+        }
+        Osi = {
+            GetInventoryOwner = function(item)
+                return item .. "-owner"
+            end,
+            GetItemByTemplateInPartyInventory = function(template, character)
+                queried[#queried + 1] = {
+                    character = character,
+                    template = template,
+                }
+                if template == lockpickProvider.templates[1] then
+                    return "eternal-lockpick"
+                elseif template == disarmProvider.templates[1] then
+                    return "eternal-trap-kit"
+                end
+                return nil
+            end,
+        }
+        local api = NativeRuntimeApi.Create(Settings, recordingDiagnostics(false))
+        return {
+            disarm = api.FindNativeActionTool("disarm", "actor"),
+            lockpick = api.FindNativeActionTool("lockpick", "actor"),
+            queried = queried,
+            status = api.GetToolCompatibilityStatus(),
+        }
+    end
+
+    local neither = inspect({})
+    assertEqual(nil, neither.lockpick, "absent lockpick provider ignored")
+    assertEqual(nil, neither.disarm, "absent disarm provider ignored")
+    assertEqual(false, neither.status.eternal_lockpick,
+        "lockpick status disabled")
+    assertEqual(false, neither.status.eternal_trap_disarm_kit,
+        "disarm status disabled")
+    assertEqual(3, #neither.queried, "only three vanilla roots queried")
+
+    local lockpickOnly = inspect({
+        [lockpickProvider.moduleUuid] = true,
+    })
+    assertEqual("eternal-lockpick", lockpickOnly.lockpick.item,
+        "loaded lockpick provider accepted")
+    assertEqual("eternal_lockpick", lockpickOnly.lockpick.provider,
+        "lockpick provider identity")
+    assertEqual(lockpickProvider.moduleUuid, lockpickOnly.lockpick.moduleUuid,
+        "lockpick module identity")
+    assertEqual(nil, lockpickOnly.disarm, "unloaded disarm provider ignored")
+
+    local disarmOnly = inspect({
+        [disarmProvider.moduleUuid] = true,
+    })
+    assertEqual(nil, disarmOnly.lockpick, "unloaded lockpick provider ignored")
+    assertEqual("eternal-trap-kit", disarmOnly.disarm.item,
+        "loaded disarm provider accepted")
+    assertEqual("eternal_trap_disarm_kit", disarmOnly.disarm.provider,
+        "disarm provider identity")
+
+    local both = inspect({
+        [lockpickProvider.moduleUuid] = true,
+        [disarmProvider.moduleUuid] = true,
+    })
+    assertEqual("eternal-lockpick", both.lockpick.item,
+        "lockpick accepted when both loaded")
+    assertEqual("eternal-trap-kit", both.disarm.item,
+        "disarm accepted when both loaded")
+    assertEqual(true, both.status.eternal_lockpick,
+        "lockpick status enabled")
+    assertEqual(true, both.status.eternal_trap_disarm_kit,
+        "disarm status enabled")
+    assertEqual("actor", both.queried[1].character,
+        "provider lookup retains initiator magic-pockets anchor")
+end)
+
+test("optional provider detection failure preserves vanilla tool behavior", function()
+    local diagnostics, records = recordingDiagnostics(false)
+    Ext = {
+        Mod = {
+            IsModLoaded = function()
+                error("simulated module manager failure")
+            end,
+        },
+    }
+    Osi = {
+        GetInventoryOwner = function() return "vanilla-owner" end,
+        GetItemByTemplateInPartyInventory = function(template)
+            if template == Settings.VANILLA_THIEVES_TOOLS_TEMPLATES[1] then
+                return "vanilla-tools"
+            end
+            return nil
+        end,
+    }
+    local api = NativeRuntimeApi.Create(Settings, diagnostics)
+    local tool = api.FindNativeActionTool("lockpick", "actor")
+    assertEqual("vanilla-tools", tool.item, "vanilla tool remains available")
+    assertEqual("vanilla", tool.provider, "vanilla provider retained")
+    assertEqual(false, api.GetToolCompatibilityStatus().eternal_lockpick,
+        "failed optional detection stays disabled")
+    assertEqual("api_call_failed", findRecord(records, "api_call_failed").event,
+        "module manager failure is diagnostic")
+end)
+
+test("loaded Eternal item crosses the real runtime precheck into delegation", function()
+    local lockpickProvider =
+        Settings.OPTIONAL_ACTION_TOOL_PROVIDERS.lockpick[1]
+    local responses = {}
+    local timers = {}
+    Ext = {
+        Entity = {
+            Get = function() return nil end,
+        },
+        Mod = {
+            IsModLoaded = function(moduleUuid)
+                return moduleUuid == lockpickProvider.moduleUuid
+            end,
+        },
+        Timer = {
+            WaitFor = function(milliseconds, callback)
+                timers[#timers + 1] = {
+                    callback = callback,
+                    milliseconds = milliseconds,
+                }
+            end,
+        },
+    }
+    Osi = {
+        DB_CustomDisarmTrapResponse = function(character, target, result)
+            responses[#responses + 1] = {
+                action = "disarm",
+                character = character,
+                result = result,
+                target = target,
+            }
+        end,
+        DB_CustomLockpickItemResponse = function(character, target, result)
+            responses[#responses + 1] = {
+                action = "lockpick",
+                character = character,
+                result = result,
+                target = target,
+            }
+        end,
+        GetInventoryOwner = function() return "party-member" end,
+        GetItemByTemplateInPartyInventory = function(template)
+            if template == lockpickProvider.templates[1] then
+                return "eternal-lockpick"
+            end
+            return nil
+        end,
+        ShowError = function() end,
+    }
+    local diagnostics = recordingDiagnostics(false)
+    local api = NativeRuntimeApi.Create(Settings, diagnostics)
+    local upserts = {}
+    local coordinator = NativeInteractionCoordinator.Create(
+        { NATIVE_ACTION_TIMEOUT_MS = 100 },
+        api,
+        {
+            Resolve = function(initiator, target, action, requestId)
+                return {
+                    action = action,
+                    initiator = initiator,
+                    initiatorScore = 1,
+                    requestId = requestId,
+                    specialist = "best",
+                    specialistScore = 12,
+                    target = target,
+                }
+            end,
+        },
+        {
+            IsReady = function() return true end,
+            Remove = function() return true end,
+            Upsert = function(record)
+                upserts[#upserts + 1] = record
+                return true, nil, {
+                    initiatorHandle = "1",
+                    specialistHandle = "2",
+                    targetHandle = "3",
+                }
+            end,
+        },
+        diagnostics
+    )
+
+    assertEqual(false,
+        coordinator.OnNativeRequest("lockpick", "actor", "chest", 31),
+        "Eternal request remains observational")
+    assertEqual(1, #upserts, "loaded Eternal tool arms delegation")
+    assertEqual(0, #responses, "accepted action publishes no custom response")
+    assertEqual(1, #timers, "normal delegation timeout scheduled")
+
+    assertEqual(false,
+        coordinator.OnNativeRequest("disarm", "actor", "trap", 32),
+        "missing counterpart remains observational")
+    assertEqual(1, #upserts, "missing counterpart arms no delegation")
+    assertEqual(1, #responses, "missing counterpart uses native rejection")
+    assertEqual("disarm", responses[1].action, "independent provider gating")
+    assertEqual(0, responses[1].result, "native rejection result retained")
 end)
 
 test("runtime player enumeration deduplicates database rows", function()

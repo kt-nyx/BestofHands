@@ -16,6 +16,56 @@ end
 
 function NativeRuntimeApi.Create(settings, diagnostics)
     local api = {}
+    local actionToolCandidates = {
+        disarm = {},
+        lockpick = {},
+    }
+    local toolCompatibilityStatus = {}
+
+    for action, providers in pairs(
+        settings.OPTIONAL_ACTION_TOOL_PROVIDERS or {}
+    ) do
+        actionToolCandidates[action] = actionToolCandidates[action] or {}
+        for _, provider in ipairs(providers) do
+            local loaded = safe(
+                diagnostics,
+                "Ext.Mod.IsModLoaded",
+                false,
+                function()
+                    return Ext.Mod ~= nil
+                        and type(Ext.Mod.IsModLoaded) == "function"
+                        and Ext.Mod.IsModLoaded(provider.moduleUuid) == true
+                end
+            )
+            toolCompatibilityStatus[provider.id] = loaded
+            if loaded then
+                for _, template in ipairs(provider.templates or {}) do
+                    actionToolCandidates[action][#actionToolCandidates[action] + 1] = {
+                        moduleUuid = provider.moduleUuid,
+                        provider = provider.id,
+                        template = template,
+                    }
+                end
+                diagnostics.Info("optional_tool_provider_loaded", {
+                    action = action,
+                    module_uuid = provider.moduleUuid,
+                    provider = provider.id,
+                })
+            end
+        end
+    end
+
+    for action, templates in pairs({
+        disarm = settings.VANILLA_TRAP_DISARM_TOOL_TEMPLATES,
+        lockpick = settings.VANILLA_THIEVES_TOOLS_TEMPLATES,
+    }) do
+        for _, template in ipairs(templates or {}) do
+            actionToolCandidates[action][#actionToolCandidates[action] + 1] = {
+                provider = "vanilla",
+                template = template,
+            }
+        end
+    end
 
     function api.GetPlayers()
         return safe(diagnostics, "DB_Players.Get", {}, function()
@@ -91,23 +141,33 @@ function NativeRuntimeApi.Create(settings, diagnostics)
     end
 
     function api.FindNativeActionTool(action, character)
-        local templates = action == "lockpick"
-            and settings.VANILLA_THIEVES_TOOLS_TEMPLATES
-            or settings.VANILLA_TRAP_DISARM_TOOL_TEMPLATES
         return safe(diagnostics, "GetItemByTemplateInPartyInventory", nil, function()
-            for _, template in ipairs(templates or {}) do
-                local item = Osi.GetItemByTemplateInPartyInventory(template, character)
+            for _, candidate in ipairs(actionToolCandidates[action] or {}) do
+                local item = Osi.GetItemByTemplateInPartyInventory(
+                    candidate.template,
+                    character
+                )
                 if item ~= nil and tostring(item) ~= "" then
                     local owner = Osi.GetInventoryOwner(item)
                     return {
                         item = tostring(item),
+                        moduleUuid = candidate.moduleUuid,
                         owner = owner ~= nil and tostring(owner) or nil,
-                        template = template,
+                        provider = candidate.provider,
+                        template = candidate.template,
                     }
                 end
             end
             return nil
         end)
+    end
+
+    function api.GetToolCompatibilityStatus()
+        local status = {}
+        for provider, loaded in pairs(toolCompatibilityStatus) do
+            status[provider] = loaded
+        end
+        return status
     end
 
     function api.IsPlayer(character)

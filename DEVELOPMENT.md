@@ -89,6 +89,29 @@ Unknown builds are never patched. The DLL writes an `unsupported_game_build` sta
 
 The handshake is challenge/acknowledgement based. A status file from an old BG3 process cannot enable delegation. Malformed or partially written action data clears the native action set instead of retaining stale records.
 
+The native worker does not install any code hooks, inspect the server ECS
+system table, or patch game memory during early process startup. It remains
+dormant until the matching PAK's current-version Lua challenge is present.
+The challenge file must have been rewritten after this BG3 process started and
+must not carry a completed native session from an older process. Only then are
+the signature-validated code hooks installed, after which the same server-world
+pointer must pass four consecutive observations. Before either refresh slot is
+written, the server/world objects and the two exact update-pointer slots must be
+committed non-image data memory, their metadata must remain stable across two
+reads, and both original update functions must belong to executable pages in
+the selected BG3 image. Validation deliberately does not require the complete
+ECS systems allocation to share one Windows memory region or protection. A
+transient, stale, or malformed candidate is rejected and polling continues
+without modifying the game.
+
+After installation, the two update slots are health-checked against the exact
+Best of Hands refresh-hook addresses instead of being mistaken for unpatched
+BG3 functions. Their stored original BG3 targets remain executable-validated
+and are never discarded while an installed hook could still call them. A
+temporary null server-world observation does not retire live hooks; a stable
+non-null replacement world drops only the retired slot addresses and reuses
+the callable originals while installing the replacement slots.
+
 ## Architecture
 
 ```text
@@ -151,6 +174,7 @@ native/
   CMakeLists.txt
   include/BridgeProtocol.h
   include/FixedSnapshot.h
+  include/NativeStartupGate.h
   src/BestOfHandsNative.cpp
   tests/BridgeProtocolTests.cpp
 src/BestOfHands/Mods/BestOfHands/
@@ -298,7 +322,9 @@ Server destruction is observational because it precedes BG3's later `RollResult`
 
 `native_roll_bonus_spell_request` records the spell request, caster/source, targets, and whether the accepted request targeted the initiator or specialist. An initiator-targeted delegated bonus is rewritten once to the specialist and emits `native_roll_bonus_retargeted`; caster, originator, spell identity, and resource ownership are unchanged.
 
-Before arming delegation, Lua asks BG3's party-inventory query for the ordinary action tool. If no base-game tool is available, Best of Hands creates no native profile record, publishes the existing vanilla custom-response database result `0`, and calls BG3's native non-modal `ShowError` notification with the built-in generic `CannotUse` key. This is necessary because an untouched request reaches `RequestProcessed(..., 1)` and opens an ordinary empty-tool roll in the current game build. The generic notification is native BG3 behavior, but it is not yet claimed to be the exact action-specific text used by an unmodded no-tool interaction. Best of Hands never chooses or consumes a tool. Optional tool providers must extend this conservative availability boundary as part of their later integration.
+Before arming delegation, Lua asks BG3's party-inventory query for the action tool. Base-game roots are always eligible. Optional roots are eligible only when their owning module is active according to `Ext.Mod.IsModLoaded`; a detection failure retains only the base-game roots. If no eligible tool is available, Best of Hands creates no native profile record, publishes the existing vanilla custom-response database result `0`, and calls BG3's native non-modal `ShowError` notification with the built-in generic `CannotUse` key. This is necessary because an untouched request reaches `RequestProcessed(..., 1)` and opens an ordinary empty-tool roll in the current game build. The generic notification is native BG3 behavior, but it is not yet claimed to be the exact action-specific text used by an unmodded no-tool interaction.
+
+Eternal Lockpick `2.0.8.8` and Eternal Trap Disarm Kit `3.0.8.10` are integrated as independent optional tool providers. Best of Hands recognizes only their loaded module and tool-root identities. It never chooses, consumes, transfers, renews, or recreates their items and never reproduces their reward logic. Once the availability precheck passes, BG3's stock action and each provider's own story remain authoritative. The real roller remains the initiator, so provider-owned failure renewal and success callbacks retain their native recipient.
 
 ## Manual release gates
 
@@ -329,7 +355,7 @@ plates, vents, owned objects, stealth, forced turn-based mode, party changes,
 larger parties, save reload, and multiplayer actors. Run the matrix separately
 on DX11 and Vulkan.
 
-Eternal Lockpick and Eternal Trap Disarm Kit are not part of the initial v2 release gate. Their compatibility matrix begins only after the base native path is stable.
+Run the Eternal compatibility matrix with neither provider, each provider alone, and both together. Confirm the ordinary roll UI uses the provider item's native name and icon, failures renew exactly one provider item through provider-owned behavior, successes preserve it and award provider-owned XP once, and absent providers leave base-game tool behavior unchanged.
 
 ## Versioning
 

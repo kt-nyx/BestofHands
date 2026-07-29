@@ -21,6 +21,7 @@ $nativeCmakePath = Join-Path $root 'native\CMakeLists.txt'
 $nativeResourcePath = Join-Path $root 'native\resources\BestofHands.rc.in'
 $nativeHeaderPath = Join-Path $root 'native\include\BridgeProtocol.h'
 $nativeQuickLockpickHeaderPath = Join-Path $root 'native\include\QuickLockpickState.h'
+$nativeStartupGatePath = Join-Path $root 'native\include\NativeStartupGate.h'
 $nativeSourcePath = Join-Path $root 'native\src\BestOfHandsNative.cpp'
 $nativeBridgePath = Join-Path $moduleRoot 'ScriptExtender\Lua\Server\NativeBridge.lua'
 
@@ -40,6 +41,7 @@ $requiredFiles = @(
     $nativeResourcePath,
     $nativeHeaderPath,
     $nativeQuickLockpickHeaderPath,
+    $nativeStartupGatePath,
     $nativeSourcePath,
     $nativeBridgePath
 )
@@ -127,13 +129,17 @@ if ($cmakeVersion -notmatch '^\d+\.\d+\.\d+$' -or
 $workflowText = Get-Content -LiteralPath $workflowPath -Raw
 $expectedNexusDescription = @'
           description: |-
-            IMPORTANT:
-            You need to MANUALLY install the .dll in the downloaded .zip file after you install this mod via your mod manager! BG3MM will not install it for you!
+            [color=red][b]IMPORTANT:[/b][/color]
+            You need to MANUALLY install the Native Mod portion of this mod from the downloaded zip file.
 
-            Place the .dll in: [BG3 folder]/bin/NativeMods
-            Create the folder if it doesn't exist yet.
+            Place the [b]bin[/b] folder from the zip [b]into your BG3 game folder[/b], overwriting if asked.
+
+            More info in description!
 '@
-if (-not $workflowText.Contains($expectedNexusDescription)) {
+$normalizedWorkflowText = $workflowText.Replace("`r`n", "`n")
+$normalizedExpectedNexusDescription =
+    $expectedNexusDescription.Replace("`r`n", "`n")
+if (-not $normalizedWorkflowText.Contains($normalizedExpectedNexusDescription)) {
     throw 'The Nexus release file description differs from the approved manual-install text.'
 }
 
@@ -157,6 +163,16 @@ $settingsPath = Join-Path $moduleRoot 'ScriptExtender\Lua\Server\Settings.lua'
 $settings = Get-Content -LiteralPath $settingsPath -Raw
 if ($settings -notmatch ('VERSION\s*=\s*"' + [regex]::Escape($semanticVersion) + '"')) {
     throw "Settings.lua does not expose VERSION $semanticVersion."
+}
+foreach ($requiredOptionalToolIdentity in @(
+    'd105067d-1937-b314-78c0-3030e1d887c8',
+    'b9cb9a9a-13e4-42a8-a64a-4c2c2aacc77f',
+    'b7f62d2e-1e48-9f5c-7afb-3ea2367c9f66',
+    'd7ed475d-d353-449f-8798-df9b3a96f0e5'
+)) {
+    if (-not $settings.Contains($requiredOptionalToolIdentity)) {
+        throw "Optional tool provider identity is missing '$requiredOptionalToolIdentity'."
+    }
 }
 if ($version -ne $expectedVersion64) {
     throw "meta.lsx Version64 '$version' does not encode VERSION '$semanticVersion' (expected '$expectedVersion64')."
@@ -350,6 +366,16 @@ $runtimeApiText = Get-Content -LiteralPath $runtimeApiPath -Raw
 if (-not $runtimeApiText.Contains('GetItemByTemplateInPartyInventory')) {
     throw 'Native runtime must use BG3 party inventory for the no-tool delegation precheck.'
 }
+foreach ($requiredOptionalToolSurface in @(
+    'Ext.Mod.IsModLoaded',
+    'OPTIONAL_ACTION_TOOL_PROVIDERS',
+    'GetToolCompatibilityStatus',
+    'optional_tool_provider_loaded'
+)) {
+    if (-not $runtimeApiText.Contains($requiredOptionalToolSurface)) {
+        throw "Optional tool provider surface is missing '$requiredOptionalToolSurface'."
+    }
+}
 foreach ($requiredMissingToolSurface in @(
     'DB_CustomLockpickItemResponse',
     'DB_CustomDisarmTrapResponse',
@@ -400,6 +426,7 @@ if ($nativeResource -notmatch 'RCDATA\s+"@BEST_OF_HANDS_NOTICES_PATH@"') {
 }
 $nativeSource = Get-Content -LiteralPath $nativeSourcePath -Raw
 $nativeQuickLockpickHeader = Get-Content -LiteralPath $nativeQuickLockpickHeaderPath -Raw
+$nativeStartupGate = Get-Content -LiteralPath $nativeStartupGatePath -Raw
 if ($nativeSource.Contains('Log("INFO", "native_quick_lockpick_started"')) {
     throw 'Routine native quick-lockpick monitoring must not use an always-on INFO log.'
 }
@@ -454,10 +481,43 @@ foreach ($requiredNativeMarker in @(
     'g_clientGetCharacterTaskProcedure',
     'StockLockpickTaskConfiguration',
     'activation=engine_set_running_task',
+    'BridgeDocumentAllowsNativeHooks',
+    'BridgeDocumentAllowsWorldHooks',
+    'ValidateWorldHookTarget',
+    'ValidateInstalledSystemHooks',
+    'IsCommittedDataRange',
+    'SystemUpdateSlotOffset',
+    'InstalledSystemHookPointersMatch',
+    'ShouldRetireInstalledWorld',
+    'IsExecutableGameAddress',
+    'server_world_rejected',
+    'installed_hook_integrity_lost',
     'unsupported_game_build'
 )) {
     if (-not $nativeSource.Contains($requiredNativeMarker)) {
         throw "Native source is missing required fail-closed marker '$requiredNativeMarker'."
+    }
+}
+foreach ($requiredStartupGuard in @(
+    'kWorldCandidateStableSamples = 4',
+    'class StableWorldCandidateGate',
+    'SystemUpdateSlotOffset',
+    'InstalledSystemHookPointersMatch',
+    'ShouldRetireInstalledWorld',
+    'probe != std::string_view{"not-started"}'
+)) {
+    if (-not $nativeStartupGate.Contains($requiredStartupGuard)) {
+        throw "Native startup gate is missing '$requiredStartupGuard'."
+    }
+}
+foreach ($forbiddenHookLifecyclePattern in @(
+    'world_system_buffer_not_private_writable',
+    '_system_buffer_not_private_writable',
+    'g_modifierOriginal = nullptr',
+    'g_rollOriginal = nullptr'
+)) {
+    if ($nativeSource.Contains($forbiddenHookLifecyclePattern)) {
+        throw "Native source retains unsafe hook-lifecycle pattern '$forbiddenHookLifecyclePattern'."
     }
 }
 foreach ($forbiddenQuickLockpickNativeSurface in @(

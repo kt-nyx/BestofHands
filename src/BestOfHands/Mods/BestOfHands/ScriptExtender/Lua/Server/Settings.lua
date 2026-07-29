@@ -4,7 +4,7 @@ return {
     MOD_NAME = "Best of Hands",
     LOG_PREFIX = "best_of_hands",
     MODULE_UUID = "8a82593c-28a3-4ed1-8c46-3d9bacff42e1",
-    VERSION = "2.0.1",
+    VERSION = "2.1.0",
 
     ACTIVE_ASSISTANCE_VAR = "ActiveAssistance",
     NATIVE_ACTION_TIMEOUT_MS = 300000,
@@ -25,6 +25,26 @@ return {
     },
     VANILLA_TRAP_DISARM_TOOL_TEMPLATES = {
         "22c74b5e-bef2-41b1-b9ed-f4acc766d4ee",
+    },
+    OPTIONAL_ACTION_TOOL_PROVIDERS = {
+        lockpick = {
+            {
+                id = "eternal_lockpick",
+                moduleUuid = "d105067d-1937-b314-78c0-3030e1d887c8",
+                templates = {
+                    "b9cb9a9a-13e4-42a8-a64a-4c2c2aacc77f",
+                },
+            },
+        },
+        disarm = {
+            {
+                id = "eternal_trap_disarm_kit",
+                moduleUuid = "b7f62d2e-1e48-9f5c-7afb-3ea2367c9f66",
+                templates = {
+                    "d7ed475d-d353-449f-8798-df9b3a96f0e5",
+                },
+            },
+        },
     },
     MISSING_TOOL_ERROR_KEY = "CannotUse",
 

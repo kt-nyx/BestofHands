@@ -52,9 +52,14 @@ local rollRouterAvailable = false
 
 local function statusFields()
     local status = bridge.GetStatus()
+    local compatibility = api.GetToolCompatibilityStatus()
     return {
         bridge_detail = status.detail,
         bridge_state = status.state,
+        eternal_lockpick_loaded =
+            compatibility.eternal_lockpick and 1 or 0,
+        eternal_trap_disarm_kit_loaded =
+            compatibility.eternal_trap_disarm_kit and 1 or 0,
         native_ready = status.ready and 1 or 0,
         native_session = status.nativeSession,
         pending_delegations = interaction.Count(),
