@@ -33,6 +33,8 @@ The party member with highest modifiers is calculated when you start the roll so
 8. Profit!
 
 ## Compatibility
+As of v2.1.0, Best of Hands now has built-in compatibility with Eternal Lockpick or Eternal Trap Disarm Kit, no patch needed.
+
 Best of Hands includes automatic compatibility with [Eternal Lockpick](https://www.nexusmods.com/baldursgate3/mods/15080) and [Eternal Trap Disarm Kit](https://www.nexusmods.com/baldursgate3/mods/15085). Either or both can be active. Best of Hands recognizes their party-shared tools, while the Eternal mods remain entirely responsible for their items, failure renewal, and success rewards.
 
 Best of Hands should be compatible with pretty much everything, so long as it doesn't overlap directly with lockpick/disarm behaviour (e.g. [Auto Lockpicking](https://www.nexusmods.com/baldursgate3/mods/6188), [Use Best Sleight of Hand](https://www.nexusmods.com/baldursgate3/mods/5036)) or mods that alter *all* ability checks (e.g. [Best in Party Skills](https://www.nexusmods.com/baldursgate3/mods/20091)).
