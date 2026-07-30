@@ -2,7 +2,7 @@
 
 cmake_minimum_required(VERSION 3.28)
 
-project(BestOfHandsNative VERSION 2.1.0 LANGUAGES CXX RC)
+project(BestOfHandsNative VERSION 2.1.1 LANGUAGES CXX RC)
 
 option(BEST_OF_HANDS_BUILD_TESTS "Build native unit tests" ON)
 option(BEST_OF_HANDS_PERF_DIAGNOSTICS

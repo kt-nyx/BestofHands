@@ -4,7 +4,7 @@ return {
     MOD_NAME = "Best of Hands",
     LOG_PREFIX = "best_of_hands",
     MODULE_UUID = "8a82593c-28a3-4ed1-8c46-3d9bacff42e1",
-    VERSION = "2.1.0",
+    VERSION = "2.1.1",
 
     ACTIVE_ASSISTANCE_VAR = "ActiveAssistance",
     NATIVE_ACTION_TIMEOUT_MS = 300000,

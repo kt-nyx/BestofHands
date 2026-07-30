@@ -396,9 +396,11 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
         end
 
         local targets = {}
-        local lockEntities =
-            Ext.Entity.GetAllEntitiesWithComponent("Lock") or {}
-        for _, entity in pairs(lockEntities) do
+        -- Lock is persistent configuration (key/DC), not current lock state.
+        -- LockBoost exists only while the object is actually locked.
+        local lockedEntities =
+            Ext.Entity.GetAllEntitiesWithComponent("LockBoost") or {}
+        for _, entity in pairs(lockedEntities) do
             local handle = entityHandle(entity)
             local lock = safeField(entity, "Lock")
             local key = fixedString(lock and safeField(lock, "Key_M"))
@@ -413,9 +415,9 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
                 or (guid ~= nil
                     and invalidatedLockedTargets[guid] == true)
             -- An authoritative successful lockpick can arrive before the
-            -- replicated client Lock component is destroyed. Keep the target
-            -- excluded until a future Lock OnCreate proves that it was
-            -- genuinely locked again.
+            -- replicated client LockBoost component is destroyed. Keep the
+            -- target excluded until a future LockBoost OnCreate proves that
+            -- it was genuinely locked again.
             local excluded = (key ~= "" and availableKeys[key] == true)
                 or invalidated
             if not excluded
@@ -835,6 +837,8 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
             "IsInTurnBasedMode",
             "Key",
             "InventoryTopOwner",
+            -- Key/DC metadata can change without changing the live LockBoost.
+            "Lock",
         }
         for _, componentName in ipairs(snapshotComponents) do
             Ext.Entity.OnCreate(componentName, protected(
@@ -850,8 +854,8 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
                 scheduleLeftClickSnapshot
             ))
         end
-        Ext.Entity.OnCreate("Lock", protected(
-            "client_left_click_lock_create_failed",
+        Ext.Entity.OnCreate("LockBoost", protected(
+            "client_left_click_lock_boost_create_failed",
             function(entity)
                 local handle = entityHandle(entity)
                 local guid = objectGuid(entityGuid(entity))
@@ -864,12 +868,12 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
                 scheduleLeftClickSnapshot()
             end
         ))
-        Ext.Entity.OnChange("Lock", protected(
-            "client_left_click_lock_change_failed",
+        Ext.Entity.OnChange("LockBoost", protected(
+            "client_left_click_lock_boost_change_failed",
             scheduleLeftClickSnapshot
         ))
-        Ext.Entity.OnDestroy("Lock", protected(
-            "client_left_click_lock_destroy_failed",
+        Ext.Entity.OnDestroy("LockBoost", protected(
+            "client_left_click_lock_boost_destroy_failed",
             scheduleLeftClickSnapshot
         ))
         Ext.Events.SessionLoaded:Subscribe(scheduleLeftClickSnapshot)

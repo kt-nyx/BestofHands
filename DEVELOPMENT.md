@@ -5,7 +5,10 @@ Best of Hands 2.0 consists of a normal BG3 PAK and a small Windows native plugin
 ## Runtime contract
 
 Client Lua publishes a compact snapshot of eligible locally controlled
-initiator handles and replicated locked targets. Targets for which the
+initiator handles and replicated currently locked targets. It derives current
+lock state from the replicated `LockBoost` marker, not the persistent `Lock`
+key/DC configuration that remains on lock-capable objects after they are
+unlocked. Targets for which the
 controlled party owns the matching key are excluded so BG3's automatic
 key-use path remains vanilla. Initiators in combat or forced turn-based mode
 are also excluded. Identical snapshots are not rewritten, and a failed
@@ -38,9 +41,9 @@ published with one guarded 19-byte write.
 After any authoritative lockpick success, including a direct roll by the
 already-selected specialist, server Lua immediately
 removes that target from the owning client's left-click snapshot. The client
-tombstones its stable UUID and handle so a lagging replicated `Lock` change
+tombstones its stable UUID and handle so a lagging replicated `LockBoost` change
 cannot reclassify the now-unlocked object before the player opens it. A future
-`Lock` creation, session load, or reset clears the tombstone, preserving
+`LockBoost` creation, session load, or reset clears the tombstone, preserving
 genuine relocking and save transitions.
 
 The older failed-`UseFinished` client request remains only as a fail-open

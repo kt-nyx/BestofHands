@@ -742,7 +742,7 @@ test("native bridge requires a live matching challenge acknowledgement", functio
         NATIVE_HANDSHAKE_ATTEMPTS = 2,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.1.0",
+        VERSION = "2.1.1",
     }
     local bridge = NativeBridge.Create(settings, api, recordingDiagnostics())
     bridge.BeginHandshake()
@@ -750,7 +750,7 @@ test("native bridge requires a live matching challenge acknowledgement", functio
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
         "protocol=7",
-        "version=2.1.0",
+        "version=2.1.1",
         "state=ready",
         "session=123-456",
         "pid=123",
@@ -884,14 +884,14 @@ test("native bridge cannot report ready when its session acknowledgement write f
         NATIVE_HANDSHAKE_ATTEMPTS = 1,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.1.0",
+        VERSION = "2.1.1",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, diagnostics)
     bridge.BeginHandshake()
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=7", "version=2.1.0", "state=ready", "session=session-a",
+        "protocol=7", "version=2.1.1", "state=ready", "session=session-a",
         "pid=10", "hooks=" .. NativeBridge.REQUIRED_HOOKS,
         "features=" .. NativeBridge.REQUIRED_FEATURES,
         "ack=" .. probe, "detail=ok", "end=1", "",
@@ -931,7 +931,7 @@ test("native bridge fails closed and warns once when the DLL is unavailable", fu
         NATIVE_HANDSHAKE_ATTEMPTS = 1,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.1.0",
+        VERSION = "2.1.1",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, recordingDiagnostics())
@@ -959,14 +959,14 @@ test("native bridge disables delegation if its acknowledgement is replaced", fun
         NATIVE_HANDSHAKE_ATTEMPTS = 1,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.1.0",
+        VERSION = "2.1.1",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, recordingDiagnostics())
     bridge.BeginHandshake()
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=7", "version=2.1.0", "state=ready", "session=session-a",
+        "protocol=7", "version=2.1.1", "state=ready", "session=session-a",
         "pid=10", "hooks=" .. NativeBridge.REQUIRED_HOOKS,
         "features=" .. NativeBridge.REQUIRED_FEATURES,
         "ack=" .. probe, "detail=ok", "end=1", "",
@@ -974,7 +974,7 @@ test("native bridge disables delegation if its acknowledgement is replaced", fun
     scheduled[1]()
     assertEqual(true, bridge.IsReady(), "initially ready")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=7", "version=2.1.0", "state=ready", "session=session-a",
+        "protocol=7", "version=2.1.1", "state=ready", "session=session-a",
         "pid=10", "hooks=" .. NativeBridge.REQUIRED_HOOKS,
         "features=" .. NativeBridge.REQUIRED_FEATURES,
         "ack=replaced-probe", "detail=another bridge replaced the ack", "end=1", "",
@@ -1015,7 +1015,7 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
             "protocol=7",
-            "pak_version=2.1.0",
+            "pak_version=2.1.1",
             "probe=test",
             "native_session=44-55",
             "trace=0",
@@ -1080,7 +1080,7 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
     }
     local bridge = NativePresentationBridge.Start({
         TRACE_EVENTS = false,
-        VERSION = "2.1.0",
+        VERSION = "2.1.1",
     })
     local component = {
         RollContext = 5,
@@ -1183,7 +1183,7 @@ test("client bridge prepares and queues BG3's stock lockpick task", function()
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
             "protocol=7",
-            "pak_version=2.1.0",
+            "pak_version=2.1.1",
             "probe=test",
             "native_session=44-55",
             "trace=0",
@@ -1235,7 +1235,7 @@ test("client bridge prepares and queues BG3's stock lockpick task", function()
     }
     NativePresentationBridge.Start({
         TRACE_EVENTS = false,
-        VERSION = "2.1.0",
+        VERSION = "2.1.1",
     }, channel)
     assertEqual("function", type(handler), "quick-lockpick client handler registered")
     handler({
@@ -1312,7 +1312,7 @@ test("client bridge rejects malformed or unpublishable fallback requests", funct
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
             "protocol=7",
-            "pak_version=2.1.0",
+            "pak_version=2.1.1",
             "probe=test",
             "native_session=44-55",
             "trace=0",
@@ -1357,7 +1357,7 @@ test("client bridge rejects malformed or unpublishable fallback requests", funct
     }
     NativePresentationBridge.Start({
         TRACE_EVENTS = false,
-        VERSION = "2.1.0",
+        VERSION = "2.1.1",
     }, channel)
 
     local function start(request, actor, targetValue)
@@ -1476,6 +1476,7 @@ test("client bridge publishes pre-use left-click interception state", function()
     })
     actorEntity.ClientCharacter = { InputController = controller }
     targetEntity.Lock = { Key_M = "TEST_KEY" }
+    targetEntity.LockBoost = { Lock = targetEntity.guid }
     targetEntity.GetNetId = function() return 88 end
     keyEntity.Key = { Key = "TEST_KEY" }
     keyEntity.InventoryTopOwner = { TopOwner = actorEntity }
@@ -1484,13 +1485,14 @@ test("client bridge publishes pre-use left-click interception state", function()
         ClientControl = { actorEntity },
         Key = { keyEntity },
         Lock = { targetEntity },
+        LockBoost = { targetEntity },
     }
     local callbacks = {}
     local nextTicks = {}
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
             "protocol=7",
-            "pak_version=2.1.0",
+            "pak_version=2.1.1",
             "probe=test",
             "native_session=44-55",
             "trace=0",
@@ -1541,7 +1543,7 @@ test("client bridge publishes pre-use left-click interception state", function()
     }
     NativePresentationBridge.Start({
         TRACE_EVENTS = false,
-        VERSION = "2.1.0",
+        VERSION = "2.1.1",
     }, channel)
     table.remove(nextTicks, 1)()
     assertContains(
@@ -1571,18 +1573,24 @@ test("client bridge publishes pre-use left-click interception state", function()
         files["BestOfHandsNative.leftclick"]:find(
             "locked=" .. targetEntity.handle, 1, true),
         "successful lockpick removes the stale replicated lock immediately")
-    callbacks.LockChange(targetEntity)
+    callbacks.LockBoostChange(targetEntity)
     table.remove(nextTicks, 1)()
     assertEqual(nil,
         files["BestOfHandsNative.leftclick"]:find(
             "locked=" .. targetEntity.handle, 1, true),
-        "stale Lock changes cannot re-add an authoritatively unlocked target")
+        "stale LockBoost changes cannot re-add an authoritatively unlocked target")
     callbacks.LockCreate(targetEntity)
+    table.remove(nextTicks, 1)()
+    assertEqual(nil,
+        files["BestOfHandsNative.leftclick"]:find(
+            "locked=" .. targetEntity.handle, 1, true),
+        "persistent Lock metadata cannot revive an unlocked target")
+    callbacks.LockBoostCreate(targetEntity)
     table.remove(nextTicks, 1)()
     assertContains(
         files["BestOfHandsNative.leftclick"],
         "locked=" .. targetEntity.handle .. "\t88",
-        "a future Lock creation permits a genuinely relocked target")
+        "a future LockBoost creation permits a genuinely relocked target")
 
     actorEntity.IsInCombat = {}
     callbacks.IsInCombatCreate()
@@ -1619,6 +1627,10 @@ test("client left-click snapshot isolates actors, keys, targets, and sessions", 
         "21000000-0000-0000-0000-000000000013",
         "01c0000100000313"
     )
+    local unlockedDoor = entity(
+        "21000000-0000-0000-0000-000000000014",
+        "01c0000100000314"
+    )
     local keyEntity = entity(
         "21000000-0000-0000-0000-000000000021",
         "01c0000100000411"
@@ -1627,8 +1639,10 @@ test("client left-click snapshot isolates actors, keys, targets, and sessions", 
     keyedTarget.Lock = { Key_M = "KEYED_TARGET" }
     freeTarget.Lock = { Key_M = "" }
     invalidTarget.Lock = { Key_M = "" }
+    unlockedDoor.Lock = { Key_M = "" }
     keyedTarget.GetNetId = function() return 111 end
     freeTarget.GetNetId = function() return 112 end
+    unlockedDoor.GetNetId = function() return 113 end
     local invalidTargetNetId = 0
     invalidTarget.GetNetId = function()
         if invalidTargetNetId == "throw" then
@@ -1642,7 +1656,8 @@ test("client left-click snapshot isolates actors, keys, targets, and sessions", 
     local componentEntities = {
         ClientControl = { actorA, actorB },
         Key = { keyEntity },
-        Lock = { keyedTarget, freeTarget, invalidTarget },
+        Lock = { keyedTarget, freeTarget, invalidTarget, unlockedDoor },
+        LockBoost = { keyedTarget, freeTarget, invalidTarget },
     }
     local byGuid = {
         [keyedTarget.guid] = keyedTarget,
@@ -1659,7 +1674,7 @@ test("client left-click snapshot isolates actors, keys, targets, and sessions", 
     local function actions(session)
         return table.concat({
             "protocol=7",
-            "pak_version=2.1.0",
+            "pak_version=2.1.1",
             "probe=test",
             "native_session=" .. session,
             "trace=0",
@@ -1722,7 +1737,7 @@ test("client left-click snapshot isolates actors, keys, targets, and sessions", 
     }
     NativePresentationBridge.Start({
         TRACE_EVENTS = false,
-        VERSION = "2.1.0",
+        VERSION = "2.1.1",
     }, channel)
 
     local function flush()
@@ -1750,6 +1765,9 @@ test("client left-click snapshot isolates actors, keys, targets, and sessions", 
     assertEqual(nil,
         snapshot():find("locked=" .. invalidTarget.handle, 1, true),
         "invalid network ID is excluded")
+    assertEqual(nil,
+        snapshot():find("locked=" .. unlockedDoor.handle, 1, true),
+        "persistent Lock metadata cannot classify an unlocked door as locked")
     for _, invalidNetId in ipairs({
         -1,
         1.5,
@@ -1759,7 +1777,7 @@ test("client left-click snapshot isolates actors, keys, targets, and sessions", 
         "throw",
     }) do
         invalidTargetNetId = invalidNetId
-        callbacks.LockChange(invalidTarget)
+        callbacks.LockBoostChange(invalidTarget)
         flush()
         assertEqual(nil,
             snapshot():find("locked=" .. invalidTarget.handle, 1, true),
@@ -1784,8 +1802,21 @@ test("client left-click snapshot isolates actors, keys, targets, and sessions", 
         "eligible=" .. actorB.handle .. "\t1",
         "leaving turn-based mode restores eligibility")
 
-    callbacks.LockChange(freeTarget)
-    callbacks.LockChange(freeTarget)
+    componentEntities.LockBoost = { keyedTarget, invalidTarget }
+    callbacks.LockBoostDestroy(freeTarget)
+    flush()
+    assertEqual(nil,
+        snapshot():find("locked=" .. freeTarget.handle, 1, true),
+        "removing live lock state removes a lock-capable target")
+    componentEntities.LockBoost = { keyedTarget, freeTarget, invalidTarget }
+    callbacks.LockBoostCreate(freeTarget)
+    flush()
+    assertContains(snapshot(),
+        "locked=" .. freeTarget.handle .. "\t112",
+        "creating live lock state restores a genuinely locked target")
+
+    callbacks.LockBoostChange(freeTarget)
+    callbacks.LockBoostChange(freeTarget)
     callbacks.KeyChange(keyEntity)
     assertEqual(1, #nextTicks,
         "multiple component changes coalesce into one snapshot refresh")
@@ -1802,21 +1833,26 @@ test("client left-click snapshot isolates actors, keys, targets, and sessions", 
     assertEqual(nil,
         snapshot():find("locked=" .. freeTarget.handle, 1, true),
         "target invalidation removes only the unlocked target")
-    callbacks.LockChange(freeTarget)
+    callbacks.LockBoostChange(freeTarget)
     flush()
     assertEqual(nil,
         snapshot():find("locked=" .. freeTarget.handle, 1, true),
         "late changes cannot revive the invalidated target")
-    callbacks.LockCreate(keyedTarget)
+    callbacks.LockBoostCreate(keyedTarget)
     flush()
     assertEqual(nil,
         snapshot():find("locked=" .. freeTarget.handle, 1, true),
-        "another target's Lock creation cannot clear the tombstone")
+        "another target's LockBoost creation cannot clear the tombstone")
     callbacks.LockCreate(freeTarget)
+    flush()
+    assertEqual(nil,
+        snapshot():find("locked=" .. freeTarget.handle, 1, true),
+        "Lock metadata creation cannot clear a target tombstone")
+    callbacks.LockBoostCreate(freeTarget)
     flush()
     assertContains(snapshot(),
         "locked=" .. freeTarget.handle .. "\t112",
-        "matching Lock creation permits genuine relocking")
+        "matching LockBoost creation permits genuine relocking")
 
     byGuid[freeTarget.guid] = nil
     handler({
@@ -1828,7 +1864,7 @@ test("client left-click snapshot isolates actors, keys, targets, and sessions", 
         snapshot():find("locked=" .. freeTarget.handle, 1, true),
         "UUID invalidation remains immediate if handle lookup is unavailable")
     byGuid[freeTarget.guid] = freeTarget
-    callbacks.LockCreate(freeTarget)
+    callbacks.LockBoostCreate(freeTarget)
     flush()
 
     failSnapshotSave = true
@@ -1895,12 +1931,12 @@ test("client left-click snapshot isolates actors, keys, targets, and sessions", 
 
     local getAllEntities = Ext.Entity.GetAllEntitiesWithComponent
     Ext.Entity.GetAllEntitiesWithComponent = function(component)
-        if component == "Lock" then
+        if component == "LockBoost" then
             error("simulated entity enumeration failure")
         end
         return getAllEntities(component)
     end
-    callbacks.LockChange(freeTarget)
+    callbacks.LockBoostChange(freeTarget)
     flush()
     assertEqual(1, #timers,
         "entity enumeration failure enters bounded snapshot retry")
