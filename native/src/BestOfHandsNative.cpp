@@ -8,6 +8,7 @@
 
 #include <Windows.h>
 #include <ShlObj.h>
+#include <winver.h>
 #include <safetyhook.hpp>
 
 #include <algorithm>
@@ -15,6 +16,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cwchar>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -408,6 +410,11 @@ constexpr std::array<std::byte, 5> kClientRollSourceContextSignature{
     std::byte{0xe8}, std::byte{0x83}, std::byte{0xa0},
     std::byte{0xea}, std::byte{0xff},
 };
+constexpr std::array<std::byte, 5>
+kClientRollSourceContextDx7398727Signature{
+    std::byte{0xe8}, std::byte{0x43}, std::byte{0xa0},
+    std::byte{0xea}, std::byte{0xff},
+};
 constexpr std::array<std::byte, 9> kClientVmRollModifierFactorySignature{
     std::byte{0x48}, std::byte{0x83}, std::byte{0xec}, std::byte{0x28},
     std::byte{0xb9}, std::byte{0xf0}, std::byte{0x01}, std::byte{0x00},
@@ -492,6 +499,7 @@ struct BuildSpec {
     std::uintptr_t profileMathHookRva;
     std::uintptr_t clientRollPresentationHookRva;
     std::uintptr_t clientRollSourceContextHookRva;
+    std::array<std::byte, 5> clientRollSourceContextSignature;
     std::uintptr_t clientRollAggregateHookRva;
     std::uintptr_t clientRollStartHookRva;
     std::uintptr_t clientRollPayloadReadyHookRva;
@@ -503,7 +511,6 @@ struct BuildSpec {
     std::uintptr_t clientRollBonusPreserveMissingHookRva;
     std::uintptr_t clientAdvantagePreserveMatchedHookRva;
     std::uintptr_t clientAdvantagePreserveMissingHookRva;
-    std::uintptr_t clientRollBonusPreserveSelectedHookRva;
     std::uintptr_t clientRollBonusRendererAddHookRva;
     std::uintptr_t clientRollBonusReconcileEndHookRva;
     std::uintptr_t clientRollFinalizeHookRva;
@@ -526,21 +533,31 @@ struct BuildSpec {
     std::uintptr_t clientSetRunningTaskRva;
 };
 
-// Patch 8 / Hotfix 36, game version v4.72.9.685. Each entry is guarded by
-// executable identity, PE timestamp, SizeOfImage and exact hook-site bytes.
-// Unknown or changed binaries remain completely unmodified.
+struct ExecutableIdentity {
+    std::wstring name;
+    std::uint32_t timestamp{};
+    std::uint32_t imageSize{};
+    std::string productVersion{"unavailable"};
+    std::string fileVersion{"unavailable"};
+    bool peValid{};
+};
+
+// Exact supported builds. Each entry is guarded by executable identity, PE
+// timestamp, SizeOfImage, and exact hook-site bytes. Unknown or changed
+// binaries remain completely unmodified.
 constexpr BuildSpec kBuilds[] = {
     {
         L"bg3_dx11.exe", 0x69b45801, 0x06592000,
         0x05fcf2d0, 0x2b0,
         0x060b7d04, 0x0602ef7c,
         0x032cb8fa, 0x0328e0d4,
-        0x01540996, 0x01540a28, 0x01546449, 0x015414d0,
+        0x01540996, 0x01540a28, kClientRollSourceContextSignature,
+        0x01546449, 0x015414d0,
         0x015418f6, 0x01541905,
         0x01541f7e,
         0x01541f56, 0x01546a70, 0x01546b02, 0x01546b3c,
         0x01546c96, 0x01546cd0,
-        0x0154694c, 0x01690292,
+        0x01690292,
         0x01541f61, 0x01542128,
         0x020e6fb0, 0x05fee9e8, 0x015485c0,
         0x015486e0, 0x01548530, 0x0133ae40, 0x0133a790,
@@ -554,12 +571,13 @@ constexpr BuildSpec kBuilds[] = {
         0x06258c38, 0x2b0,
         0x063416c4, 0x062b8934,
         0x032cb3ea, 0x0328dbc4,
-        0x01541896, 0x01541928, 0x01547349, 0x015423d0,
+        0x01541896, 0x01541928, kClientRollSourceContextSignature,
+        0x01547349, 0x015423d0,
         0x015427f6, 0x01542805,
         0x01542e7e,
         0x01542e56, 0x01547970, 0x01547a02, 0x01547a3c,
         0x01547b96, 0x01547bd0,
-        0x0154784c, 0x01691172,
+        0x01691172,
         0x01542e61, 0x01543028,
         0x020e7c70, 0x062782a0, 0x015494c0,
         0x015495e0, 0x01549430, 0x0133bd50, 0x0133b6a0,
@@ -567,6 +585,47 @@ constexpr BuildSpec kBuilds[] = {
         0x012e78a0, 0x01480880, 0x04128e60,
         0x01b3b4bf,
         0x01b399a0, 0x01b38f20, 0x01b38f40,
+    },
+    {
+        L"bg3_dx11.exe", 0x6a21507e, 0x065b8000,
+        0x05ff23d0, 0x2b0,
+        0x060db4e4, 0x0605255c,
+        0x032d3f5a, 0x03296734,
+        0x015470d6, 0x01547168,
+        kClientRollSourceContextDx7398727Signature,
+        0x0154cb89, 0x01547c10,
+        0x01548036, 0x01548045,
+        0x015486be,
+        0x01548696, 0x0154d1b0, 0x0154d242, 0x0154d27c,
+        0x0154d3d6, 0x0154d410,
+        0x01696ef2,
+        0x015486a1, 0x01548868,
+        0x020eed40, 0x06011c98, 0x0154ed00,
+        0x0154ee20, 0x0154ec70, 0x01341500, 0x01340e50,
+        0x0154eb60, 0x0154ffc0, 0x01226800,
+        0x012ed050, 0x014860c0, 0x040f9b80,
+        0x01b41d0f,
+        0x01b401f0, 0x01b3f770, 0x01b3f790,
+    },
+    {
+        L"bg3.exe", 0x6a214f72, 0x0683f000,
+        0x06279d18, 0x2b0,
+        0x06362cb4, 0x062d9d2c,
+        0x032d2c9a, 0x03295474,
+        0x01547a96, 0x01547b28, kClientRollSourceContextSignature,
+        0x0154d549, 0x015485d0,
+        0x015489f6, 0x01548a05,
+        0x0154907e,
+        0x01549056, 0x0154db70, 0x0154dc02, 0x0154dc3c,
+        0x0154dd96, 0x0154ddd0,
+        0x01697822,
+        0x01549061, 0x01549228,
+        0x020ef100, 0x06299580, 0x0154f6c0,
+        0x0154f7e0, 0x0154f630, 0x01341f50, 0x013418a0,
+        0x0154f520, 0x01550980, 0x01227250,
+        0x012edaa0, 0x01486a80, 0x0412efc0,
+        0x01b4282f,
+        0x01b40d10, 0x01b40290, 0x01b402b0,
     },
 };
 
@@ -610,6 +669,7 @@ using ClientModifierCollectionSnapshot =
 
 HMODULE g_gameModule{};
 BuildSpec const* g_build{};
+ExecutableIdentity g_executableIdentity;
 std::atomic_bool g_stop{false};
 std::atomic_bool g_codeHooksReady{false};
 std::atomic_bool g_hooksReady{false};
@@ -737,6 +797,8 @@ std::unordered_map<std::uintptr_t, std::string>
 std::vector<CachedRollBonusPresentation>
     g_cachedRollBonusPresentations;
 std::vector<std::uintptr_t> g_deferredClientViewModelReleases;
+
+bool IsReadable(void const* pointer, std::size_t size);
 
 // The opt-in profiler touches only fixed atomic storage and
 // QueryPerformanceCounter in hot hooks. The worker thread formats and writes
@@ -993,11 +1055,157 @@ std::string Narrow(std::wstring_view value)
     return result;
 }
 
+std::string FormatFixedVersion(std::uint32_t mostSignificant,
+    std::uint32_t leastSignificant)
+{
+    return std::to_string(HIWORD(mostSignificant)) + "."
+        + std::to_string(LOWORD(mostSignificant)) + "."
+        + std::to_string(HIWORD(leastSignificant)) + "."
+        + std::to_string(LOWORD(leastSignificant));
+}
+
+std::optional<std::string> QueryVersionString(
+    std::vector<std::byte> const& versionData,
+    WORD language, WORD codePage, wchar_t const* field)
+{
+    wchar_t query[96]{};
+    if (swprintf_s(query, L"\\StringFileInfo\\%04x%04x\\%s",
+            language, codePage, field) < 0) {
+        return std::nullopt;
+    }
+    wchar_t* value{};
+    UINT valueCharacters{};
+    if (VerQueryValueW(versionData.data(), query,
+            reinterpret_cast<void**>(&value), &valueCharacters) == FALSE
+        || value == nullptr || valueCharacters == 0) {
+        return std::nullopt;
+    }
+    std::wstring_view text(value, valueCharacters);
+    while (!text.empty() && text.back() == L'\0') {
+        text.remove_suffix(1);
+    }
+    if (text.empty()
+        || text.find_first_of(L"\r\n|") != std::wstring_view::npos) {
+        return std::nullopt;
+    }
+    auto const narrow = Narrow(text);
+    if (narrow.empty()) {
+        return std::nullopt;
+    }
+    return narrow;
+}
+
+ExecutableIdentity CaptureExecutableIdentity()
+{
+    ExecutableIdentity identity;
+    wchar_t executable[MAX_PATH]{};
+    auto const pathLength = GetModuleFileNameW(
+        g_gameModule, executable, MAX_PATH);
+    if (pathLength != 0 && pathLength < MAX_PATH) {
+        identity.name = fs::path(executable).filename().wstring();
+    }
+
+    auto const dos = reinterpret_cast<IMAGE_DOS_HEADER const*>(g_gameModule);
+    if (IsReadable(dos, sizeof(*dos))
+        && dos->e_magic == IMAGE_DOS_SIGNATURE) {
+        auto const nt = reinterpret_cast<IMAGE_NT_HEADERS64 const*>(
+            reinterpret_cast<std::byte const*>(g_gameModule)
+            + dos->e_lfanew);
+        if (IsReadable(nt, sizeof(*nt))
+            && nt->Signature == IMAGE_NT_SIGNATURE) {
+            identity.timestamp = nt->FileHeader.TimeDateStamp;
+            identity.imageSize = nt->OptionalHeader.SizeOfImage;
+            identity.peValid = true;
+        }
+    }
+
+    if (pathLength == 0 || pathLength >= MAX_PATH) {
+        return identity;
+    }
+    DWORD ignored{};
+    auto const versionBytes = GetFileVersionInfoSizeW(executable, &ignored);
+    if (versionBytes == 0) {
+        return identity;
+    }
+    std::vector<std::byte> versionData(versionBytes);
+    if (GetFileVersionInfoW(
+            executable, 0, versionBytes, versionData.data()) == FALSE) {
+        return identity;
+    }
+    void* translationData{};
+    UINT translationBytes{};
+    if (VerQueryValueW(versionData.data(), L"\\VarFileInfo\\Translation",
+            &translationData, &translationBytes) != FALSE
+        && translationData != nullptr) {
+        auto const translations = std::span(
+            static_cast<WORD const*>(translationData),
+            translationBytes / sizeof(WORD));
+        for (std::size_t index = 0; index + 1 < translations.size();
+             index += 2) {
+            if (identity.productVersion == "unavailable") {
+                if (auto const value = QueryVersionString(versionData,
+                        translations[index], translations[index + 1],
+                        L"ProductVersion")) {
+                    identity.productVersion = *value;
+                }
+            }
+            if (identity.fileVersion == "unavailable") {
+                if (auto const value = QueryVersionString(versionData,
+                        translations[index], translations[index + 1],
+                        L"FileVersion")) {
+                    identity.fileVersion = *value;
+                }
+            }
+            if (identity.productVersion != "unavailable"
+                && identity.fileVersion != "unavailable") {
+                break;
+            }
+        }
+    }
+
+    VS_FIXEDFILEINFO* fixedInfo{};
+    UINT fixedInfoBytes{};
+    if (VerQueryValueW(versionData.data(), L"\\",
+            reinterpret_cast<void**>(&fixedInfo), &fixedInfoBytes) != FALSE
+        && fixedInfo != nullptr
+        && fixedInfoBytes >= sizeof(VS_FIXEDFILEINFO)
+        && fixedInfo->dwSignature == 0xfeef04bd) {
+        if (identity.productVersion == "unavailable") {
+            identity.productVersion = FormatFixedVersion(
+                fixedInfo->dwProductVersionMS, fixedInfo->dwProductVersionLS);
+        }
+        if (identity.fileVersion == "unavailable") {
+            identity.fileVersion = FormatFixedVersion(
+                fixedInfo->dwFileVersionMS, fixedInfo->dwFileVersionLS);
+        }
+    }
+    return identity;
+}
+
 std::string Hex(std::uint64_t value)
 {
     std::ostringstream stream;
     stream << std::hex << std::setfill('0') << std::setw(16) << value;
     return stream.str();
+}
+
+std::string Hex32(std::uint32_t value)
+{
+    std::ostringstream stream;
+    stream << std::hex << std::setfill('0') << std::setw(8) << value;
+    return stream.str();
+}
+
+std::string ExecutableIdentityFields()
+{
+    return "executable="
+        + (g_executableIdentity.name.empty()
+            ? std::string("unavailable")
+            : Narrow(g_executableIdentity.name))
+        + "|pe_timestamp=0x" + Hex32(g_executableIdentity.timestamp)
+        + "|size_of_image=0x" + Hex32(g_executableIdentity.imageSize)
+        + "|product_version=" + g_executableIdentity.productVersion
+        + "|file_version=" + g_executableIdentity.fileVersion;
 }
 
 template <std::size_t Size>
@@ -2013,6 +2221,16 @@ void WriteStatus(std::string_view state, std::string_view detail, std::string_vi
            << "state=" << state << "\n"
            << "session=" << Narrow(g_session) << "\n"
            << "pid=" << GetCurrentProcessId() << "\n"
+           << "executable="
+           << (g_executableIdentity.name.empty()
+                ? "unavailable" : Narrow(g_executableIdentity.name))
+           << "\n"
+           << "pe_timestamp=0x" << Hex32(g_executableIdentity.timestamp)
+           << "\n"
+           << "size_of_image=0x" << Hex32(g_executableIdentity.imageSize)
+           << "\n"
+           << "product_version=" << g_executableIdentity.productVersion << "\n"
+           << "file_version=" << g_executableIdentity.fileVersion << "\n"
            << "hooks=" << (g_hooksReady.load() ? kReportedHooks : "none") << "\n"
            << "features=" << kReportedFeatures << "\n"
            << "ack=" << ack << "\n"
@@ -5961,7 +6179,7 @@ bool InstallCodeHooks(std::string& failure)
              kClientRollPresentationSignature,
              "client_roll_presentation", failure)
         || !ValidateHookSite(g_build->clientRollSourceContextHookRva,
-             kClientRollSourceContextSignature,
+             g_build->clientRollSourceContextSignature,
              "client_roll_source_context", failure)
         || !ValidateHookSite(g_build->clientRollAggregateHookRva,
             kClientRollAggregateSignature,
@@ -6785,22 +7003,13 @@ bool InstallSystemHooks(void* world, std::string& failure)
 
 BuildSpec const* DetectBuild()
 {
-    auto const dos = reinterpret_cast<IMAGE_DOS_HEADER const*>(g_gameModule);
-    if (!IsReadable(dos, sizeof(*dos)) || dos->e_magic != IMAGE_DOS_SIGNATURE) {
+    if (!g_executableIdentity.peValid) {
         return nullptr;
     }
-    auto const nt = reinterpret_cast<IMAGE_NT_HEADERS64 const*>(
-        reinterpret_cast<std::byte const*>(g_gameModule) + dos->e_lfanew);
-    if (!IsReadable(nt, sizeof(*nt)) || nt->Signature != IMAGE_NT_SIGNATURE) {
-        return nullptr;
-    }
-    wchar_t executable[MAX_PATH]{};
-    GetModuleFileNameW(g_gameModule, executable, MAX_PATH);
-    auto const name = fs::path(executable).filename().wstring();
     for (auto const& build : kBuilds) {
-        if (_wcsicmp(name.c_str(), build.executable) == 0
-            && nt->FileHeader.TimeDateStamp == build.timestamp
-            && nt->OptionalHeader.SizeOfImage == build.imageSize) {
+        if (_wcsicmp(g_executableIdentity.name.c_str(), build.executable) == 0
+            && g_executableIdentity.timestamp == build.timestamp
+            && g_executableIdentity.imageSize == build.imageSize) {
             return &build;
         }
     }
@@ -6878,15 +7087,16 @@ DWORD WINAPI Worker(void*)
             + kMaximumCachedRollBonusPresentations);
     }
 
+    g_executableIdentity = CaptureExecutableIdentity();
     g_build = DetectBuild();
     if (g_build == nullptr) {
         WriteStatus("unsupported_game_build",
             "no validated signature set matches this executable", "");
-        Log("ERROR", "unsupported_game_build");
+        Log("ERROR", "unsupported_game_build", ExecutableIdentityFields());
         return 2;
     }
     Log("INFO", "loaded", "version=" + std::string(boh::kPluginVersion)
-        + "|executable=" + Narrow(g_build->executable));
+        + "|" + ExecutableIdentityFields());
     if constexpr (kPerfDiagnostics) {
         Log("INFO", "perf_diagnostics_enabled",
             "hot_path=fixed_atomic_qpc"

@@ -2,7 +2,7 @@
 
 cmake_minimum_required(VERSION 3.28)
 
-project(BestOfHandsNative VERSION 2.1.1 LANGUAGES CXX RC)
+project(BestOfHandsNative VERSION 2.1.2 LANGUAGES CXX RC)
 
 option(BEST_OF_HANDS_BUILD_TESTS "Build native unit tests" ON)
 option(BEST_OF_HANDS_PERF_DIAGNOSTICS
@@ -48,7 +48,7 @@ add_library(BestOfHandsNative SHARED
 
 target_include_directories(BestOfHandsNative PRIVATE include)
 target_compile_features(BestOfHandsNative PRIVATE cxx_std_23)
-target_link_libraries(BestOfHandsNative PRIVATE safetyhook::safetyhook)
+target_link_libraries(BestOfHandsNative PRIVATE safetyhook::safetyhook Version.lib)
 target_compile_definitions(BestOfHandsNative PRIVATE
     BEST_OF_HANDS_PERF_DIAGNOSTICS=$<BOOL:${BEST_OF_HANDS_PERF_DIAGNOSTICS}>
     WIN32_LEAN_AND_MEAN

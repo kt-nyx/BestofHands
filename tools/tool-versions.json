@@ -1,7 +1,21 @@
 {
   "bg3": {
-    "testedProductVersion": "4.1.1.7209685",
-    "testedPatch": "Patch 8"
+    "testedProductVersion": "4.1.1.7398727",
+    "testedPatch": "Patch 8 (build 4.1.1.7398727)",
+    "testedExecutables": {
+      "dx11": {
+        "name": "bg3_dx11.exe",
+        "peTimestamp": "0x6A21507E",
+        "sizeOfImage": "0x065B8000",
+        "sha256": "E899C67CB90B9C6B0F052E3F758BA8615BC2012E52561C2AF2E6A1E06EF61A2F"
+      },
+      "vulkan": {
+        "name": "bg3.exe",
+        "peTimestamp": "0x6A214F72",
+        "sizeOfImage": "0x0683F000",
+        "sha256": "D8CFC0D6D568A2E7C4B1F7B34687C4AAED5506118BB458679B24A926231B85A0"
+      }
+    }
   },
   "bg3ScriptExtender": {
     "requiredApiVersion": 29,

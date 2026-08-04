@@ -33,6 +33,8 @@ The party member with highest modifiers is calculated when you start the roll so
 8. Profit!
 
 ## Compatibility
+Version 2.1.2 supports BG3 product version `4.1.1.7398727` on both DX11 and Vulkan. Native compatibility is exact-build and fail-closed: after a game patch, unknown executables remain unmodified until their hooks and layouts are revalidated.
+
 As of v2.1.0, Best of Hands now has built-in compatibility with Eternal Lockpick or Eternal Trap Disarm Kit, no patch needed.
 
 Best of Hands includes automatic compatibility with [Eternal Lockpick](https://www.nexusmods.com/baldursgate3/mods/15080) and [Eternal Trap Disarm Kit](https://www.nexusmods.com/baldursgate3/mods/15085). Either or both can be active. Best of Hands recognizes their party-shared tools, while the Eternal mods remain entirely responsible for their items, failure renewal, and success rewards.

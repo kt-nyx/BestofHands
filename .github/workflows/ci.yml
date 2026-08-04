@@ -191,13 +191,7 @@ jobs:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}
           file_id: ${{ vars.NEXUSMODS_FILE_ID }}
           filename: dist/${{ needs.verify.outputs.archive }}
-          description: |-
-            [color=red][b]IMPORTANT:[/b][/color]
-            You need to MANUALLY install the Native Mod portion of this mod from the downloaded zip file.
-
-            Place the [b]bin[/b] folder from the zip [b]into your BG3 game folder[/b], overwriting if asked.
-
-            More info in description!
+          description: ""
           version: ${{ needs.verify.outputs.version }}
           display_name: Best of Hands - Quick Lockpick and Disarm
           category: main

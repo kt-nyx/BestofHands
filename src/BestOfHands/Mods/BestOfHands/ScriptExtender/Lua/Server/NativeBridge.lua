@@ -123,7 +123,9 @@ function NativeBridge.Create(settings, api, diagnostics)
     local nativeSession = ""
     local state = "not_started"
     local detail = "handshake has not started"
-    local warningShown = false
+    local warningShownGeneration = nil
+    local warningExhaustedGeneration = nil
+    local warningRetryGeneration = nil
     local handshakeGeneration = 0
     local visibleWarning
 
@@ -170,29 +172,68 @@ function NativeBridge.Create(settings, api, diagnostics)
     end
 
     visibleWarning = function()
-        if warningShown then
+        local generation = handshakeGeneration
+        if ready
+            or warningShownGeneration == generation
+            or warningExhaustedGeneration == generation
+            or warningRetryGeneration == generation then
             return
         end
-        warningShown = true
-        local message = table.concat({
-            "Best of Hands 2.0 is disabled for this session.",
-            "",
-            "The required BestofHands.dll did not report compatible server profile, roll-math, and client roll-presentation hooks.",
-            "Install the complete archive and update Native Mod Loader after game patches.",
-            "",
-            "Details: " .. tostring(state) .. " - " .. tostring(detail),
-        }, "\n")
-        local ok, errorMessage = pcall(function()
-            local host = Osi.GetHostCharacter()
-            if host ~= nil and tostring(host) ~= "" then
-                Osi.OpenMessageBox(host, message)
-            else
-                error("host character unavailable")
+
+        local attempts = math.max(1,
+            tonumber(settings.NATIVE_WARNING_ATTEMPTS) or 3)
+        local retryMs = math.max(1,
+            tonumber(settings.NATIVE_WARNING_RETRY_MS) or 500)
+        local function attempt(remaining)
+            if generation ~= handshakeGeneration
+                or ready
+                or warningShownGeneration == generation
+                or warningExhaustedGeneration == generation then
+                return
             end
-        end)
-        if not ok then
-            diagnostics.Error("native_bridge_warning_failed", { error = errorMessage })
+
+            local message = table.concat({
+                "Best of Hands " .. tostring(settings.VERSION)
+                    .. " is disabled for this session.",
+                "",
+                "The required BestofHands.dll did not report compatible server profile, roll-math, and client roll-presentation hooks.",
+                "Install the complete archive and update Native Mod Loader after game patches.",
+                "",
+                "Details: " .. tostring(state) .. " - " .. tostring(detail),
+            }, "\n")
+            local ok, errorMessage = pcall(function()
+                local host = Osi.GetHostCharacter()
+                if host ~= nil and tostring(host) ~= "" then
+                    Osi.OpenMessageBox(host, message)
+                else
+                    error("host character unavailable")
+                end
+            end)
+            if ok then
+                warningShownGeneration = generation
+                warningRetryGeneration = nil
+                return
+            end
+
+            diagnostics.Error("native_bridge_warning_failed", {
+                error = errorMessage,
+                generation = generation,
+                remaining = remaining - 1,
+            })
+            if remaining <= 1 then
+                warningRetryGeneration = nil
+                warningExhaustedGeneration = generation
+                return
+            end
+            warningRetryGeneration = generation
+            api.Schedule(retryMs, function()
+                if warningRetryGeneration == generation then
+                    warningRetryGeneration = nil
+                end
+                attempt(remaining - 1)
+            end)
         end
+        attempt(attempts)
     end
 
     local function nativeStatusIsCurrent()
