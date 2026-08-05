@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "patch_base64", "needs_intervention", "intervention_reason"],
+  "properties": {
+    "summary": {"type": "string", "maxLength": 2000},
+    "patch_base64": {"type": "string", "maxLength": 350000},
+    "needs_intervention": {"type": "boolean"},
+    "intervention_reason": {"type": "string", "maxLength": 2000}
+  }
+}

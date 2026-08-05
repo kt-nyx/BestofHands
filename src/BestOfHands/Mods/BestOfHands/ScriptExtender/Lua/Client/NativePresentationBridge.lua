@@ -4,7 +4,7 @@ local NativePresentationBridge = {}
 local ACTION_FILE = "BestOfHandsNative.actions"
 local CLIENT_FILE = "BestOfHandsNative.client"
 local LEFT_CLICK_FILE = "BestOfHandsNative.leftclick"
-local PROTOCOL = "7"
+local PROTOCOL = "8"
 local GUID_PATTERN = "%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x"
 local SAVE_RETRY_DELAYS_MS = { 250, 1000, 5000 }
 

@@ -14,6 +14,12 @@ function QuickLockpickCoordinator.Create(
     diagnostics
 )
     local instance = {}
+    local function nativeReady()
+        if type(bridge.IsCapabilityReady) == "function" then
+            return bridge.IsCapabilityReady("quick_lockpick")
+        end
+        return bridge.IsReady()
+    end
     local pending = {}
     local pendingByRequest = {}
     local nativeInteractions = {}
@@ -89,7 +95,7 @@ function QuickLockpickCoordinator.Create(
             end
             nativeInteractions[key] = nil
         end
-        if not bridge.IsReady() then
+        if not nativeReady() then
             return false
         end
         if not api.IsPlayer(actor) then
@@ -145,7 +151,7 @@ function QuickLockpickCoordinator.Create(
             if pending[key] ~= record then
                 return
             end
-            if not bridge.IsReady()
+            if not nativeReady()
                 or not api.IsLocked(target)
                 or api.IsInCombat(actor)
                 or forcedTurnBased[actor] == true then

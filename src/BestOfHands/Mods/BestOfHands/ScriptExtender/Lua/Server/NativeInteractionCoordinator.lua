@@ -285,6 +285,12 @@ end
 
 function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, diagnostics)
     local instance = {}
+    local function delegatedRollReady()
+        if type(bridge.IsCapabilityReady) == "function" then
+            return bridge.IsCapabilityReady("delegated_roll")
+        end
+        return bridge.IsReady()
+    end
     local pendingByTarget = {}
     local pendingByRollUuid = {}
     local pendingByRollEntity = {}
@@ -439,7 +445,7 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
     end
 
     function instance.OnNativeRequest(action, actor, target, requestId)
-        if not bridge.IsReady() then
+        if not delegatedRollReady() then
             diagnostics.Warn("native_delegation_skipped", {
                 action = action,
                 actor = actor,

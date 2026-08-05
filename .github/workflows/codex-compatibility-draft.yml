@@ -1,0 +1,344 @@
+# SPDX-License-Identifier: Unlicense
+
+name: Codex BG3 compatibility draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      steam_build_id:
+        description: Detected BG3 Steam public build ID
+        required: true
+        type: string
+      issue_number:
+        description: Matching BG3 update issue number
+        required: true
+        type: string
+      evidence_ref:
+        description: Exact 40-character commit SHA containing sanitized evidence
+        required: true
+        type: string
+      executable:
+        description: Executable covered by this sanitized evidence file
+        required: true
+        default: bg3_dx11.exe
+        type: choice
+        options:
+          - bg3_dx11.exe
+          - bg3.exe
+      model:
+        description: Codex model
+        required: true
+        default: gpt-5.6-terra
+        type: choice
+        options:
+          - gpt-5.6-terra
+          - gpt-5.6-sol
+
+permissions: {}
+
+concurrency:
+  group: codex-bg3-compatibility-${{ inputs.steam_build_id }}-${{ inputs.executable }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Validate trusted inputs and evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+      issues: read
+    outputs:
+      base_sha: ${{ steps.context.outputs.base_sha }}
+      context_base64: ${{ steps.context.outputs.context_base64 }}
+      evidence_base64: ${{ steps.context.outputs.evidence_base64 }}
+      issue_url: ${{ steps.context.outputs.issue_url }}
+    steps:
+      - name: Validate fixed-format inputs and authorized actor
+        shell: bash
+        env:
+          ACTOR: ${{ github.actor }}
+          ALLOWED_ACTOR: ${{ vars.CODEX_WORKFLOW_ACTOR }}
+          BUILD_ID: ${{ inputs.steam_build_id }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          EVIDENCE_REF: ${{ inputs.evidence_ref }}
+          EXECUTABLE: ${{ inputs.executable }}
+        run: |
+          set -euo pipefail
+          [[ -n "$ALLOWED_ACTOR" && "$ACTOR" == "$ALLOWED_ACTOR" ]]
+          [[ "$BUILD_ID" =~ ^[1-9][0-9]{5,19}$ ]]
+          [[ "$ISSUE_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EVIDENCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]
+          [[ "$EXECUTABLE" == "bg3_dx11.exe" || "$EXECUTABLE" == "bg3.exe" ]]
+
+      - name: Check out trusted default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: trusted
+          persist-credentials: false
+
+      - name: Check out exact evidence commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.evidence_ref }}
+          path: evidence
+          persist-credentials: false
+
+      - name: Validate issue marker and canonicalize evidence
+        id: context
+        shell: bash
+        env:
+          BUILD_ID: ${{ inputs.steam_build_id }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          EXECUTABLE: ${{ inputs.executable }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          issue_json="$(gh issue view "$ISSUE_NUMBER" --repo "$REPOSITORY" --json body,url)"
+          marker="<!-- bg3-build-detection:v1 build=$BUILD_ID -->"
+          [[ "$(jq -r .body <<< "$issue_json")" == *"$marker"* ]]
+          issue_url="$(jq -r .url <<< "$issue_json")"
+          evidence_path="evidence/compatibility-evidence/bg3-$BUILD_ID-$EXECUTABLE.json"
+          test -f "$evidence_path"
+          python trusted/scripts/validate_compatibility_evidence.py \
+            "$evidence_path" --steam-build-id "$BUILD_ID" --executable "$EXECUTABLE" \
+            --canonical-output "$RUNNER_TEMP/evidence.json"
+          base_sha="$(git -C trusted rev-parse HEAD)"
+          printf '{"schema":"best-of-hands-codex-context.v1","steam_build_id":"%s","executable":"%s","issue_number":%s,"base_sha":"%s"}\n' \
+            "$BUILD_ID" "$EXECUTABLE" "$ISSUE_NUMBER" "$base_sha" > "$RUNNER_TEMP/context.json"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "issue_url=$issue_url" >> "$GITHUB_OUTPUT"
+          echo "context_base64=$(base64 -w0 "$RUNNER_TEMP/context.json")" >> "$GITHUB_OUTPUT"
+          echo "evidence_base64=$(base64 -w0 "$RUNNER_TEMP/evidence.json")" >> "$GITHUB_OUTPUT"
+
+  codex:
+    name: Draft isolated patch with Terra
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: codex-compatibility
+    permissions:
+      contents: read
+    outputs:
+      final_message: ${{ steps.run.outputs.final-message }}
+    steps:
+      - name: Check out trusted base without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Materialize typed untrusted context
+        shell: bash
+        env:
+          CONTEXT_BASE64: ${{ needs.prepare.outputs.context_base64 }}
+          EVIDENCE_BASE64: ${{ needs.prepare.outputs.evidence_base64 }}
+        run: |
+          set -euo pipefail
+          mkdir .codex-input
+          printf '%s' "$CONTEXT_BASE64" | base64 --decode > .codex-input/context.json
+          printf '%s' "$EVIDENCE_BASE64" | base64 --decode > .codex-input/evidence.json
+          chmod -R a+rX,u+w .
+
+      - name: Email workflow start after environment approval
+        shell: bash
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          NOTIFICATION_EMAIL_FROM: ${{ vars.NOTIFICATION_EMAIL_FROM }}
+          NOTIFICATION_EMAIL_TO: ${{ vars.NOTIFICATION_EMAIL_TO }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ISSUE_URL: ${{ needs.prepare.outputs.issue_url }}
+        run: >-
+          python scripts/send_notification.py
+          --subject "Best of Hands compatibility draft started"
+          --text "Codex compatibility drafting started. Run: $RUN_URL Issue: $ISSUE_URL"
+          --idempotency-key "codex-${{ github.run_id }}-${{ github.run_attempt }}-start"
+
+      - name: Run official Codex action
+        id: run
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1.11
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          codex-version: "0.146.0"
+          model: ${{ inputs.model }}
+          effort: high
+          permission-profile: ":workspace"
+          safety-strategy: drop-sudo
+          prompt-file: .github/codex/prompts/compatibility-draft.md
+          output-schema-file: .github/codex/compatibility-output.schema.json
+          codex-args: >-
+            ["--ephemeral","--config","features.rollout_budget.enabled=true","--config","features.rollout_budget.limit_tokens=80000"]
+
+  publish:
+    name: Policy-check and publish draft PR
+    needs: [prepare, codex]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      branch: ${{ steps.pr.outputs.branch }}
+      pr_url: ${{ steps.pr.outputs.pr_url }}
+    steps:
+      - name: Check out trusted base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.base_sha }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Extract and validate untrusted patch as data
+        shell: bash
+        env:
+          CODEX_RESULT: ${{ needs.codex.outputs.final_message }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$CODEX_RESULT" > "$RUNNER_TEMP/codex-result.json"
+          jq -e '.needs_intervention == false and (.patch_base64 | length > 0)' \
+            "$RUNNER_TEMP/codex-result.json" >/dev/null
+          jq -r .patch_base64 "$RUNNER_TEMP/codex-result.json" > "$RUNNER_TEMP/patch.b64"
+          python scripts/validate_codex_patch.py \
+            "$RUNNER_TEMP/patch.b64" "$RUNNER_TEMP/codex.patch"
+          git apply --check "$RUNNER_TEMP/codex.patch"
+          git apply "$RUNNER_TEMP/codex.patch"
+          git diff --check
+
+      - name: Push generated branch and open draft pull request
+        id: pr
+        shell: bash
+        env:
+          BUILD_ID: ${{ inputs.steam_build_id }}
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: |
+          set -euo pipefail
+          branch="codex/bg3-build-$BUILD_ID-${{ github.run_id }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config core.hooksPath /dev/null
+          git switch -c "$branch"
+          git add --all -- ':!Nexus Assets' ':!build' ':!dist' ':!artifacts'
+          git commit -m "Draft BG3 build $BUILD_ID compatibility"
+          git push origin "HEAD:refs/heads/$branch"
+          pr_url="$(gh pr create --draft \
+            --base "${{ github.event.repository.default_branch }}" \
+            --head "$branch" \
+            --title "Draft compatibility for BG3 Steam build $BUILD_ID" \
+            --body "Automated compatibility draft for #$ISSUE_NUMBER. This PR is untrusted until deterministic validation, native review, and manual gameplay testing complete. It will never merge or release automatically.")"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
+
+  validate:
+    name: Validate draft on Windows
+    needs: [prepare, publish]
+    runs-on: windows-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Check out generated draft branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.publish.outputs.branch }}
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.14"
+          enable-cache: false
+
+      - name: Install pinned CMake
+        shell: pwsh
+        run: |
+          $tools = Get-Content -LiteralPath .\tools\tool-versions.json -Raw |
+            ConvertFrom-Json
+          $version = $tools.nativeBuildToolchain.cmake
+          $archiveName = $tools.nativeBuildToolchain.archive
+          $expected = $tools.nativeBuildToolchain.archiveSha256.ToUpperInvariant()
+          if ($archiveName -cne "cmake-$version-windows-x86_64.zip" -or
+              $expected -notmatch '^[0-9A-F]{64}$') {
+            throw 'Pinned CMake metadata is invalid.'
+          }
+          $archive = Join-Path $env:RUNNER_TEMP $archiveName
+          $url = "https://github.com/Kitware/CMake/releases/download/v$version/$archiveName"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+          if ($actual -cne $expected) { throw "CMake archive mismatch: $actual" }
+          $destination = Join-Path $env:RUNNER_TEMP "cmake-$version"
+          Expand-Archive -LiteralPath $archive -DestinationPath $destination
+          $cmake = Get-ChildItem -LiteralPath $destination -Filter cmake.exe -File -Recurse |
+            Where-Object { $_.Directory.Name -eq 'bin' } | Select-Object -First 1
+          if ($null -eq $cmake) { throw 'Pinned CMake executable was not found.' }
+          $cmake.Directory.FullName >> $env:GITHUB_PATH
+
+      - name: Run repository, Lua, native, and workflow tests
+        shell: pwsh
+        run: pwsh -NoProfile -File .\scripts\test.ps1 -BuildNative
+
+      - name: Download pinned LSLib ExportTool
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/Norbyte/lslib/releases/download/v1.20.4/ExportTool-v1.20.4.zip'
+          $zip = Join-Path $env:RUNNER_TEMP 'ExportTool-v1.20.4.zip'
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $expected = '5E02368FB8ACAFDA9B45ACBA37A3F3BF507FC3D65A083A159ABBEAB06337190E'
+          if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ne $expected) {
+            throw 'LSLib archive hash mismatch.'
+          }
+          $destination = Join-Path $env:RUNNER_TEMP 'ExportTool-v1.20.4'
+          Expand-Archive -LiteralPath $zip -DestinationPath $destination
+          $divine = Get-ChildItem $destination -Filter Divine.exe -File -Recurse | Select-Object -First 1
+          "DIVINE_PATH=$($divine.FullName)" >> $env:GITHUB_ENV
+
+      - name: Build and package release-shaped artifacts
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File .\scripts\build.ps1 -DivinePath $env:DIVINE_PATH
+          $version = (Get-Content .\VERSION -Raw).Trim()
+          pwsh -NoProfile -File .\scripts\package-release.ps1 -ReleaseTag "v$version"
+
+  completion_email:
+    name: Send completion notification
+    if: always()
+    needs: [prepare, codex, publish, validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted notifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Email final status
+        shell: bash
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          NOTIFICATION_EMAIL_FROM: ${{ vars.NOTIFICATION_EMAIL_FROM }}
+          NOTIFICATION_EMAIL_TO: ${{ vars.NOTIFICATION_EMAIL_TO }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ISSUE_URL: ${{ needs.prepare.outputs.issue_url || format('{0}/{1}/issues/{2}', github.server_url, github.repository, inputs.issue_number) }}
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          PR_URL: ${{ needs.publish.outputs.pr_url }}
+          CODEX_RESULT: ${{ needs.codex.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$PREPARE_RESULT" != "success" ]]; then
+            status="failed"
+          elif [[ "$VALIDATE_RESULT" == "success" ]]; then
+            status="succeeded"
+          elif [[ "$CODEX_RESULT" == "success" || "$PUBLISH_RESULT" == "success" ]]; then
+            status="needs intervention"
+          else
+            status="failed"
+          fi
+          python scripts/send_notification.py \
+            --subject "Best of Hands compatibility draft $status" \
+            --text "Status: $status Run: $RUN_URL Issue: $ISSUE_URL Draft PR: ${PR_URL:-not created}" \
+            --idempotency-key "codex-${{ github.run_id }}-${{ github.run_attempt }}-final"

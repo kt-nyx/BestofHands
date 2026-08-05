@@ -1,0 +1,124 @@
+# SPDX-License-Identifier: Unlicense
+
+name: BG3 Steam build watcher
+
+on:
+  schedule:
+    - cron: "17 */4 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: bg3-steam-build-watcher
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: Read public Steam build
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    outputs:
+      build_id: ${{ steps.build.outputs.build_id }}
+    steps:
+      - name: Check out trusted parser
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download SteamCMD from Valve
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/steamcmd"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz \
+            --output "$RUNNER_TEMP/steamcmd.tar.gz"
+          tar -xzf "$RUNNER_TEMP/steamcmd.tar.gz" -C "$RUNNER_TEMP/steamcmd"
+
+      - name: Query anonymous BG3 app metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/steamcmd/steamcmd.sh" \
+            +@ShutdownOnFailedCommand 1 \
+            +@NoPromptForPassword 1 \
+            +login anonymous \
+            +app_info_update 1 \
+            +app_info_print 1086940 \
+            +quit > "$RUNNER_TEMP/bg3-app-info.txt"
+
+      - name: Parse public branch build ID
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_id="$(python scripts/query_bg3_build.py "$RUNNER_TEMP/bg3-app-info.txt")"
+          [[ "$build_id" =~ ^[1-9][0-9]{5,19}$ ]]
+          echo "build_id=$build_id" >> "$GITHUB_OUTPUT"
+          echo "Observed BG3 Steam public build $build_id"
+
+  notify:
+    name: Compare durable state and notify
+    needs: discover
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Check out trusted automation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Revalidate discovered output
+        shell: bash
+        env:
+          DETECTED_BUILD: ${{ needs.discover.outputs.build_id }}
+        run: '[[ "$DETECTED_BUILD" =~ ^[1-9][0-9]{5,19}$ ]]'
+
+      - name: Prepare durable state and update issue
+        id: state
+        shell: bash
+        env:
+          DETECTED_BUILD: ${{ needs.discover.outputs.build_id }}
+          BASELINE_BUILD: ${{ vars.BG3_BASELINE_BUILD_ID }}
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: >-
+          python scripts/manage_bg3_watch.py prepare
+          --detected "$DETECTED_BUILD"
+          --baseline "$BASELINE_BUILD"
+          --run-url "$RUN_URL"
+
+      - name: Email new-build notification
+        if: steps.state.outputs.decision == 'changed'
+        shell: bash
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          NOTIFICATION_EMAIL_FROM: ${{ vars.NOTIFICATION_EMAIL_FROM }}
+          NOTIFICATION_EMAIL_TO: ${{ vars.NOTIFICATION_EMAIL_TO }}
+          OLD_BUILD: ${{ steps.state.outputs.old_build }}
+          NEW_BUILD: ${{ steps.state.outputs.new_build }}
+          ISSUE_URL: ${{ steps.state.outputs.issue_url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: >-
+          python scripts/send_notification.py
+          --subject "BG3 Steam build $NEW_BUILD detected"
+          --text "BG3 changed from Steam build $OLD_BUILD to $NEW_BUILD. Issue: $ISSUE_URL Run: $RUN_URL"
+          --idempotency-key "bg3-build-${{ github.repository_id }}-$NEW_BUILD"
+
+      - name: Commit notified build to durable state
+        if: steps.state.outputs.decision == 'changed'
+        shell: bash
+        env:
+          DETECTED_BUILD: ${{ steps.state.outputs.new_build }}
+          STATE_ISSUE: ${{ steps.state.outputs.state_issue }}
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python scripts/manage_bg3_watch.py commit
+          --detected "$DETECTED_BUILD"
+          --state-issue "$STATE_ISSUE"

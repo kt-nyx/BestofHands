@@ -5,6 +5,8 @@ tools/ExportTool/
 *.pak
 *.zip
 *.log
+*.pyc
+__pycache__/
 
 .idea/
 .vs/

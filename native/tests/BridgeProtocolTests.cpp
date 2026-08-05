@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Unlicense
 #include "BridgeProtocol.h"
+#include "CapabilityResolver.h"
 #include "FixedSnapshot.h"
 #include "NativeStartupGate.h"
 #include "ProfileRouting.h"
@@ -41,6 +42,65 @@ void* TestGetCharacterTask(void* controller, std::uint32_t taskType)
 
 int main()
 {
+    using best_of_hands::CapabilityState;
+    using best_of_hands::ResolutionSource;
+    using best_of_hands::StructuralCandidate;
+
+    // Exact identities never fall back to structural resolution. This keeps
+    // the released build tables as the highest-confidence, unchanged path.
+    std::array<StructuralCandidate, 1> validStructural{{
+        {101, true, true, true, true, true, true, true},
+    }};
+    auto exactResolution = best_of_hands::ResolveCapability(
+        true, true, validStructural);
+    assert(exactResolution.state == CapabilityState::Ready);
+    assert(exactResolution.source == ResolutionSource::ExactTable);
+    auto brokenExact = best_of_hands::ResolveCapability(
+        true, false, validStructural);
+    assert(brokenExact.state == CapabilityState::Unavailable);
+    assert(brokenExact.reason == "known_build_invariant_failed");
+
+    // Structural identity is independent of image base/RVA. Unrelated bytes
+    // are intentionally absent from the proof surface.
+    auto moved = best_of_hands::ResolveCapability(
+        false, false, validStructural);
+    assert(moved.state == CapabilityState::Ready);
+    assert(moved.source == ResolutionSource::StructuralCompatibility);
+    assert(moved.candidateIdentity == 101);
+
+    std::array<StructuralCandidate, 1> changedControlFlow{{
+        {101, true, false, true, true, true, true, true},
+    }};
+    assert(best_of_hands::ResolveCapability(
+        false, false, changedControlFlow).state == CapabilityState::Unavailable);
+
+    std::array<StructuralCandidate, 2> ambiguous{{
+        {101, true, true, true, true, true, true, true},
+        {202, true, true, true, true, true, true, true},
+    }};
+    assert(best_of_hands::ResolveCapability(
+        false, false, ambiguous).reason == "ambiguous_structural_matches");
+
+    for (std::size_t failedInvariant = 0; failedInvariant < 4;
+         ++failedInvariant) {
+        auto invalid = validStructural;
+        if (failedInvariant == 0) invalid[0].layout = false;
+        if (failedInvariant == 1) invalid[0].indexes = false;
+        if (failedInvariant == 2) invalid[0].pointers = false;
+        if (failedInvariant == 3) invalid[0].writableSlots = false;
+        assert(best_of_hands::ResolveCapability(
+            false, false, invalid).state == CapabilityState::Unavailable);
+    }
+
+    // Capabilities resolve independently; delegated atomicity is represented
+    // by its single all-invariants candidate rather than partially ready parts.
+    auto quickReady = best_of_hands::ResolveCapability(
+        false, false, validStructural);
+    auto delegatedUnavailable = best_of_hands::ResolveCapability(
+        false, false, changedControlFlow);
+    assert(quickReady.state == CapabilityState::Ready);
+    assert(delegatedUnavailable.state == CapabilityState::Unavailable);
+
     auto const modifierSlotOffset = SystemUpdateSlotOffset(
         419, 420, 0xf8, 0x18);
     auto const rollSlotOffset = SystemUpdateSlotOffset(
@@ -284,7 +344,7 @@ int main()
     assert(!IsBridgeToken("request|unsafe"));
 
     auto const valid = ParseBridgeDocument(
-        "protocol=7\n"
+        "protocol=8\n"
         "pak_version=2.1.2\n"
         "probe=abc-123\n"
         "native_session=44-55\n"
@@ -314,32 +374,32 @@ int main()
     assert(!ParseBridgeDocument(
         "protocol=1\npak_version=2.1.2\nprobe=x\nend=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nprobe=x\n"
+        "protocol=8\npak_version=2.1.2\nprobe=x\n"
         "record=1\tlockpick\tnot-hex\t2\t3\t0\t0\t0\ta\tb\tc\t-1\nend=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nprobe=x\n"
+        "protocol=8\npak_version=2.1.2\nprobe=x\n"
         "record=0\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t-1\nend=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nprobe=x\n"
+        "protocol=8\npak_version=2.1.2\nprobe=x\n"
         "record=1\tlockpick\t1\t2\t3\nend=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nprobe=x\n"
+        "protocol=8\npak_version=2.1.2\nprobe=x\n"
         "record=1\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t0\textra\n"
         "end=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nprobe=x\n"
+        "protocol=8\npak_version=2.1.2\nprobe=x\n"
         "record=1\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t3\n"
         "end=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nprobe=x\n"
+        "protocol=8\npak_version=2.1.2\nprobe=x\n"
         "record=1\tunknown\t1\t2\t3\t0\t0\t0\ta\tb\tc\t-1\n"
         "end=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nprobe=x\n"
+        "protocol=8\npak_version=2.1.2\nprobe=x\n"
         "record=1\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t-2\n"
         "end=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nprobe=x\n"
+        "protocol=8\npak_version=2.1.2\nprobe=x\n"
         "record=1\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t-1\n").valid);
 
     RequestedRollIdentity identity{
@@ -362,7 +422,7 @@ int main()
     assert(!MatchProfileSource(duplicateRecords, identity).has_value());
 
     auto const client = ParseClientBridgeDocument(
-        "protocol=7\n"
+        "protocol=8\n"
         "pak_version=2.1.2\n"
         "native_session=44-55\n"
         "trace=1\n"
@@ -389,7 +449,7 @@ int main()
     assert(client.lockedTargets[0].target == 0x01c000010000f15cULL);
     assert(client.lockedTargets[0].netId == 1125899906937610ULL);
     auto const crlfClient = ParseClientBridgeDocument(
-        "protocol=7\r\n"
+        "protocol=8\r\n"
         "pak_version=2.1.2\r\n"
         "native_session=crlf-session\r\n"
         "eligible=1\t1\r\n"
@@ -400,7 +460,7 @@ int main()
     assert(crlfClient.leftClickInitiators.size() == 1);
     assert(crlfClient.lockedTargets.size() == 1);
     auto const emptyClient = ParseClientBridgeDocument(
-        "protocol=7\n"
+        "protocol=8\n"
         "pak_version=2.1.2\n"
         "native_session=empty-session\n"
         "end=1\n");
@@ -411,76 +471,76 @@ int main()
     assert(emptyClient.leftClickInitiators.empty());
     assert(emptyClient.lockedTargets.empty());
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "eligible=1\t2\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "eligible=0\t1\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "locked=1\t0\nend=1\n").valid);
     auto const wideNetId = ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "locked=1\t4294967296\nend=1\n");
     assert(wideNetId.valid);
     assert(wideNetId.lockedTargets[0].netId == 4294967296ULL);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "quick=bad token\t1\t2\t3\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "quick=request\t0\t2\t3\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "quick=request\t1\t2\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "quick=request\t1\t0\t3\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "quick=request\t1\t2\t0\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "quick=request\t1\t2\t3\textra\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "quick=request\t1\t2\t18446744073709551616\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "eligible=not-hex\t1\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "eligible=1\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "eligible=1\t1\textra\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "locked=not-hex\t1\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "locked=1\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "locked=1\t1\textra\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "locked=1\tnot-decimal\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "locked=1\t18446744073709551616\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
         "protocol=6\npak_version=2.1.2\nnative_session=x\n"
         "end=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=1.0.0\nnative_session=x\n"
+        "protocol=8\npak_version=1.0.0\nnative_session=x\n"
         "end=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nend=1\n").valid);
+        "protocol=8\npak_version=2.1.2\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n").valid);
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n").valid);
     auto const maximumClientValues = ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "quick=request\tffffffffffffffff\tfffffffffffffffe"
         "\t18446744073709551615\n"
         "eligible=ffffffffffffffff\t0\n"
@@ -596,19 +656,19 @@ int main()
         assert(consumedRequests.contains(request.request));
     }
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\n"
+        "protocol=8\npak_version=2.1.2\n"
         "record=7\tuuid\t1\t2\t3\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "record=0\tuuid\t1\t2\t3\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "record=7\tuuid\t1\t0\t3\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "record=7\tuuid\t1\t2\tnot-hex\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=7\npak_version=2.1.2\nnative_session=x\n"
+        "protocol=8\npak_version=2.1.2\nnative_session=x\n"
         "record=7\tuuid\t1\t2\t3\textra\nend=1\n").valid);
     RequestedRollIdentity clientIdentity{
         .roll = 0x01c0000200000100ULL,

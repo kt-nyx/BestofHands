@@ -61,6 +61,10 @@ local function statusFields()
         eternal_trap_disarm_kit_loaded =
             compatibility.eternal_trap_disarm_kit and 1 or 0,
         native_ready = status.ready and 1 or 0,
+        native_delegated_roll_ready = status.capabilities.delegated_roll.ready and 1 or 0,
+        native_delegated_roll_reason = status.capabilities.delegated_roll.reason,
+        native_quick_lockpick_ready = status.capabilities.quick_lockpick.ready and 1 or 0,
+        native_quick_lockpick_reason = status.capabilities.quick_lockpick.reason,
         native_session = status.nativeSession,
         pending_delegations = interaction.Count(),
         pending_quick_lockpicks = quickLockpick.Count(),

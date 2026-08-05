@@ -84,9 +84,11 @@ requirement. The current implementation waits for the initiator-targeted
 `ServerRollStartSpellRequest`, preserves its caster, originator, spell, and
 resource ownership, and rewrites only the effect target to the specialist.
 
-## Fail-closed boundary
+## Capability readiness and build resolution
 
-The DLL contains validated native-layout tables for both DX11 and Vulkan executables. A table is selected only when executable name, PE timestamp, and `SizeOfImage` all match. All pointers, system indexes, entity-map entries, component sizes, and writable slots are range-checked before use.
+Native readiness is capability-scoped. `quick_lockpick` owns the internal task-selection, controller update, `GetCharacterTask`, and `SetRunningTask` boundaries. `delegated_roll` is atomic: its two server profile/math substitutions, two server-world update slots, and the complete client roll-presentation/reconciliation set must all work together. The status protocol reports `ready`, `pending`, or `unavailable`, a stable reason, and `exact_table` or `structural_compatibility` for each capability. Lua validates each capability's complete hook manifest, gates Quick Lockpick and delegated rolls separately, refreshes pending state, and deduplicates visible warnings by capability, executable, and failure reason. Detailed executable identity and resolution failures remain in the native log.
+
+The DLL contains reviewed native-layout tables for both DX11 and Vulkan executables. A table is the highest-confidence path and is selected only when executable name, PE timestamp, and `SizeOfImage` all match. A known identity never falls back to structural resolution to hide a changed signature: each affected capability fails closed. All pointers, system indexes, entity-map entries, component sizes, and writable slots are range-checked before use.
 
 Version 2.1.2 adds exact tables for BG3 product version `4.1.1.7398727`:
 
@@ -95,7 +97,9 @@ Version 2.1.2 adds exact tables for BG3 product version `4.1.1.7398727`:
 
 The current build registers server `esv::RollSystem` and `esv::active_roll::ModifierSystem` at indexes 390 and 418 respectively, one lower than the preceding supported build. Their static registration records, live system-entry indexes, and executable update procedures are all independently checked; the values are never inferred from the old table. The server-world offset and the client/server component layouts used by the hooks remain unchanged. Hook and helper RVAs moved in several independent clusters, while the DX11 client source-context call also changed its exact relative displacement. That five-byte signature is therefore stored per build rather than weakened with a wildcard.
 
-Unknown builds are never patched. The DLL writes an `unsupported_game_build` status including executable name, PE timestamp, `SizeOfImage`, and the product/file version strings from the executable resource (with fixed numeric fields as a fallback). Lua rejects it and shows at most one successful visible warning per handshake generation. If the host character is temporarily unavailable, Lua makes three bounded attempts 500 ms apart; an old-generation retry cannot warn in a later session/reset. The same behavior applies to a missing DLL, protocol/version mismatch, missing hooks, stale process status, or a native session lost after startup.
+Unknown identities enter a deliberately narrow compatibility path. Quick Lockpick is retained only if exactly one reviewed table for the same executable still has all four exact instruction boundaries at the reviewed RVAs. This tolerates rebuild timestamps, `SizeOfImage` changes, module rebasing, and unrelated byte changes while preserving the controller/task layouts used by the write-sensitive path. It deliberately does not relocate hook sites or infer task layouts from short matches. Relevant instruction changes, a missing match, or two matching layouts disable only Quick Lockpick. Product version, timestamp, image size, or one loose byte pattern is never sufficient, and signatures are never weakened with wildcards.
+
+Delegated rolls use numerous layout-sensitive client writes, server globals, registration indexes, and live update slots that cannot be safely rediscovered from a few code anchors. They therefore remain unavailable for every unknown executable identity until a reviewed exact table is added, even when Quick Lockpick passes its narrow compatibility proof. This conservative limitation is intentional. Lua tells the user which feature is unavailable, includes sanitized detected game/build information, and directs them to update the mod/loader; normal BG3 behavior and any separately validated capability remain available.
 
 The handshake is challenge/acknowledgement based. A status file from an old BG3 process cannot enable delegation. Malformed or partially written action data clears the native action set instead of retaining stale records.
 
@@ -183,6 +187,7 @@ The native log is `%LOCALAPPDATA%\Larian Studios\Baldur's Gate 3\Script Extender
 native/
   CMakeLists.txt
   include/BridgeProtocol.h
+  include/CapabilityResolver.h
   include/FixedSnapshot.h
   include/NativeStartupGate.h
   src/BestOfHandsNative.cpp
@@ -210,11 +215,18 @@ src/BestOfHands/Mods/BestOfHands/
         Settings.lua
 tests/lua/test_runner.lua
 scripts/
+  collect-compatibility-evidence.ps1
+  collect_compatibility_evidence.py
   build-native.ps1
   build.ps1
   package-release.ps1
   test.ps1
+  test_automation.py
   validate.ps1
+.github/workflows/
+  bg3-build-watch.yml
+  ci.yml
+  codex-compatibility-draft.yml
 ```
 
 Do not change the module UUID during ordinary development.
@@ -257,7 +269,7 @@ Run the complete non-game suite:
 pwsh -NoProfile -File .\scripts\test.ps1 -BuildNative
 ```
 
-It validates metadata and version synchronization, exact PAK source contents, licensing/SPDX headers, Markdown links, PowerShell syntax, Lua syntax, workflow YAML, resolver/coordinator/bridge behavior, the absence of v1 custom execution paths, the C++ build, and native protocol tests.
+It validates metadata and version synchronization, exact PAK source contents, licensing/SPDX headers, Markdown links, PowerShell syntax, Lua syntax, workflow YAML and security policy, Steam parsing/state transitions, sanitized evidence and patch policy, capability resolver/coordinator/bridge behavior, the absence of v1 custom execution paths, the C++ build, and native protocol tests.
 
 Host tests cannot prove native structure offsets, engine update order, UI behavior, callbacks, crime attribution, or resource consumption. Those are mandatory in-game release gates for both DX11 and Vulkan.
 
@@ -335,6 +347,49 @@ Server destruction is observational because it precedes BG3's later `RollResult`
 Before arming delegation, Lua asks BG3's party-inventory query for the action tool. Base-game roots are always eligible. Optional roots are eligible only when their owning module is active according to `Ext.Mod.IsModLoaded`; a detection failure retains only the base-game roots. If no eligible tool is available, Best of Hands creates no native profile record, publishes the existing vanilla custom-response database result `0`, and calls BG3's native non-modal `ShowError` notification with the built-in generic `CannotUse` key. This is necessary because an untouched request reaches `RequestProcessed(..., 1)` and opens an ordinary empty-tool roll in the current game build. The generic notification is native BG3 behavior, but it is not yet claimed to be the exact action-specific text used by an unmodded no-tool interaction.
 
 Eternal Lockpick `2.0.8.8` and Eternal Trap Disarm Kit `3.0.8.10` are integrated as independent optional tool providers. Best of Hands recognizes only their loaded module and tool-root identities. It never chooses, consumes, transfers, renews, or recreates their items and never reproduces their reward logic. Once the availability precheck passes, BG3's stock action and each provider's own story remain authoritative. The real roller remains the initiator, so provider-owned failure renewal and success callbacks retain their native recipient.
+
+## BG3 update and Codex draft automation
+
+### Scheduled watcher
+
+`.github/workflows/bg3-build-watch.yml` runs at minute 17 every four hours and by manual dispatch. A secretless Ubuntu discovery job downloads SteamCMD directly from Valve, logs in anonymously, and parses only `depots.branches.public.buildid` for app `1086940`; unrelated `tested_build_id` fields are rejected. A separate issue-write job compares that decimal ID with one durable issue labelled `automation-state:bg3-build`. The initial `BG3_BASELINE_BUILD_ID` is `24532579`. An unchanged build causes no issue mutation or email; the successful Actions run is the record of the check.
+
+For a new build, the workflow creates or updates one issue labelled `bg3-update-detected`, with exact hidden build markers, old/new IDs, UTC time, links, and manual next steps. It emails through Resend with a build-derived idempotency key and advances the durable state only after the provider accepts the email. Concurrency, state and issue markers, and the provider key prevent ordinary duplicates. GitHub and an external provider cannot form one atomic transaction, so a crash after email acceptance but before state advancement can retry the same provider request; Resend's idempotency key is the final duplicate guard.
+
+Required repository configuration:
+
+- Secret `RESEND_API_KEY`.
+- Variables `NOTIFICATION_EMAIL_FROM` (a verified Resend sender), `NOTIFICATION_EMAIL_TO`, and `BG3_BASELINE_BUILD_ID=24532579`.
+- Default workflow permissions may stay read-only; the workflow declares only `issues: write` in its state job.
+
+If discovery fails, inspect the SteamCMD and parser steps and rerun; never paste Steam output into an agent prompt. If state validation fails, repair the single state issue marker rather than deleting issues. If email fails, no new build is committed to state, so a rerun safely reuses the same detection issue and idempotency key.
+
+### Sanitized local evidence
+
+Run the collector on Windows after reviewing an update issue:
+
+```powershell
+pwsh -NoProfile -File .\scripts\collect-compatibility-evidence.ps1 `
+  -SteamBuildId 24532579 `
+  -Executable bg3_dx11.exe `
+  -OutputPath .\artifacts\compatibility-evidence.json
+```
+
+The wrapper uses pinned `pefile` and Capstone packages. It emits executable and section SHA-256 hashes, PE metadata, candidate RVAs/counts, normalized instruction/control-flow fingerprint hashes, and validation booleans. It emits no executable bytes, raw disassembly, base64 executable content, username, Steam owner ID, or absolute local path. Run it once for `bg3_dx11.exe` and once with `-Executable bg3.exe` when both renderer paths need review. Review each JSON, place it at `compatibility-evidence/bg3-<build-id>-<executable>.json` in a short-lived commit, then select that executable and supply the exact 40-character commit SHA to the manual workflow. One run drafts one executable path, so trigger separate reviewed runs for DX11 and Vulkan. In a public repository this sanitized metadata is public; use a private fork or obtain approval before committing it if that is undesirable.
+
+### Manual Codex compatibility draft
+
+`.github/workflows/codex-compatibility-draft.yml` accepts a decimal Steam build ID, the matching update issue number, the executable covered by the evidence, an exact evidence commit SHA, and a constrained model choice. `gpt-5.6-terra` is the default; `gpt-5.6-sol` is the only override. Set `CODEX_WORKFLOW_ACTOR` to the only GitHub username allowed to dispatch it and create a protected `codex-compatibility` environment containing `OPENAI_API_KEY`. Keep required reviewers on that environment if a second human approval is desired.
+
+Codex workflow configuration is therefore: environment secret `OPENAI_API_KEY`; repository secret `RESEND_API_KEY`; repository variables `CODEX_WORKFLOW_ACTOR`, `NOTIFICATION_EMAIL_FROM`, and `NOTIFICATION_EMAIL_TO`; and a protected `codex-compatibility` environment. No address, password, API key, or SMTP credential belongs in the repository.
+
+The workflow validates the issue marker and strict evidence schema without copying issue text into the prompt. After the protected environment is approved it sends the start email, then invokes the official `openai/codex-action`, pinned to v1.11 commit `52fe01ec70a42f454c9d2ebd47598f9fd6893d56`, Codex CLI `0.146.0`, Linux `drop-sudo`, and the `:workspace` permission profile. The Codex step receives no Git credentials, email secret, proprietary executable, Steam output, release notes, or network access. Its fixed prompt treats typed evidence as untrusted data and its JSON output is limited to a 250 KB text patch. Fresh jobs enforce a narrow source/test/documentation allowlist, reject release/version/workflow/Nexus/binary/symlink/submodule/path-traversal changes, apply the patch, open a generated branch and draft PR, and run the full Windows test/build/package suite with the pinned CMake toolchain. Nothing merges, tags, releases, uploads to Nexus, changes `main`, or uploads a BG3 executable automatically.
+
+API usage is billed to the OpenAI API project behind `OPENAI_API_KEY`, separately from ChatGPT or Codex subscriptions. The job is capped at 30 minutes and enables an 80,000 weighted-token rollout budget. Use a dedicated API project/key, set conservative project monthly budget alerts and rate limits, and revoke the key when automation is not needed. Budget alerts are not guaranteed hard spending cutoffs; the workflow timeout and rollout budget are the per-run controls.
+
+Start and final emails use `RESEND_API_KEY`, `NOTIFICATION_EMAIL_FROM`, and `NOTIFICATION_EMAIL_TO`. Final status is `succeeded`, `failed`, or `needs intervention` and includes the Actions, update issue, and draft PR links when available. If preparation fails, correct the actor, issue marker, evidence path/schema, or SHA. If Codex fails, inspect only the trusted action log and rerun manually. If patch policy fails, review the rejected paths and revise the fixed prompt/evidence rather than weakening policy. If Windows validation fails, keep the PR in draft, fix it manually, and rerun tests. Never enable automatic merge or reuse the compatibility workflow as a release workflow.
+
+The existing `.github/workflows/ci.yml` remains the only release workflow. Its `nexus-production` approval, `NEXUSMODS_FILE_ID`, and deliberately blank Nexus file description are protected by repository validation.
 
 ## Manual release gates
 

@@ -7,6 +7,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$env:PYTHONDONTWRITEBYTECODE = '1'
 $root = Split-Path -Parent $PSScriptRoot
 
 & (Join-Path $PSScriptRoot 'validate.ps1')
@@ -19,6 +20,16 @@ try {
     }
 
     uv run --python 3.13 --with 'lupa==2.6' --with 'pyyaml==6.0.3' python .\scripts\run_lua_tests.py
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
+    uv run --python 3.13 python .\scripts\test_automation.py
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
+    & (Join-Path $PSScriptRoot 'validate-workflows.ps1')
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }

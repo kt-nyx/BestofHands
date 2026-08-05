@@ -17,6 +17,8 @@ $readmePath = Join-Path $root 'README.md'
 $developmentPath = Join-Path $root 'DEVELOPMENT.md'
 $noticesPath = Join-Path $root 'THIRD_PARTY_NOTICES.txt'
 $workflowPath = Join-Path $root '.github\workflows\ci.yml'
+$workflowPaths = Get-ChildItem -LiteralPath (Join-Path $root '.github\workflows') -File |
+    Where-Object { $_.Extension -in @('.yml', '.yaml') }
 $nativeCmakePath = Join-Path $root 'native\CMakeLists.txt'
 $nativeResourcePath = Join-Path $root 'native\resources\BestofHands.rc.in'
 $nativeHeaderPath = Join-Path $root 'native\include\BridgeProtocol.h'
@@ -216,7 +218,7 @@ $commentCapableSource = @(
     Get-ChildItem -LiteralPath (Join-Path $root 'native') -File -Recurse |
         Where-Object { $_.Extension -in @('.cpp', '.h') }
     Get-Item -LiteralPath $nativeCmakePath
-    Get-Item -LiteralPath $workflowPath
+    $workflowPaths
 )
 foreach ($sourceFile in $commentCapableSource) {
     $content = Get-Content -LiteralPath $sourceFile.FullName -Raw
@@ -484,7 +486,11 @@ foreach ($requiredNativeMarker in @(
     'IsExecutableGameAddress',
     'server_world_rejected',
     'installed_hook_integrity_lost',
-    'unsupported_game_build'
+    'compatibility_resolution'
+    'InstallQuickLockpickHooks'
+    'InstallDelegatedRollCodeHooks'
+    'cap_quick_lockpick'
+    'cap_delegated_roll'
 )) {
     if (-not $nativeSource.Contains($requiredNativeMarker)) {
         throw "Native source is missing required fail-closed marker '$requiredNativeMarker'."
@@ -583,7 +589,7 @@ $reportedHooksMatch = [regex]::Match(
 $requiredHooksSource = Get-Content -LiteralPath $nativeBridgePath -Raw
 $requiredHooksMatch = [regex]::Match(
     $requiredHooksSource,
-    'local REQUIRED_HOOKS\s*=\s*(?<body>[\s\S]*?)\r?\nlocal REQUIRED_FEATURES'
+    'local DELEGATED_ROLL_HOOKS\s*=\s*(?<body>[\s\S]*?)\r?\nlocal QUICK_LOCKPICK_HOOKS'
 )
 if (-not $reportedHooksMatch.Success -or -not $requiredHooksMatch.Success) {
     throw 'Could not parse the native/Lua hook handshake manifests.'

@@ -7,7 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LINK = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
-SKIP_DIRECTORIES = {".git", ".venv", "dist", "tools/ExportTool"}
+SKIP_DIRECTORIES = {".git", ".venv", "build", "dist", "tools/ExportTool"}
 
 
 def is_skipped(path: Path) -> bool:

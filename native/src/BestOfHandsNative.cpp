@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -178,6 +179,9 @@ constexpr std::string_view kReportedHooks =
     "client_roll_finalize";
 constexpr std::string_view kReportedFeatures =
     "native_profile_substitution,quick_lockpick_task_adapter";
+constexpr std::string_view kQuickLockpickHooks =
+    "client_task_selection,client_input_controller_update,"
+    "client_get_character_task,client_set_running_task";
 
 constexpr std::array<std::byte, 11> kProfileUiSignature{
     std::byte{0x4c}, std::byte{0x89}, std::byte{0x7d}, std::byte{0x10},
@@ -669,10 +673,48 @@ using ClientModifierCollectionSnapshot =
 
 HMODULE g_gameModule{};
 BuildSpec const* g_build{};
+BuildSpec g_compatibleBuild{};
 ExecutableIdentity g_executableIdentity;
 std::atomic_bool g_stop{false};
 std::atomic_bool g_codeHooksReady{false};
+std::atomic_bool g_quickLockpickHooksReady{false};
 std::atomic_bool g_hooksReady{false};
+std::mutex g_capabilityStatusMutex;
+std::string g_buildResolutionSource{"none"};
+std::string g_quickLockpickFailure{"not_resolved"};
+std::string g_delegatedRollFailure{"not_resolved"};
+bool g_delegatedBuildResolved{false};
+
+struct CapabilityStatusSnapshot {
+    std::string source;
+    std::string quickFailure;
+    std::string delegatedFailure;
+};
+
+CapabilityStatusSnapshot ReadCapabilityStatus()
+{
+    std::scoped_lock lock(g_capabilityStatusMutex);
+    return {g_buildResolutionSource, g_quickLockpickFailure,
+        g_delegatedRollFailure};
+}
+
+void SetQuickLockpickFailure(std::string value)
+{
+    std::scoped_lock lock(g_capabilityStatusMutex);
+    g_quickLockpickFailure = std::move(value);
+}
+
+void SetDelegatedRollFailure(std::string value)
+{
+    std::scoped_lock lock(g_capabilityStatusMutex);
+    g_delegatedRollFailure = std::move(value);
+}
+
+void SetBuildResolutionSource(std::string value)
+{
+    std::scoped_lock lock(g_capabilityStatusMutex);
+    g_buildResolutionSource = std::move(value);
+}
 std::atomic<void*> g_serverWorld{};
 
 constexpr bool TraceEnabled() noexcept
@@ -2214,6 +2256,7 @@ bool AtomicWrite(fs::path const& path, std::string const& contents)
 
 void WriteStatus(std::string_view state, std::string_view detail, std::string_view ack)
 {
+    auto const capabilityStatus = ReadCapabilityStatus();
     std::scoped_lock lock(g_statusMutex);
     std::ostringstream status;
     status << "protocol=" << boh::kProtocolVersion << "\n"
@@ -2233,6 +2276,27 @@ void WriteStatus(std::string_view state, std::string_view detail, std::string_vi
            << "file_version=" << g_executableIdentity.fileVersion << "\n"
            << "hooks=" << (g_hooksReady.load() ? kReportedHooks : "none") << "\n"
            << "features=" << kReportedFeatures << "\n"
+           << "cap_quick_lockpick="
+           << (g_quickLockpickHooksReady.load() ? "ready" : "unavailable") << "\n"
+           << "cap_quick_lockpick_source="
+           << (g_quickLockpickHooksReady.load() ? capabilityStatus.source : "none") << "\n"
+           << "cap_quick_lockpick_reason="
+           << (g_quickLockpickHooksReady.load() ? "ok" : capabilityStatus.quickFailure) << "\n"
+           << "cap_quick_lockpick_hooks="
+           << (g_quickLockpickHooksReady.load() ? kQuickLockpickHooks : "none") << "\n"
+           << "cap_delegated_roll="
+           << (g_codeHooksReady.load() && g_hooksReady.load()
+                   ? "ready"
+                   : (g_codeHooksReady.load() ? "pending" : "unavailable")) << "\n"
+           << "cap_delegated_roll_source="
+           << (g_codeHooksReady.load() && g_hooksReady.load()
+                   ? capabilityStatus.source : "none") << "\n"
+           << "cap_delegated_roll_reason="
+           << (g_codeHooksReady.load() && g_hooksReady.load()
+                   ? "ok" : capabilityStatus.delegatedFailure) << "\n"
+           << "cap_delegated_roll_hooks="
+           << (g_codeHooksReady.load() && g_hooksReady.load()
+                   ? kReportedHooks : "none") << "\n"
            << "ack=" << ack << "\n"
            << "detail=" << detail << "\n"
            << "end=1\n";
@@ -2247,9 +2311,15 @@ void SetHookFailure(std::string value)
 
 void WriteCurrentStatus(std::string_view ack)
 {
-    if (g_hooksReady.load()) {
+    if (g_quickLockpickHooksReady.load() && g_hooksReady.load()) {
         WriteStatus("ready",
-            "validated server profile, roll-math, and client presentation hooks installed",
+            "all capability-scoped native integrations are validated",
+            ack);
+        return;
+    }
+    if (g_quickLockpickHooksReady.load() || g_hooksReady.load()) {
+        WriteStatus("partial",
+            "one native capability is unavailable; validated capabilities remain enabled",
             ack);
         return;
     }
@@ -2259,10 +2329,10 @@ void WriteCurrentStatus(std::string_view ack)
         failure = g_hookFailure;
     }
     if (!failure.empty()) {
-        WriteStatus("hook_install_failed", failure, ack);
-    } else if (!g_codeHooksReady.load()) {
-        WriteStatus("installing_hooks",
-            "current Lua bridge confirmed; installing validated native hooks",
+        WriteStatus("unavailable", failure, ack);
+    } else if (!g_codeHooksReady.load() && !g_quickLockpickHooksReady.load()) {
+        WriteStatus("unavailable",
+            "no native capability passed its complete validation boundary",
             ack);
     } else {
         WriteStatus("waiting_for_server",
@@ -2453,6 +2523,7 @@ void TraceProfileSelection(std::string_view stage,
 
 void ProfileUiMidHook(safetyhook::Context& context) noexcept
 {
+    if (!g_hooksReady.load(std::memory_order_acquire)) return;
     PerfScope perf(PerfMetric::ProfileUi);
     try {
         auto const component = reinterpret_cast<void const*>(context.r13);
@@ -2474,6 +2545,7 @@ void ProfileUiMidHook(safetyhook::Context& context) noexcept
 
 void ProfileMathMidHook(safetyhook::Context& context) noexcept
 {
+    if (!g_hooksReady.load(std::memory_order_acquire)) return;
     PerfScope perf(PerfMetric::ProfileMath);
     try {
         auto const component = reinterpret_cast<void const*>(context.r8);
@@ -2527,6 +2599,7 @@ SelectedRollBonusBindingResult BindSelectedRollBonusPresentation(
 
 void ClientRollPresentationMidHook(safetyhook::Context& context) noexcept
 {
+    if (!g_hooksReady.load(std::memory_order_acquire)) return;
     try {
         // At this validated DCActiveRoll site:
         //   r14 = the replicated client RequestedRoll component
@@ -2607,6 +2680,7 @@ void ClientRollPresentationMidHook(safetyhook::Context& context) noexcept
 
 void ClientRollSourceContextMidHook(safetyhook::Context& context) noexcept
 {
+    if (!g_hooksReady.load(std::memory_order_acquire)) return;
     try {
         // At the validated call site:
         //   r14 = the replicated client RequestedRoll component
@@ -2653,6 +2727,7 @@ void ClientRollSourceContextMidHook(safetyhook::Context& context) noexcept
 
 void ClientRollAggregateMidHook(safetyhook::Context& context) noexcept
 {
+    if (!g_hooksReady.load(std::memory_order_acquire)) return;
     PerfScope perf(PerfMetric::Aggregate);
     try {
         // This is the final vanilla modifier-aggregation write before
@@ -2724,6 +2799,7 @@ void ClientRollAggregateMidHook(safetyhook::Context& context) noexcept
 
 void ClientRollStartMidHook(safetyhook::Context& context) noexcept
 {
+    if (!g_hooksReady.load(std::memory_order_acquire)) return;
     BeginPerfRoll();
     PerfScope perf(PerfMetric::RollStart);
     try {
@@ -2831,6 +2907,7 @@ void ClientRollStartMidHook(safetyhook::Context& context) noexcept
 
 void ClientRollPayloadReadyMidHook(safetyhook::Context& context) noexcept
 {
+    if (!g_hooksReady.load(std::memory_order_acquire)) return;
     PerfScope perf(PerfMetric::PayloadReady);
     try {
         // Reaching this hook proves the successful WaitForStart path has
@@ -2873,6 +2950,7 @@ void ClientRollPayloadReadyMidHook(safetyhook::Context& context) noexcept
 
 void ClientRollPostDispatchMidHook(safetyhook::Context& context) noexcept
 {
+    if (!g_hooksReady.load(std::memory_order_acquire)) return;
     PerfScope perf(PerfMetric::PostDispatch);
     try {
         // The epilogue is shared by early-exit paths, so only a pair armed by
@@ -2895,6 +2973,7 @@ void ClientRollPostDispatchMidHook(safetyhook::Context& context) noexcept
 
 void ClientRollResultMidHook(safetyhook::Context& context) noexcept
 {
+    if (!g_hooksReady.load(std::memory_order_acquire)) return;
     PerfScope perf(PerfMetric::Result);
     try {
         // This is the result-consistency decision immediately after BG3 loads
@@ -3848,6 +3927,10 @@ bool ClientModifierCollectionContains(void* collection,
 bool ClientRollBonusKeepSelectedDetour(
     void* collection, void* viewModel) noexcept
 {
+    if (!g_hooksReady.load(std::memory_order_acquire)) {
+        return g_clientRollBonusKeepSelectedHook.call<bool>(
+            collection, viewModel);
+    }
     try {
         auto const collectionAddress =
             reinterpret_cast<std::uintptr_t>(collection);
@@ -4858,6 +4941,7 @@ SelectedRollBonusBindingResult BindSelectedRollBonusPresentation(
 void ClientRollBonusReconcileStartMidHook(
     safetyhook::Context& context) noexcept
 {
+    if (!g_hooksReady.load(std::memory_order_acquire)) return;
     PerfScope perf(PerfMetric::ReconcileStart);
     try {
         DrainDeferredClientViewModelReleases();
@@ -5076,6 +5160,7 @@ void TraceAdvantageSourceModifierBinding(
 void ClientRollBonusReconcileViewModelMidHook(
     safetyhook::Context& context) noexcept
 {
+    if (!g_hooksReady.load(std::memory_order_acquire)) return;
     PerfScope perf(PerfMetric::ReconcileViewModel);
     try {
         TraceAdvantageSourceModifierBinding(context);
@@ -5289,6 +5374,7 @@ void LogPreservedAdvantageSourceModifier(
 void ClientRollBonusPreserveMatchedMidHook(
     safetyhook::Context& context) noexcept
 {
+    if (!g_hooksReady.load(std::memory_order_acquire)) return;
     PerfScope perf(PerfMetric::PreserveMatched);
     try {
         auto const currentDisabled = static_cast<std::uint8_t>(
@@ -5325,6 +5411,7 @@ void ClientRollBonusPreserveMatchedMidHook(
 void ClientRollBonusPreserveMissingMidHook(
     safetyhook::Context& context) noexcept
 {
+    if (!g_hooksReady.load(std::memory_order_acquire)) return;
     PerfScope perf(PerfMetric::PreserveMissing);
     try {
         auto const currentDisabled = static_cast<std::uint8_t>(
@@ -5528,6 +5615,7 @@ void TraceAdvantageViewModelBinding(
 void ClientAdvantagePreserveMatchedMidHook(
     safetyhook::Context& context) noexcept
 {
+    if (!g_hooksReady.load(std::memory_order_acquire)) return;
     PerfScope perf(PerfMetric::AdvantageMatched);
     try {
         TraceAdvantageViewModelBinding(context, "matched_static");
@@ -5557,6 +5645,7 @@ void ClientAdvantagePreserveMatchedMidHook(
 void ClientAdvantagePreserveMissingMidHook(
     safetyhook::Context& context) noexcept
 {
+    if (!g_hooksReady.load(std::memory_order_acquire)) return;
     PerfScope perf(PerfMetric::AdvantageMissing);
     try {
         TraceAdvantageViewModelBinding(context, "missing_static");
@@ -5585,6 +5674,7 @@ void ClientAdvantagePreserveMissingMidHook(
 void ClientRollBonusRendererAddMidHook(
     safetyhook::Context& context) noexcept
 {
+    if (!g_hooksReady.load(std::memory_order_acquire)) return;
     PerfScope perf(PerfMetric::RendererAdd);
     try {
         if (context.rsi == 0
@@ -5798,6 +5888,7 @@ void ClientRollBonusRendererAddMidHook(
 void ClientRollBonusReconcileEndMidHook(
     safetyhook::Context& context) noexcept
 {
+    if (!g_hooksReady.load(std::memory_order_acquire)) return;
     PerfScope perf(PerfMetric::ReconcileEnd);
     try {
         auto observation = g_rollBonusReconciliationObservation;
@@ -6030,6 +6121,7 @@ void ClientRollBonusReconcileEndMidHook(
 
 void ClientRollFinalizeMidHook(safetyhook::Context& context) noexcept
 {
+    if (!g_hooksReady.load(std::memory_order_acquire)) return;
     PerfRollCompletion completion;
     PerfScope perf(PerfMetric::Finalize);
     try {
@@ -6169,7 +6261,56 @@ bool ValidateHookSite(std::uintptr_t rva,
     return true;
 }
 
-bool InstallCodeHooks(std::string& failure)
+bool InstallQuickLockpickHooks(std::string& failure)
+{
+    if (!ValidateHookSite(g_build->clientTaskSelectionHookRva,
+            kClientTaskSelectionSignature, "client_task_selection", failure)
+        || !ValidateHookSite(g_build->clientInputControllerUpdateRva,
+            kClientInputControllerUpdateSignature,
+            "client_input_controller_update", failure)
+        || !ValidateHookSite(g_build->clientGetCharacterTaskRva,
+            kClientGetCharacterTaskSignature,
+            "client_get_character_task", failure)
+        || !ValidateHookSite(g_build->clientSetRunningTaskRva,
+            kClientSetRunningTaskSignature,
+            "client_set_running_task", failure)) {
+        return false;
+    }
+
+    auto const base = reinterpret_cast<std::uintptr_t>(g_gameModule);
+    g_clientGetCharacterTaskProcedure.store(
+        base + g_build->clientGetCharacterTaskRva,
+        std::memory_order_release);
+    g_clientTaskSelectionHook = safetyhook::create_mid(
+        reinterpret_cast<void*>(base + g_build->clientTaskSelectionHookRva),
+        &ClientTaskSelectionMidHook);
+    if (!g_clientTaskSelectionHook) {
+        g_clientGetCharacterTaskProcedure.store(0, std::memory_order_release);
+        failure = "client_task_selection_hook_creation_failed";
+        return false;
+    }
+    g_clientInputControllerUpdateHook = safetyhook::create_inline(
+        reinterpret_cast<void*>(base + g_build->clientInputControllerUpdateRva),
+        &ClientInputControllerUpdateDetour);
+    if (!g_clientInputControllerUpdateHook) {
+        g_clientTaskSelectionHook.reset();
+        g_clientGetCharacterTaskProcedure.store(0, std::memory_order_release);
+        failure = "client_input_controller_update_hook_creation_failed";
+        return false;
+    }
+    g_quickLockpickHooksReady.store(true);
+    SetQuickLockpickFailure({});
+    auto const capabilityStatus = ReadCapabilityStatus();
+    Log("INFO", "native_quick_lockpick_hooks_installed",
+        "source=" + capabilityStatus.source
+        + "|task_selection_rva=" + Hex(g_build->clientTaskSelectionHookRva)
+        + "|input_update_rva=" + Hex(g_build->clientInputControllerUpdateRva)
+        + "|get_task_rva=" + Hex(g_build->clientGetCharacterTaskRva)
+        + "|set_task_rva=" + Hex(g_build->clientSetRunningTaskRva));
+    return true;
+}
+
+bool InstallDelegatedRollCodeHooks(std::string& failure)
 {
     if (!ValidateHookSite(g_build->profileUiHookRva,
             kProfileUiSignature, "profile_ui", failure)
@@ -6271,23 +6412,7 @@ bool InstallCodeHooks(std::string& failure)
         || !ValidateHookSite(
             g_build->clientVmRollModifierNameValueAssignRva,
             kClientVmRollModifierNameValueAssignSignature,
-            "client_vmroll_modifier_name_value_assign", failure)
-        || !ValidateHookSite(
-            g_build->clientTaskSelectionHookRva,
-            kClientTaskSelectionSignature,
-            "client_task_selection", failure)
-        || !ValidateHookSite(
-            g_build->clientInputControllerUpdateRva,
-            kClientInputControllerUpdateSignature,
-            "client_input_controller_update", failure)
-        || !ValidateHookSite(
-            g_build->clientGetCharacterTaskRva,
-            kClientGetCharacterTaskSignature,
-            "client_get_character_task", failure)
-        || !ValidateHookSite(
-            g_build->clientSetRunningTaskRva,
-            kClientSetRunningTaskSignature,
-            "client_set_running_task", failure)) {
+            "client_vmroll_modifier_name_value_assign", failure)) {
         return false;
     }
     auto const base = reinterpret_cast<std::uintptr_t>(g_gameModule);
@@ -6534,9 +6659,6 @@ bool InstallCodeHooks(std::string& failure)
         return false;
     }
     auto resetExistingCodeHooks = []() noexcept {
-        g_clientGetCharacterTaskProcedure.store(
-            0, std::memory_order_release);
-        g_clientTaskSelectionHook.reset();
         g_clientRollSourceContextHook.reset();
         g_clientRollBonusKeepSelectedHook.reset();
         g_clientRollPostDispatchHook.reset();
@@ -6583,33 +6705,8 @@ bool InstallCodeHooks(std::string& failure)
         failure = "client_advantage_preserve_missing_hook_creation_failed";
         return false;
     }
-    g_clientGetCharacterTaskProcedure.store(
-        base + g_build->clientGetCharacterTaskRva,
-        std::memory_order_release);
-    g_clientTaskSelectionHook = safetyhook::create_mid(
-        reinterpret_cast<void*>(
-            base + g_build->clientTaskSelectionHookRva),
-        &ClientTaskSelectionMidHook);
-    if (!g_clientTaskSelectionHook) {
-        g_clientAdvantagePreserveMissingHook.reset();
-        g_clientAdvantagePreserveMatchedHook.reset();
-        resetExistingCodeHooks();
-        failure = "client_task_selection_hook_creation_failed";
-        return false;
-    }
-    g_clientInputControllerUpdateHook = safetyhook::create_inline(
-        reinterpret_cast<void*>(
-            base + g_build->clientInputControllerUpdateRva),
-        &ClientInputControllerUpdateDetour);
-    if (!g_clientInputControllerUpdateHook) {
-        g_clientTaskSelectionHook.reset();
-        g_clientAdvantagePreserveMissingHook.reset();
-        g_clientAdvantagePreserveMatchedHook.reset();
-        resetExistingCodeHooks();
-        failure = "client_input_controller_update_hook_creation_failed";
-        return false;
-    }
     g_codeHooksReady.store(true);
+    SetDelegatedRollFailure({});
     Log("INFO", "native_profile_hooks_installed",
         "ui_rva=" + Hex(g_build->profileUiHookRva)
         + "|math_rva=" + Hex(g_build->profileMathHookRva)
@@ -6991,6 +7088,7 @@ bool InstallSystemHooks(void* world, std::string& failure)
         return false;
     }
     SetHookFailure({});
+    SetDelegatedRollFailure({});
     g_serverWorld.store(world);
     g_hooksReady.store(true);
     Log("INFO", "native_hooks_ready",
@@ -7014,6 +7112,100 @@ BuildSpec const* DetectBuild()
         }
     }
     return nullptr;
+}
+
+template <std::size_t Size>
+bool IsExecutableRvaRange(std::uintptr_t rva)
+{
+    if (!g_executableIdentity.peValid || g_gameModule == nullptr
+        || rva > std::numeric_limits<std::uintptr_t>::max() - Size) {
+        return false;
+    }
+    auto const base = reinterpret_cast<std::uintptr_t>(g_gameModule);
+    auto const dos = reinterpret_cast<IMAGE_DOS_HEADER const*>(base);
+    auto const nt = reinterpret_cast<IMAGE_NT_HEADERS64 const*>(
+        base + static_cast<std::uintptr_t>(dos->e_lfanew));
+    auto const sections = IMAGE_FIRST_SECTION(nt);
+    for (std::uint16_t index = 0; index < nt->FileHeader.NumberOfSections;
+         ++index) {
+        auto const& section = sections[index];
+        if ((section.Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0) {
+            continue;
+        }
+        auto const start = static_cast<std::uintptr_t>(section.VirtualAddress);
+        auto const end = start + static_cast<std::uintptr_t>(section.Misc.VirtualSize);
+        if (end >= start && rva >= start && rva + Size <= end) {
+            return true;
+        }
+    }
+    return false;
+}
+
+template <std::size_t Size>
+bool SignatureMatchesAt(std::uintptr_t rva,
+    std::array<std::byte, Size> const& signature)
+{
+    if (!IsExecutableRvaRange<Size>(rva)) {
+        return false;
+    }
+    auto const address = reinterpret_cast<void const*>(
+        reinterpret_cast<std::uintptr_t>(g_gameModule) + rva);
+    return IsReadable(address, Size)
+        && std::memcmp(address, signature.data(), Size) == 0;
+}
+
+bool ResolveCompatibleBuild()
+{
+    std::vector<BuildSpec const*> executableTemplates;
+    for (auto const& build : kBuilds) {
+        if (_wcsicmp(g_executableIdentity.name.c_str(), build.executable) == 0) {
+            executableTemplates.push_back(&build);
+        }
+    }
+    if (executableTemplates.empty()) {
+        SetQuickLockpickFailure("unsupported_executable_name");
+        SetDelegatedRollFailure("unsupported_executable_name");
+        return false;
+    }
+
+    BuildSpec const* quickTemplate = nullptr;
+    std::size_t quickCandidateCount = 0;
+    for (auto const* candidate : executableTemplates) {
+        if (SignatureMatchesAt(candidate->clientTaskSelectionHookRva,
+                kClientTaskSelectionSignature)
+            && SignatureMatchesAt(candidate->clientInputControllerUpdateRva,
+                kClientInputControllerUpdateSignature)
+            && SignatureMatchesAt(candidate->clientGetCharacterTaskRva,
+                kClientGetCharacterTaskSignature)
+            && SignatureMatchesAt(candidate->clientSetRunningTaskRva,
+                kClientSetRunningTaskSignature)) {
+            quickTemplate = candidate;
+            ++quickCandidateCount;
+        }
+    }
+    auto const quickResolved = quickCandidateCount == 1;
+    g_compatibleBuild = *(quickResolved ? quickTemplate : executableTemplates.back());
+    g_compatibleBuild.timestamp = g_executableIdentity.timestamp;
+    g_compatibleBuild.imageSize = g_executableIdentity.imageSize;
+    if (quickResolved) {
+        SetQuickLockpickFailure({});
+    } else {
+        SetQuickLockpickFailure("quick_exact_layout_proof_missing_or_ambiguous");
+    }
+    // Delegated rolls use numerous layout-sensitive client writes and server
+    // registration globals. An unknown identity cannot safely inherit those
+    // values from a prior table, even when several code bytes still match.
+    g_delegatedBuildResolved = false;
+    SetDelegatedRollFailure("delegated_unknown_build_requires_exact_table");
+    g_build = &g_compatibleBuild;
+    SetBuildResolutionSource("structural_compatibility");
+    Log("INFO", "compatibility_resolution",
+        "quick_lockpick=" + std::string(quickResolved ? "resolved" : "unavailable")
+        + "|quick_candidate_count=" + std::to_string(quickCandidateCount)
+        + "|delegated_roll=unavailable"
+        + "|delegated_reason=unknown_build_requires_exact_table"
+        + "|" + ExecutableIdentityFields());
+    return quickResolved;
 }
 
 void* ServerWorld()
@@ -7090,10 +7282,12 @@ DWORD WINAPI Worker(void*)
     g_executableIdentity = CaptureExecutableIdentity();
     g_build = DetectBuild();
     if (g_build == nullptr) {
-        WriteStatus("unsupported_game_build",
-            "no validated signature set matches this executable", "");
-        Log("ERROR", "unsupported_game_build", ExecutableIdentityFields());
-        return 2;
+        ResolveCompatibleBuild();
+    } else {
+        SetBuildResolutionSource("exact_table");
+        g_delegatedBuildResolved = true;
+        SetQuickLockpickFailure("waiting_for_bridge");
+        SetDelegatedRollFailure("waiting_for_bridge");
     }
     Log("INFO", "loaded", "version=" + std::string(boh::kPluginVersion)
         + "|" + ExecutableIdentityFields());
@@ -7114,6 +7308,8 @@ DWORD WINAPI Worker(void*)
     std::string lastRejectedReason;
     std::string lastLoggedFailure;
     bool currentChallengeObserved = false;
+    bool quickInstallAttempted = false;
+    bool delegatedInstallAttempted = false;
     boh::StableWorldCandidateGate worldGate;
     auto currentAck = []() {
         std::shared_lock lock(g_documentMutex);
@@ -7141,24 +7337,45 @@ DWORD WINAPI Worker(void*)
             && LastWrite(g_actionPath) != actionWriteTimeAtStartup) {
             currentChallengeObserved = true;
         }
-        if (!g_codeHooksReady.load()) {
+        if (!quickInstallAttempted || !delegatedInstallAttempted) {
             if (!bridgeAllowsNativeHooks()) {
                 worldGate.Reset();
                 FlushCompletedPerfRolls();
                 Sleep(25);
                 continue;
             }
-            failure.clear();
-            if (!InstallCodeHooks(failure)) {
-                SetHookFailure(failure);
-                WriteCurrentStatus(currentAck());
-                Log("ERROR", "native_hook_install_failed",
-                    "detail=" + failure);
-                return 3;
+            if (!quickInstallAttempted) {
+                quickInstallAttempted = true;
+                auto const capabilityStatus = ReadCapabilityStatus();
+                if (g_build != nullptr
+                    && (capabilityStatus.quickFailure.empty()
+                        || capabilityStatus.quickFailure == "waiting_for_bridge")) {
+                    failure.clear();
+                    if (!InstallQuickLockpickHooks(failure)) {
+                        SetQuickLockpickFailure(failure);
+                        Log("ERROR", "quick_lockpick_hook_install_failed",
+                            "detail=" + failure);
+                    }
+                }
+            }
+            if (!delegatedInstallAttempted) {
+                delegatedInstallAttempted = true;
+                if (g_build != nullptr && g_delegatedBuildResolved) {
+                    failure.clear();
+                    if (!InstallDelegatedRollCodeHooks(failure)) {
+                        SetDelegatedRollFailure(failure);
+                        SetHookFailure(failure);
+                        Log("ERROR", "delegated_roll_hook_install_failed",
+                            "detail=" + failure);
+                    } else {
+                        SetDelegatedRollFailure("waiting_for_server_validation");
+                    }
+                }
             }
             WriteCurrentStatus(currentAck());
         }
-        auto const bridgeReady = bridgeAllowsWorldHooks();
+        auto const bridgeReady = g_codeHooksReady.load()
+            && bridgeAllowsWorldHooks();
         auto const observationEnabled =
             g_hooksReady.load() || bridgeReady;
         void* candidateWorld{};
@@ -7177,9 +7394,20 @@ DWORD WINAPI Worker(void*)
                     + Hex(reinterpret_cast<std::uintptr_t>(
                         candidateWorld)));
                 SetHookFailure(rejection);
+                SetDelegatedRollFailure(rejection);
                 g_hooksReady.store(false);
                 WriteCurrentStatus(currentAck());
-                return 4;
+                {
+                    std::unique_lock lock(g_documentMutex);
+                    g_document.records.clear();
+                }
+                {
+                    std::unique_lock lock(g_clientDocumentMutex);
+                    g_clientDocument.records.clear();
+                }
+                ClearClientPresentationLeases("delegated_integrity_lost");
+                Sleep(25);
+                continue;
             }
             if (candidateWorld != nullptr
                 && (!installedHooks || candidateWorld != installedWorld)
@@ -7228,6 +7456,16 @@ DWORD WINAPI Worker(void*)
             g_serverWorld.store(nullptr);
             g_hooksReady.store(false);
             SetHookFailure({});
+            SetDelegatedRollFailure("waiting_for_server_validation");
+            {
+                std::unique_lock lock(g_documentMutex);
+                g_document.records.clear();
+            }
+            {
+                std::unique_lock lock(g_clientDocumentMutex);
+                g_clientDocument.records.clear();
+            }
+            ClearClientPresentationLeases("server_world_changed");
             lastLoggedFailure.clear();
             Log("INFO", "server_world_changed");
             WriteCurrentStatus(currentAck());
@@ -7239,6 +7477,7 @@ DWORD WINAPI Worker(void*)
                 WriteCurrentStatus(currentAck());
             } else {
                 SetHookFailure(failure);
+                SetDelegatedRollFailure(failure);
                 if (failure != lastLoggedFailure) {
                     lastLoggedFailure = failure;
                     Log("ERROR", "native_hook_install_failed",
@@ -7257,7 +7496,9 @@ DWORD WINAPI Worker(void*)
     g_clientGetCharacterTaskProcedure.store(0, std::memory_order_release);
     g_clientInputControllerUpdateHook.reset();
     g_clientTaskSelectionHook.reset();
+    g_quickLockpickHooksReady.store(false);
     RestoreSystemHooks();
+    g_codeHooksReady.store(false);
     WriteStatus("stopped", "native plugin stopped", "");
     return 0;
 }

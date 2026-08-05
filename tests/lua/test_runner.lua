@@ -749,13 +749,21 @@ test("native bridge requires a live matching challenge acknowledgement", functio
     assertEqual(false, bridge.IsReady(), "not ready before ack")
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=7",
+        "protocol=8",
         "version=2.1.2",
         "state=ready",
         "session=123-456",
         "pid=123",
         "hooks=" .. NativeBridge.REQUIRED_HOOKS,
         "features=" .. NativeBridge.REQUIRED_FEATURES,
+        "cap_quick_lockpick=ready",
+        "cap_quick_lockpick_source=exact_table",
+        "cap_quick_lockpick_reason=ok",
+        "cap_quick_lockpick_hooks=" .. NativeBridge.QUICK_LOCKPICK_HOOKS,
+        "cap_delegated_roll=ready",
+        "cap_delegated_roll_source=exact_table",
+        "cap_delegated_roll_reason=ok",
+        "cap_delegated_roll_hooks=" .. NativeBridge.DELEGATED_ROLL_HOOKS,
         "ack=" .. probe,
         "detail=ok",
         "end=1",
@@ -857,6 +865,114 @@ test("native bridge requires a live matching challenge acknowledgement", functio
     assertEqual(0, warnings, "no warning")
 end)
 
+test("native bridge isolates quick lockpick from unavailable delegated rolls", function()
+    installEntityMock()
+    local files = {}
+    local scheduled = {}
+    local messages = {}
+    Ext.IO = {
+        LoadFile = function(path) return files[path] end,
+        SaveFile = function(path, value) files[path] = value return true end,
+    }
+    Ext.Utils = { MonotonicTime = function() return 88 end }
+    Osi = {
+        GetHostCharacter = function() return "actor" end,
+        OpenMessageBox = function(_, message) messages[#messages + 1] = message end,
+    }
+    local bridge = NativeBridge.Create({
+        NATIVE_HANDSHAKE_ATTEMPTS = 1,
+        NATIVE_HANDSHAKE_POLL_MS = 1,
+        TRACE_EVENTS = false,
+        VERSION = "2.1.2",
+    }, {
+        Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
+    }, recordingDiagnostics())
+    bridge.BeginHandshake()
+    local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
+    files["BestOfHandsNative.status"] = table.concat({
+        "protocol=8", "version=2.1.2", "state=partial", "session=session-p",
+        "features=" .. NativeBridge.REQUIRED_FEATURES, "ack=" .. probe,
+        "cap_quick_lockpick=ready", "cap_quick_lockpick_source=structural_compatibility",
+        "cap_quick_lockpick_reason=ok",
+        "cap_quick_lockpick_hooks=" .. NativeBridge.QUICK_LOCKPICK_HOOKS,
+        "cap_delegated_roll=unavailable",
+        "cap_delegated_roll_source=none", "cap_delegated_roll_reason=client_roll_result_cfg_changed",
+        "executable=bg3_dx11.exe", "product_version=4.1.1.9999999", "end=1", "",
+    }, "\n")
+    scheduled[1]()
+    assertEqual(true, bridge.IsCapabilityReady("quick_lockpick"),
+        "quick lockpick remains enabled")
+    assertEqual(false, bridge.IsCapabilityReady("delegated_roll"),
+        "delegated roll remains atomic and unavailable")
+    assertEqual(false, bridge.IsReady(), "legacy readiness reports delegated roll")
+    assertEqual(1, #messages, "only the unavailable capability warns")
+    assertContains(messages[1], "Best-in-party delegated rolls",
+        "warning identifies delegated rolls")
+    assertContains(messages[1], "client_roll_result_cfg_changed",
+        "warning contains the stable failure reason")
+    local written, reason = bridge.Upsert({})
+    assertEqual(false, written, "delegated record is rejected")
+    assertEqual("native_bridge_not_ready", reason, "delegated API fails closed")
+end)
+
+test("native bridge refreshes pending capabilities and validates manifests", function()
+    installEntityMock()
+    local files = {}
+    local scheduled = {}
+    Ext.IO = {
+        LoadFile = function(path) return files[path] end,
+        SaveFile = function(path, value) files[path] = value return true end,
+    }
+    Ext.Utils = { MonotonicTime = function() return 89 end }
+    Osi = {
+        GetHostCharacter = function() return "actor" end,
+        OpenMessageBox = function() end,
+    }
+    local bridge = NativeBridge.Create({
+        NATIVE_HANDSHAKE_ATTEMPTS = 3,
+        NATIVE_HANDSHAKE_POLL_MS = 1,
+        TRACE_EVENTS = false,
+        VERSION = "2.1.2",
+    }, {
+        Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
+    }, recordingDiagnostics())
+    bridge.BeginHandshake()
+    local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
+    files["BestOfHandsNative.status"] = table.concat({
+        "protocol=8", "version=2.1.2", "state=partial", "session=session-p",
+        "features=" .. NativeBridge.REQUIRED_FEATURES, "ack=" .. probe,
+        "cap_quick_lockpick=ready", "cap_quick_lockpick_source=exact_table",
+        "cap_quick_lockpick_hooks=wrong_manifest",
+        "cap_delegated_roll=pending", "cap_delegated_roll_source=none",
+        "cap_delegated_roll_hooks=none", "end=1", "",
+    }, "\n")
+    scheduled[1]()
+    assertEqual(false, bridge.IsCapabilityReady("quick_lockpick"),
+        "invalid hook manifest cannot enable quick lockpick")
+    assertEqual(false, bridge.IsCapabilityReady("delegated_roll"),
+        "pending delegated capability remains disabled")
+
+    files["BestOfHandsNative.status"] = table.concat({
+        "protocol=8", "version=2.1.2", "state=ready", "session=session-p",
+        "features=" .. NativeBridge.REQUIRED_FEATURES, "ack=" .. probe,
+        "cap_quick_lockpick=ready", "cap_quick_lockpick_source=exact_table",
+        "cap_quick_lockpick_hooks=" .. NativeBridge.QUICK_LOCKPICK_HOOKS,
+        "cap_delegated_roll=ready", "cap_delegated_roll_source=exact_table",
+        "cap_delegated_roll_hooks=" .. NativeBridge.DELEGATED_ROLL_HOOKS,
+        "end=1", "",
+    }, "\n")
+    scheduled[2]()
+    assertEqual(true, bridge.IsCapabilityReady("quick_lockpick"),
+        "valid quick-lockpick manifest becomes ready")
+    assertEqual(true, bridge.IsCapabilityReady("delegated_roll"),
+        "pending delegated capability refreshes to ready")
+
+    files["BestOfHandsNative.status"] = files["BestOfHandsNative.status"]
+        .. "cap_delegated_roll=ready\n"
+    assertEqual(false, bridge.IsCapabilityReady("delegated_roll"),
+        "duplicate status keys fail closed")
+end)
+
 test("native bridge cannot report ready when its session acknowledgement write fails", function()
     installEntityMock()
     local files = {}
@@ -891,9 +1007,13 @@ test("native bridge cannot report ready when its session acknowledgement write f
     bridge.BeginHandshake()
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=7", "version=2.1.2", "state=ready", "session=session-a",
+        "protocol=8", "version=2.1.2", "state=ready", "session=session-a",
         "pid=10", "hooks=" .. NativeBridge.REQUIRED_HOOKS,
         "features=" .. NativeBridge.REQUIRED_FEATURES,
+        "cap_quick_lockpick=ready", "cap_quick_lockpick_source=exact_table",
+        "cap_quick_lockpick_hooks=" .. NativeBridge.QUICK_LOCKPICK_HOOKS,
+        "cap_delegated_roll=ready", "cap_delegated_roll_source=exact_table",
+        "cap_delegated_roll_hooks=" .. NativeBridge.DELEGATED_ROLL_HOOKS,
         "ack=" .. probe, "detail=ok", "end=1", "",
     }, "\n")
     scheduled[1]()
@@ -901,7 +1021,7 @@ test("native bridge cannot report ready when its session acknowledgement write f
         "failed session publication leaves delegation disabled")
     assertEqual("bridge_write_failed", bridge.GetStatus().state,
         "failed acknowledgement write remains the reported state")
-    assertEqual(1, warnings, "failed acknowledgement write warns once")
+    assertEqual(2, warnings, "each affected capability warns once")
     assertEqual(nil, findRecord(records, "native_bridge_ready"),
         "failed acknowledgement write is never logged as ready")
 end)
@@ -913,7 +1033,7 @@ test("production handshake omits the retired observation-only hook", function()
         "trace-only selected-modifier hook is not installed in production")
 end)
 
-test("native bridge fails closed and warns once when the DLL is unavailable", function()
+test("native bridge fails closed and warns once per capability when the DLL is unavailable", function()
     installEntityMock()
     local files = {}
     local scheduled = {}
@@ -938,7 +1058,7 @@ test("native bridge fails closed and warns once when the DLL is unavailable", fu
     bridge.BeginHandshake()
     scheduled[1]()
     assertEqual(false, bridge.IsReady(), "bridge disabled")
-    assertEqual(1, warnings, "one warning")
+    assertEqual(2, warnings, "one warning per unavailable capability")
 end)
 
 test("native bridge warning retries a temporarily unavailable host once per generation", function()
@@ -976,24 +1096,24 @@ test("native bridge warning retries a temporarily unavailable host once per gene
     }, recordingDiagnostics())
 
     bridge.BeginHandshake()
-    assertEqual(1, hostAttempts, "first warning attempt is immediate")
+    assertEqual(2, hostAttempts, "each capability attempts an immediate warning")
     assertEqual(0, #messages, "failed host lookup does not suppress retries")
-    assertEqual(1, #scheduled, "first failure schedules one bounded retry")
+    assertEqual(2, #scheduled, "each failure schedules one bounded retry")
     scheduled[1]()
-    assertEqual(2, hostAttempts, "second warning attempt")
-    assertEqual(2, #scheduled, "second failure schedules the final retry")
+    assertEqual(3, hostAttempts, "first capability retry")
+    assertEqual(1, #messages, "first capability warning succeeds")
     scheduled[2]()
-    assertEqual(3, hostAttempts, "third warning attempt")
-    assertEqual(1, #messages, "one successful warning in the generation")
+    assertEqual(4, hostAttempts, "second capability retry")
+    assertEqual(2, #messages, "one successful warning per capability")
     assertContains(messages[1], "Best of Hands 2.1.2",
         "warning uses the current mod version")
     assertContains(messages[1],
-        "native_status_missing - the native status file was not found",
-        "warning preserves the exact native state and detail")
+        "Quick Lockpick / left-click integration",
+        "warning identifies the unavailable capability")
 
     bridge.BeginHandshake()
-    assertEqual(4, hostAttempts, "a new handshake generation may warn again")
-    assertEqual(2, #messages, "one successful warning per generation")
+    assertEqual(4, hostAttempts, "a new generation deduplicates the same failures")
+    assertEqual(2, #messages, "one successful warning per capability and failure")
 end)
 
 test("native bridge drops warning retries from a superseded handshake generation", function()
@@ -1028,13 +1148,16 @@ test("native bridge drops warning retries from a superseded handshake generation
 
     bridge.BeginHandshake()
     bridge.BeginHandshake()
-    assertEqual(2, hostAttempts, "each generation makes one immediate attempt")
-    assertEqual(2, #scheduled, "each generation owns one pending retry")
+    assertEqual(4, hostAttempts, "each generation attempts both capability warnings")
+    assertEqual(4, #scheduled, "each generation owns two pending retries")
     scheduled[1]()
-    assertEqual(2, hostAttempts, "the superseded retry is inert")
+    assertEqual(4, hostAttempts, "the first superseded retry is inert")
     scheduled[2]()
-    assertEqual(3, hostAttempts, "only the current generation retries")
-    assertEqual(2, #scheduled, "the current generation exhausts its bounded attempts")
+    assertEqual(4, hostAttempts, "both superseded retries are inert")
+    scheduled[3]()
+    scheduled[4]()
+    assertEqual(6, hostAttempts, "only current-generation capability retries run")
+    assertEqual(4, #scheduled, "current-generation retries exhaust their bounds")
 end)
 
 test("native bridge disables delegation if its acknowledgement is replaced", function()
@@ -1062,15 +1185,19 @@ test("native bridge disables delegation if its acknowledgement is replaced", fun
     bridge.BeginHandshake()
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=7", "version=2.1.2", "state=ready", "session=session-a",
+        "protocol=8", "version=2.1.2", "state=ready", "session=session-a",
         "pid=10", "hooks=" .. NativeBridge.REQUIRED_HOOKS,
         "features=" .. NativeBridge.REQUIRED_FEATURES,
+        "cap_quick_lockpick=ready", "cap_quick_lockpick_source=exact_table",
+        "cap_quick_lockpick_hooks=" .. NativeBridge.QUICK_LOCKPICK_HOOKS,
+        "cap_delegated_roll=ready", "cap_delegated_roll_source=exact_table",
+        "cap_delegated_roll_hooks=" .. NativeBridge.DELEGATED_ROLL_HOOKS,
         "ack=" .. probe, "detail=ok", "end=1", "",
     }, "\n")
     scheduled[1]()
     assertEqual(true, bridge.IsReady(), "initially ready")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=7", "version=2.1.2", "state=ready", "session=session-a",
+        "protocol=8", "version=2.1.2", "state=ready", "session=session-a",
         "pid=10", "hooks=" .. NativeBridge.REQUIRED_HOOKS,
         "features=" .. NativeBridge.REQUIRED_FEATURES,
         "ack=replaced-probe", "detail=another bridge replaced the ack", "end=1", "",
@@ -1081,7 +1208,7 @@ test("native bridge disables delegation if its acknowledgement is replaced", fun
     assertEqual(false, written, "record rejected")
     assertEqual("native_bridge_not_ready", reason, "lost bridge reason")
     assertEqual(false, bridge.IsReady(), "bridge disabled")
-    assertEqual(1, warnings, "visible warning")
+    assertEqual(2, warnings, "one warning per capability")
 end)
 
 test("client bridge correlates delegated rolls by stable UUID and publishes client handles", function()
@@ -1110,7 +1237,7 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
     local timers = {}
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
-            "protocol=7",
+            "protocol=8",
             "pak_version=2.1.2",
             "probe=test",
             "native_session=44-55",
@@ -1278,7 +1405,7 @@ test("client bridge prepares and queues BG3's stock lockpick task", function()
     }
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
-            "protocol=7",
+            "protocol=8",
             "pak_version=2.1.2",
             "probe=test",
             "native_session=44-55",
@@ -1407,7 +1534,7 @@ test("client bridge rejects malformed or unpublishable fallback requests", funct
     }
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
-            "protocol=7",
+            "protocol=8",
             "pak_version=2.1.2",
             "probe=test",
             "native_session=44-55",
@@ -1587,7 +1714,7 @@ test("client bridge publishes pre-use left-click interception state", function()
     local nextTicks = {}
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
-            "protocol=7",
+            "protocol=8",
             "pak_version=2.1.2",
             "probe=test",
             "native_session=44-55",
@@ -1769,7 +1896,7 @@ test("client left-click snapshot isolates actors, keys, targets, and sessions", 
     local snapshotSaveCount = 0
     local function actions(session)
         return table.concat({
-            "protocol=7",
+            "protocol=8",
             "pak_version=2.1.2",
             "probe=test",
             "native_session=" .. session,

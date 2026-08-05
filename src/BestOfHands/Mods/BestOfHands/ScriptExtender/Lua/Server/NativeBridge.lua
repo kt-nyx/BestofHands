@@ -4,8 +4,8 @@ local NativeBridge = {}
 
 local ACTION_FILE = "BestOfHandsNative.actions"
 local STATUS_FILE = "BestOfHandsNative.status"
-local PROTOCOL = "7"
-local REQUIRED_HOOKS =
+local PROTOCOL = "8"
+local DELEGATED_ROLL_HOOKS =
     "profile_ui,profile_math,client_roll_presentation,"
     .. "client_roll_aggregate,client_roll_start,"
     .. "client_roll_payload_ready,client_roll_post_dispatch,"
@@ -22,10 +22,14 @@ local REQUIRED_HOOKS =
     .. ",client_roll_bonus_presentation_transfer"
     .. ",client_roll_bonus_reconcile_end"
     .. ",client_roll_finalize"
-local REQUIRED_FEATURES =
-    "native_profile_substitution,quick_lockpick_task_adapter"
+local QUICK_LOCKPICK_HOOKS =
+    "client_task_selection,client_input_controller_update,"
+    .. "client_get_character_task,client_set_running_task"
+local REQUIRED_FEATURES = "native_profile_substitution,quick_lockpick_task_adapter"
 
-NativeBridge.REQUIRED_HOOKS = REQUIRED_HOOKS
+NativeBridge.REQUIRED_HOOKS = DELEGATED_ROLL_HOOKS
+NativeBridge.DELEGATED_ROLL_HOOKS = DELEGATED_ROLL_HOOKS
+NativeBridge.QUICK_LOCKPICK_HOOKS = QUICK_LOCKPICK_HOOKS
 NativeBridge.REQUIRED_FEATURES = REQUIRED_FEATURES
 
 local function parseDocument(text)
@@ -36,6 +40,9 @@ local function parseDocument(text)
     for line in text:gmatch("[^\r\n]+") do
         local key, value = line:match("^([^=]+)=(.*)$")
         if key ~= nil then
+            if result[key] ~= nil then
+                return {}
+            end
             result[key] = value
         end
     end
@@ -118,14 +125,18 @@ function NativeBridge.Create(settings, api, diagnostics)
     local instance = {}
     local records = {}
     local ready = false
+    local capabilities = {
+        delegated_roll = { ready = false, reason = "not_started", source = "none" },
+        quick_lockpick = { ready = false, reason = "not_started", source = "none" },
+    }
     local trace = settings.TRACE_EVENTS == true
     local probe = nil
     local nativeSession = ""
     local state = "not_started"
     local detail = "handshake has not started"
-    local warningShownGeneration = nil
-    local warningExhaustedGeneration = nil
-    local warningRetryGeneration = nil
+    local warningShownGeneration = {}
+    local warningExhaustedGeneration = {}
+    local warningRetryGeneration = {}
     local handshakeGeneration = 0
     local visibleWarning
 
@@ -163,6 +174,11 @@ function NativeBridge.Create(settings, api, diagnostics)
             ready = false
             state = "bridge_write_failed"
             detail = "Script Extender could not write the native bridge file"
+            for _, capability in pairs(capabilities) do
+                capability.ready = false
+                capability.state = "unavailable"
+                capability.reason = "bridge_write_failed"
+            end
             if visibleWarning ~= nil then
                 visibleWarning()
             end
@@ -171,86 +187,150 @@ function NativeBridge.Create(settings, api, diagnostics)
         return true
     end
 
+    local function capabilityMessage(name)
+        local capability = capabilities[name]
+        local label = name == "quick_lockpick"
+            and "Quick Lockpick / left-click integration"
+            or "Best-in-party delegated rolls"
+        local otherName = name == "quick_lockpick" and "delegated_roll" or "quick_lockpick"
+        local fallback = capabilities[otherName].ready
+            and "Other validated Best of Hands features remain enabled."
+            or "Normal Baldur's Gate 3 behavior remains available for affected actions."
+        return table.concat({
+            "Best of Hands " .. tostring(settings.VERSION) .. ": " .. label
+                .. " is unavailable for this session.",
+            fallback,
+            "Reason: " .. tostring(capability.reason or state),
+            "Detected game: " .. tostring(capability.executable or "unknown")
+                .. " (" .. tostring(capability.gameVersion or "version unavailable") .. ")",
+            "Update Best of Hands after a BG3 patch, and verify Native Mod Loader is current.",
+        }, "\n")
+    end
+
     visibleWarning = function()
         local generation = handshakeGeneration
-        if ready
-            or warningShownGeneration == generation
-            or warningExhaustedGeneration == generation
-            or warningRetryGeneration == generation then
-            return
-        end
-
-        local attempts = math.max(1,
-            tonumber(settings.NATIVE_WARNING_ATTEMPTS) or 3)
-        local retryMs = math.max(1,
-            tonumber(settings.NATIVE_WARNING_RETRY_MS) or 500)
-        local function attempt(remaining)
-            if generation ~= handshakeGeneration
-                or ready
-                or warningShownGeneration == generation
-                or warningExhaustedGeneration == generation then
+        local function warnCapability(name)
+            local warningKey = tostring(capabilities[name].reason)
+                .. "|" .. tostring(capabilities[name].executable)
+            if capabilities[name].ready
+                or capabilities[name].state == "pending"
+                or warningShownGeneration[name] == warningKey
+                or warningExhaustedGeneration[name] == generation
+                or warningRetryGeneration[name] == generation then
                 return
             end
-
-            local message = table.concat({
-                "Best of Hands " .. tostring(settings.VERSION)
-                    .. " is disabled for this session.",
-                "",
-                "The required BestofHands.dll did not report compatible server profile, roll-math, and client roll-presentation hooks.",
-                "Install the complete archive and update Native Mod Loader after game patches.",
-                "",
-                "Details: " .. tostring(state) .. " - " .. tostring(detail),
-            }, "\n")
-            local ok, errorMessage = pcall(function()
-                local host = Osi.GetHostCharacter()
-                if host ~= nil and tostring(host) ~= "" then
-                    Osi.OpenMessageBox(host, message)
-                else
-                    error("host character unavailable")
+            local attempts = math.max(1,
+                tonumber(settings.NATIVE_WARNING_ATTEMPTS) or 3)
+            local retryMs = math.max(1,
+                tonumber(settings.NATIVE_WARNING_RETRY_MS) or 500)
+            local function attempt(remaining)
+                if generation ~= handshakeGeneration
+                    or capabilities[name].ready
+                    or warningShownGeneration[name] == warningKey
+                    or warningExhaustedGeneration[name] == generation then
+                    return
                 end
-            end)
-            if ok then
-                warningShownGeneration = generation
-                warningRetryGeneration = nil
-                return
-            end
 
-            diagnostics.Error("native_bridge_warning_failed", {
-                error = errorMessage,
-                generation = generation,
-                remaining = remaining - 1,
-            })
-            if remaining <= 1 then
-                warningRetryGeneration = nil
-                warningExhaustedGeneration = generation
-                return
-            end
-            warningRetryGeneration = generation
-            api.Schedule(retryMs, function()
-                if warningRetryGeneration == generation then
-                    warningRetryGeneration = nil
+                local message = capabilityMessage(name)
+                local ok, errorMessage = pcall(function()
+                    local host = Osi.GetHostCharacter()
+                    if host ~= nil and tostring(host) ~= "" then
+                        Osi.OpenMessageBox(host, message)
+                    else
+                        error("host character unavailable")
+                    end
+                end)
+                if ok then
+                    warningShownGeneration[name] = warningKey
+                    warningRetryGeneration[name] = nil
+                    return
                 end
-                attempt(remaining - 1)
-            end)
+
+                diagnostics.Error("native_bridge_warning_failed", {
+                    error = errorMessage,
+                    capability = name,
+                    generation = generation,
+                    remaining = remaining - 1,
+                })
+                if remaining <= 1 then
+                    warningRetryGeneration[name] = nil
+                    warningExhaustedGeneration[name] = generation
+                    return
+                end
+                warningRetryGeneration[name] = generation
+                api.Schedule(retryMs, function()
+                    if warningRetryGeneration[name] == generation then
+                        warningRetryGeneration[name] = nil
+                    end
+                    attempt(remaining - 1)
+                end)
+            end
+            attempt(attempts)
         end
-        attempt(attempts)
+        warnCapability("quick_lockpick")
+        warnCapability("delegated_roll")
+    end
+
+    local function readCapabilities(status)
+        local common = {
+            executable = status.executable,
+            gameVersion = status.product_version or status.file_version,
+        }
+        for _, name in ipairs({ "quick_lockpick", "delegated_roll" }) do
+            local prefix = "cap_" .. name
+            local declaredState = status[prefix] or "unavailable"
+            local expectedHooks = name == "quick_lockpick"
+                and QUICK_LOCKPICK_HOOKS or DELEGATED_ROLL_HOOKS
+            local source = status[prefix .. "_source"] or "none"
+            local validReady = declaredState == "ready"
+                and status[prefix .. "_hooks"] == expectedHooks
+                and (source == "exact_table" or source == "structural_compatibility")
+            capabilities[name] = {
+                ready = validReady,
+                state = declaredState == "ready" and not validReady
+                    and "unavailable" or declaredState,
+                reason = declaredState == "ready" and not validReady
+                    and "capability_manifest_invalid"
+                    or status[prefix .. "_reason"] or status.detail or status.state,
+                source = source,
+                executable = common.executable,
+                gameVersion = common.gameVersion,
+            }
+        end
+    end
+
+    local function statusEnvelopeIsCurrent(status, requireSession)
+        local validState = status.state == "ready"
+            or status.state == "partial"
+            or status.state == "unavailable"
+        return status.protocol == PROTOCOL
+            and status.version == settings.VERSION
+            and validState
+            and status.features == REQUIRED_FEATURES
+            and status.ack == probe
+            and (not requireSession or (status.session ~= nil and status.session ~= ""))
+            and status["end"] == "1"
+    end
+
+    local function invalidateCapabilities(reason)
+        for _, capability in pairs(capabilities) do
+            capability.ready = false
+            capability.state = "unavailable"
+            capability.reason = reason
+        end
     end
 
     local function nativeStatusIsCurrent()
         local ok, text = pcall(Ext.IO.LoadFile, STATUS_FILE)
         local status = ok and parseDocument(text) or {}
-        local current = status.protocol == PROTOCOL
-            and status.version == settings.VERSION
-            and status.state == "ready"
-            and status.hooks == REQUIRED_HOOKS
-            and status.features == REQUIRED_FEATURES
+        readCapabilities(status)
+        local current = statusEnvelopeIsCurrent(status, false)
             and status.session == nativeSession
-            and status.ack == probe
-            and status["end"] == "1"
         if not current then
             ready = false
             state = status.state or "native_status_missing"
             detail = status.detail or "the native status file was not found"
+            invalidateCapabilities("native_status_not_current")
             diagnostics.Error("native_bridge_lost", {
                 detail = detail,
                 hooks = status.hooks,
@@ -263,23 +343,17 @@ function NativeBridge.Create(settings, api, diagnostics)
     end
 
     local function poll(generation, remaining)
-        if generation ~= handshakeGeneration or ready then
+        if generation ~= handshakeGeneration then
             return
         end
         local ok, text = pcall(Ext.IO.LoadFile, STATUS_FILE)
         local status = ok and parseDocument(text) or {}
         state = status.state or "native_status_missing"
         detail = status.detail or "the native status file was not found"
-        local compatible = status.protocol == PROTOCOL
-            and status.version == settings.VERSION
-            and status.state == "ready"
-            and status.hooks == REQUIRED_HOOKS
-            and status.features == REQUIRED_FEATURES
-            and status.ack == probe
-            and status.session ~= nil
-            and status.session ~= ""
-            and status["end"] == "1"
+        readCapabilities(status)
+        local compatible = statusEnvelopeIsCurrent(status, true)
         if compatible then
+            local wasReady = ready
             nativeSession = status.session
             ready = true
             state = "ready"
@@ -287,17 +361,29 @@ function NativeBridge.Create(settings, api, diagnostics)
             if not save() then
                 return
             end
-            diagnostics.Info("native_bridge_ready", {
-                hooks = status.hooks,
-                native_pid = status.pid,
-                native_session = nativeSession,
-                protocol = status.protocol,
-                version = status.version,
-            })
+            if not wasReady then
+                diagnostics.Info("native_bridge_ready", {
+                    hooks = status.hooks,
+                    delegated_roll = capabilities.delegated_roll.ready and 1 or 0,
+                    native_pid = status.pid,
+                    native_session = nativeSession,
+                    protocol = status.protocol,
+                    quick_lockpick = capabilities.quick_lockpick.ready and 1 or 0,
+                    version = status.version,
+                })
+            end
+            visibleWarning()
+            if remaining > 0 and (capabilities.quick_lockpick.state == "pending"
+                or capabilities.delegated_roll.state == "pending") then
+                api.Schedule(settings.NATIVE_HANDSHAKE_POLL_MS, function()
+                    poll(generation, remaining - 1)
+                end)
+            end
             return
         end
         if remaining <= 0 then
             ready = false
+            invalidateCapabilities("native_handshake_unavailable")
             diagnostics.Error("native_bridge_unavailable", {
                 detail = detail,
                 hooks = status.hooks,
@@ -316,6 +402,10 @@ function NativeBridge.Create(settings, api, diagnostics)
     function instance.BeginHandshake()
         handshakeGeneration = handshakeGeneration + 1
         ready = false
+        capabilities = {
+            delegated_roll = { ready = false, reason = "waiting_for_native_ack", source = "none" },
+            quick_lockpick = { ready = false, reason = "waiting_for_native_ack", source = "none" },
+        }
         records = {}
         nativeSession = ""
         state = "waiting_for_native_ack"
@@ -329,7 +419,15 @@ function NativeBridge.Create(settings, api, diagnostics)
     end
 
     function instance.IsReady()
-        return ready
+        return ready and capabilities.delegated_roll.ready
+    end
+
+    function instance.IsCapabilityReady(name)
+        if ready then
+            nativeStatusIsCurrent()
+        end
+        local capability = capabilities[name]
+        return ready and capability ~= nil and capability.ready == true
     end
 
     function instance.SetTrace(enabled)
@@ -338,7 +436,8 @@ function NativeBridge.Create(settings, api, diagnostics)
     end
 
     function instance.Upsert(record)
-        if not ready or not nativeStatusIsCurrent() then
+        if not ready or not capabilities.delegated_roll.ready
+            or not nativeStatusIsCurrent() then
             return false, "native_bridge_not_ready"
         end
         local initiatorHandle, initiatorUuid = entityIdentity(record.initiator)
@@ -374,7 +473,7 @@ function NativeBridge.Create(settings, api, diagnostics)
     end
 
     function instance.SetRoll(id, roll, rollUuid)
-        if not ready then
+        if not ready or not capabilities.delegated_roll.ready then
             return false, "native_bridge_not_ready"
         end
         local record = records[id]
@@ -404,7 +503,7 @@ function NativeBridge.Create(settings, api, diagnostics)
     end
 
     function instance.SetPresentation(id, advantageType)
-        if not ready then
+        if not ready or not capabilities.delegated_roll.ready then
             return false, "native_bridge_not_ready"
         end
         local record = records[id]
@@ -429,7 +528,7 @@ function NativeBridge.Create(settings, api, diagnostics)
     end
 
     function instance.SetFinishedEvent(id, eventEntity)
-        if not ready then
+        if not ready or not capabilities.delegated_roll.ready then
             return false, "native_bridge_not_ready"
         end
         local record = records[id]
@@ -478,9 +577,10 @@ function NativeBridge.Create(settings, api, diagnostics)
 
     function instance.GetStatus()
         return {
+            capabilities = capabilities,
             detail = detail,
             nativeSession = nativeSession,
-            ready = ready,
+            ready = ready and capabilities.delegated_roll.ready,
             state = state,
         }
     end
