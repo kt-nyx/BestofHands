@@ -1495,7 +1495,7 @@ std::optional<boh::QuickLockpickRequest> NextQuickLockpick(
     return {};
 }
 
-std::optional<std::uintptr_t> FindStockCharacterTask(
+std::optional<std::uintptr_t> FindStockCharacterTaskCandidate(
     void* controller, std::uint32_t requestedType) noexcept
 {
     if (controller == nullptr) {
@@ -1508,12 +1508,29 @@ std::optional<std::uintptr_t> FindStockCharacterTask(
     }
     void* task{};
     if (!boh::TryGetCharacterTask(
-            getCharacterTask, controller, requestedType, task)
-        || task == nullptr
-        || !IsReadable(task, sizeof(void*))) {
+            getCharacterTask, controller, requestedType, task)) {
+        return {};
+    }
+    if (task == nullptr) {
         return {};
     }
     return reinterpret_cast<std::uintptr_t>(task);
+}
+
+bool IsStockCharacterTaskReadable(std::uintptr_t task) noexcept
+{
+    return IsReadable(
+        reinterpret_cast<void const*>(task), sizeof(void*));
+}
+
+std::optional<std::uintptr_t> FindStockCharacterTask(
+    void* controller, std::uint32_t requestedType) noexcept
+{
+    auto const task = FindStockCharacterTaskCandidate(
+        controller, requestedType);
+    return task.has_value() && IsStockCharacterTaskReadable(*task)
+        ? task
+        : std::optional<std::uintptr_t>{};
 }
 
 struct LeftClickRedirect {
@@ -1531,12 +1548,12 @@ std::optional<LeftClickRedirect> ResolveLeftClickRedirect(
         || requestedTask == nullptr) {
         return {};
     }
-    auto const itemUseTask = FindStockCharacterTask(
+    auto const itemUseTask = FindStockCharacterTaskCandidate(
         controller, kClientItemUseTaskType);
-    if (!itemUseTask.has_value()) {
-        return {};
-    }
-    if (*itemUseTask != reinterpret_cast<std::uintptr_t>(requestedTask)) {
+    if (!boh::ValidateSelectedStockTaskCandidate(
+            itemUseTask,
+            reinterpret_cast<std::uintptr_t>(requestedTask),
+            &IsStockCharacterTaskReadable)) {
         return {};
     }
     if (!Read(At<std::uint64_t>(

@@ -36,6 +36,20 @@ static_assert(offsetof(
     StockLockpickTaskConfiguration, canLockpick) == 0x12);
 static_assert(std::is_trivially_copyable_v<StockLockpickTaskConfiguration>);
 
+template <class ReadabilityProbe>
+bool ValidateSelectedStockTaskCandidate(
+    std::optional<std::uintptr_t> candidate,
+    std::uintptr_t selectedTask,
+    ReadabilityProbe&& isReadable)
+{
+    // Comparing opaque pointers is safe. Defer the comparatively expensive
+    // memory-region probe until BG3 has actually selected this stock task.
+    if (!candidate.has_value() || *candidate != selectedTask) {
+        return false;
+    }
+    return isReadable(*candidate);
+}
+
 struct LeftClickRoutingSnapshot {
     bool valid{};
     std::string nativeSession;
