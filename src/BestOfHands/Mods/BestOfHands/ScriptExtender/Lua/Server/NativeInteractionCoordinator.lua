@@ -283,7 +283,7 @@ local function aggregateAdvantageType(component)
     return hasAdvantage and 1 or 2
 end
 
-function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, diagnostics)
+function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, diagnostics, features)
     local instance = {}
     local function delegatedRollReady()
         if type(bridge.IsCapabilityReady) == "function" then
@@ -445,6 +445,15 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
     end
 
     function instance.OnNativeRequest(action, actor, target, requestId)
+        -- A repeated permission request for an accepted action must retain
+        -- its chosen profile, including after an MCM change or during retry.
+        local accepted = pendingByTarget[targetKey(action, target)]
+        if accepted ~= nil and sameObject(accepted.initiator, actor) then
+            return false
+        end
+        if features ~= nil and not features.IsEnabled("best_in_party_" .. action) then
+            return false
+        end
         if not delegatedRollReady() then
             diagnostics.Warn("native_delegation_skipped", {
                 action = action,

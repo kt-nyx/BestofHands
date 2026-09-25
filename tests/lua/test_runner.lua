@@ -8,6 +8,8 @@ local NativeBridge = dofile(luaRoot .. "NativeBridge.lua")
 local NativeInteractionCoordinator = dofile(luaRoot .. "NativeInteractionCoordinator.lua")
 local NativeRuntimeApi = dofile(luaRoot .. "NativeRuntimeApi.lua")
 local Settings = dofile(luaRoot .. "Settings.lua")
+local FeatureSettings = dofile(luaRoot .. "FeatureSettings.lua")
+local LocalSettings = dofile(luaRoot .. "../Client/LocalSettings.lua")
 local QuickLockpickCoordinator = dofile(
     luaRoot .. "QuickLockpickCoordinator.lua"
 )
@@ -86,6 +88,220 @@ local function resolverApi(scores, overrides)
         IsSummon = function(character) return overrides.summon == character end,
     }
 end
+
+test("optional MCM host settings default On and accept only booleans", function()
+    local previous = MCM
+    for _, unavailable in ipairs({ false, {}, { Get = function() error("not ready") end } }) do
+        MCM = unavailable
+        local values = FeatureSettings.Read(Settings.MODULE_UUID)
+        assertEqual(true, values.best_in_party_lockpick, "missing MCM keeps lockpick On")
+        assertEqual(true, values.best_in_party_disarm, "missing MCM keeps disarm On")
+    end
+    MCM = { Get = function(id, uuid)
+        assertEqual(Settings.MODULE_UUID, uuid, "explicit mod identity")
+        if id == "best_in_party_lockpick" then return false end
+        return "false"
+    end }
+    local features = FeatureSettings.Create(Settings)
+    assertEqual(false, features.IsEnabled("best_in_party_lockpick"), "explicit false")
+    assertEqual(true, features.IsEnabled("best_in_party_disarm"), "malformed value defaults On")
+    MCM = { Get = function() return nil end }
+    assertEqual(true, features.IsEnabled("best_in_party_lockpick"), "missing/reset value defaults On")
+    MCM = previous
+end)
+
+local function localSettingsHarness(initial, withMcm)
+    local stored = initial
+    local tabCallback, checkbox, errorText, resetButton
+    local events, ticks = {}, {}
+    local registrations, writes, reads, notifications = 0, 0, 0, 0
+    local failSave = false
+    local function installMcm()
+        MCM = {
+            Get = function() error("personal preference must not read host settings") end,
+            InsertModMenuTab = function(args)
+                assertEqual(Settings.MODULE_UUID, args.modUUID, "local tab mod identity")
+                assertEqual("Features", args.tabName, "reuse the party settings page")
+                registrations = registrations + 1
+                tabCallback = args.tabCallback
+            end,
+        }
+    end
+    MCM = nil
+    if withMcm then installMcm() end
+    Ext = {
+        IO = {
+            LoadFile = function() reads = reads + 1 return stored end,
+            SaveFile = function(_, text)
+                if failSave then return false end
+                writes = writes + 1
+                stored = text
+                return true
+            end,
+        },
+        Json = {
+            Parse = function(text)
+                if text == "bad" then error("malformed json") end
+                if text == "off" then return { left_click_lockpick = false } end
+                return { left_click_lockpick = text == "on" and true or "invalid" }
+            end,
+            Stringify = function(value) return value.left_click_lockpick and "on" or "off" end,
+        },
+        Events = {},
+        OnNextTick = function(callback) ticks[#ticks + 1] = callback end,
+        Utils = { Print = function() end },
+    }
+    for _, name in ipairs({ "SessionLoaded", "ResetCompleted", "GameStateChanged" }) do
+        Ext.Events[name] = { Subscribe = function(_, callback) events[name] = callback end }
+    end
+    local function container()
+        local node = { Children = {} }
+        function node:AddGroup()
+            local group = container()
+            self.Children[#self.Children + 1] = group
+            return group
+        end
+        function node:AddText(label)
+            errorText = { Label = label }
+            function errorText:SetColor(name, value) self[name .. "Color"] = value end
+            self.Children[#self.Children + 1] = errorText
+            return errorText
+        end
+        function node:AddCheckbox(label, value)
+            assertEqual("Left-click lockpick", label, "local checkbox title")
+            checkbox = { Checked = value }
+            self.Children[#self.Children + 1] = checkbox
+            return checkbox
+        end
+        function node:AddImageButton(label, icon, size)
+            assertEqual("ico_randomize_d", icon, "standard MCM reset icon")
+            resetButton = { Label = label, Image = { Icon = icon }, Size = size }
+            self.Children[#self.Children + 1] = resetButton
+            return resetButton
+        end
+        return node
+    end
+    local function render(tab)
+        tab = tab or container()
+        tabCallback(tab)
+        return tab
+    end
+    local features = LocalSettings.Start(Settings)
+    features.Subscribe(function() notifications = notifications + 1 end)
+    return {
+        features = features,
+        installMcm = installMcm,
+        events = events,
+        render = render,
+        change = function(value)
+            checkbox.Checked = value
+            checkbox.OnChange(checkbox)
+        end,
+        failSave = function() failSave = true end,
+        reset = function() resetButton.OnClick() end,
+        state = function()
+            return stored, registrations, writes, reads, notifications, checkbox, errorText, resetButton
+        end,
+    }
+end
+
+test("personal left-click setting ignores persisted Off without MCM", function()
+    local previousExt, previousMcm = Ext, MCM
+    local h = localSettingsHarness("off", false)
+    assertEqual(true, h.features.IsEnabled(), "no MCM means On even with old saved Off")
+    local _, registered, writes, reads = h.state()
+    assertEqual(0, registered, "no MCM tab")
+    assertEqual(0, reads, "no local configuration read without MCM")
+    assertEqual(0, writes, "no writes without MCM")
+    h.installMcm()
+    h.events.SessionLoaded()
+    assertEqual(false, h.features.IsEnabled(), "late MCM loads personal preference")
+    h.events.GameStateChanged()
+    h.events.ResetCompleted()
+    local _, count = h.state()
+    assertEqual(1, count, "register custom tab only once")
+    Ext, MCM = previousExt, previousMcm
+end)
+
+test("personal MCM checkbox persists and save failures retain previous value", function()
+    local previousExt, previousMcm = Ext, MCM
+    for _, initial in ipairs({ "", "bad", "on", "invalid" }) do
+        local h = localSettingsHarness(initial, true)
+        assertEqual(true, h.features.IsEnabled(), "untouched/malformed local settings default On")
+    end
+    local h = localSettingsHarness("off", true)
+    h.render()
+    assertEqual(false, h.features.IsEnabled(), "stored personal Off is loaded")
+    h.change(true)
+    local stored, _, writes, _, notifications = h.state()
+    assertEqual("on", stored, "saved on this client")
+    assertEqual(1, writes, "one write for one click")
+    assertEqual(1, notifications, "immediate bridge update")
+    h.failSave()
+    h.change(false)
+    local _, _, _, _, _, checkbox, errorText = h.state()
+    assertEqual(true, h.features.IsEnabled(), "failed save retains active value")
+    assertEqual(true, checkbox.Checked, "failed save restores UI")
+    assertContains(errorText.Label, "Could not save", "visible persistence error")
+    -- A second client's configuration is independent of the first client's Off.
+    local first = localSettingsHarness("off", true)
+    local second = localSettingsHarness("on", true)
+    assertEqual(false, first.features.IsEnabled(), "first client remains Off")
+    assertEqual(true, second.features.IsEnabled(), "second client remains On")
+    Ext, MCM = previousExt, previousMcm
+end)
+
+test("shared feature page renders the personal checkbox once per UI instance", function()
+    local previousExt, previousMcm = Ext, MCM
+    local h = localSettingsHarness("off", true)
+    local tab = h.render()
+    local personalGroup = tab.Children[1]
+    assertEqual(4, #personalGroup.Children, "one checkbox, reset, explanation, and error text")
+    local hostControl = { IDContext = "host_party_controls" }
+    tab.Children[#tab.Children + 1] = hostControl
+    h.render(tab)
+    h.render(tab)
+    assertEqual(2, #tab.Children, "repeated MCM callback adds no duplicate group")
+    assertEqual(personalGroup, tab.Children[1], "existing personal checkbox retained")
+    assertEqual(hostControl, tab.Children[2], "host controls are not cleared or replaced")
+    h.change(true)
+    assertEqual(true, h.features.IsEnabled(), "the single checkbox remains functional")
+    local rebuiltTab = h.render()
+    assertEqual(1, #rebuiltTab.Children, "a rebuilt UI gets its own personal controls")
+    assertEqual(true, rebuiltTab.Children[1].Children[1].Checked, "rebuilt checkbox shows current preference")
+    h.render(rebuiltTab)
+    assertEqual(1, #rebuiltTab.Children, "rebuilt UI also rejects duplicate render")
+    Ext, MCM = previousExt, previousMcm
+end)
+
+test("personal reset restores and persists the enabled default", function()
+    local previousExt, previousMcm = Ext, MCM
+    local h = localSettingsHarness("on", true)
+    local tab = h.render()
+    local _, _, _, _, _, _, _, reset = h.state()
+    assertEqual(false, reset.Visible, "reset hidden at default")
+    h.change(false)
+    assertEqual(true, reset.Visible, "reset appears when disabled")
+    h.reset()
+    local saved, _, writes, _, notifications, checkbox = h.state()
+    assertEqual("on", saved, "reset persists enabled default")
+    assertEqual(true, checkbox.Checked, "reset updates checkbox")
+    assertEqual(true, h.features.IsEnabled(), "reset enables behavior immediately")
+    assertEqual(false, reset.Visible, "reset hides after returning to default")
+    assertEqual(2, writes, "toggle and reset each persist once")
+    assertEqual(2, notifications, "toggle and reset both notify the bridge")
+    local description = tab.Children[1].Children[3]
+    assertEqual(0.67, description.TextColor[4], "standard MCM description opacity")
+    assertContains(description.Label, "In multiplayer, this affects only your controls.",
+        "short multiplayer footnote")
+    h.change(false)
+    h.failSave()
+    h.reset()
+    assertEqual(false, h.features.IsEnabled(), "failed reset save preserves disabled setting")
+    assertEqual(false, checkbox.Checked, "failed reset keeps checkbox unchecked")
+    assertEqual(true, reset.Visible, "failed reset retains reset control")
+    Ext, MCM = previousExt, previousMcm
+end)
 
 test("production diagnostics default off and obey the runtime trace toggle", function()
     local lines = {}
@@ -742,7 +958,7 @@ test("native bridge requires a live matching challenge acknowledgement", functio
         NATIVE_HANDSHAKE_ATTEMPTS = 2,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.2.0",
+        VERSION = "2.3.0",
     }
     local bridge = NativeBridge.Create(settings, api, recordingDiagnostics())
     bridge.BeginHandshake()
@@ -750,7 +966,7 @@ test("native bridge requires a live matching challenge acknowledgement", functio
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
         "protocol=8",
-        "version=2.2.0",
+        "version=2.3.0",
         "state=ready",
         "session=123-456",
         "pid=123",
@@ -883,14 +1099,14 @@ test("native bridge isolates quick lockpick from unavailable delegated rolls", f
         NATIVE_HANDSHAKE_ATTEMPTS = 1,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.2.0",
+        VERSION = "2.3.0",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, recordingDiagnostics())
     bridge.BeginHandshake()
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=8", "version=2.2.0", "state=partial", "session=session-p",
+        "protocol=8", "version=2.3.0", "state=partial", "session=session-p",
         "features=" .. NativeBridge.REQUIRED_FEATURES, "ack=" .. probe,
         "cap_quick_lockpick=ready", "cap_quick_lockpick_source=structural_compatibility",
         "cap_quick_lockpick_reason=ok",
@@ -932,14 +1148,14 @@ test("native bridge refreshes pending capabilities and validates manifests", fun
         NATIVE_HANDSHAKE_ATTEMPTS = 3,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.2.0",
+        VERSION = "2.3.0",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, recordingDiagnostics())
     bridge.BeginHandshake()
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=8", "version=2.2.0", "state=partial", "session=session-p",
+        "protocol=8", "version=2.3.0", "state=partial", "session=session-p",
         "features=" .. NativeBridge.REQUIRED_FEATURES, "ack=" .. probe,
         "cap_quick_lockpick=ready", "cap_quick_lockpick_source=exact_table",
         "cap_quick_lockpick_hooks=wrong_manifest",
@@ -953,7 +1169,7 @@ test("native bridge refreshes pending capabilities and validates manifests", fun
         "pending delegated capability remains disabled")
 
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=8", "version=2.2.0", "state=ready", "session=session-p",
+        "protocol=8", "version=2.3.0", "state=ready", "session=session-p",
         "features=" .. NativeBridge.REQUIRED_FEATURES, "ack=" .. probe,
         "cap_quick_lockpick=ready", "cap_quick_lockpick_source=exact_table",
         "cap_quick_lockpick_hooks=" .. NativeBridge.QUICK_LOCKPICK_HOOKS,
@@ -1000,14 +1216,14 @@ test("native bridge cannot report ready when its session acknowledgement write f
         NATIVE_HANDSHAKE_ATTEMPTS = 1,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.2.0",
+        VERSION = "2.3.0",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, diagnostics)
     bridge.BeginHandshake()
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=8", "version=2.2.0", "state=ready", "session=session-a",
+        "protocol=8", "version=2.3.0", "state=ready", "session=session-a",
         "pid=10", "hooks=" .. NativeBridge.REQUIRED_HOOKS,
         "features=" .. NativeBridge.REQUIRED_FEATURES,
         "cap_quick_lockpick=ready", "cap_quick_lockpick_source=exact_table",
@@ -1051,7 +1267,7 @@ test("native bridge fails closed and warns once per capability when the DLL is u
         NATIVE_HANDSHAKE_ATTEMPTS = 1,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.2.0",
+        VERSION = "2.3.0",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, recordingDiagnostics())
@@ -1090,7 +1306,7 @@ test("native bridge warning retries a temporarily unavailable host once per gene
         NATIVE_WARNING_ATTEMPTS = 3,
         NATIVE_WARNING_RETRY_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.2.0",
+        VERSION = "2.3.0",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, recordingDiagnostics())
@@ -1105,7 +1321,7 @@ test("native bridge warning retries a temporarily unavailable host once per gene
     scheduled[2]()
     assertEqual(4, hostAttempts, "second capability retry")
     assertEqual(2, #messages, "one successful warning per capability")
-    assertContains(messages[1], "Best of Hands 2.2.0",
+    assertContains(messages[1], "Best of Hands 2.3.0",
         "warning uses the current mod version")
     assertContains(messages[1],
         "Quick Lockpick / left-click integration",
@@ -1141,7 +1357,7 @@ test("native bridge drops warning retries from a superseded handshake generation
         NATIVE_WARNING_ATTEMPTS = 2,
         NATIVE_WARNING_RETRY_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.2.0",
+        VERSION = "2.3.0",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, recordingDiagnostics())
@@ -1178,14 +1394,14 @@ test("native bridge disables delegation if its acknowledgement is replaced", fun
         NATIVE_HANDSHAKE_ATTEMPTS = 1,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.2.0",
+        VERSION = "2.3.0",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, recordingDiagnostics())
     bridge.BeginHandshake()
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=8", "version=2.2.0", "state=ready", "session=session-a",
+        "protocol=8", "version=2.3.0", "state=ready", "session=session-a",
         "pid=10", "hooks=" .. NativeBridge.REQUIRED_HOOKS,
         "features=" .. NativeBridge.REQUIRED_FEATURES,
         "cap_quick_lockpick=ready", "cap_quick_lockpick_source=exact_table",
@@ -1197,7 +1413,7 @@ test("native bridge disables delegation if its acknowledgement is replaced", fun
     scheduled[1]()
     assertEqual(true, bridge.IsReady(), "initially ready")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=8", "version=2.2.0", "state=ready", "session=session-a",
+        "protocol=8", "version=2.3.0", "state=ready", "session=session-a",
         "pid=10", "hooks=" .. NativeBridge.REQUIRED_HOOKS,
         "features=" .. NativeBridge.REQUIRED_FEATURES,
         "ack=replaced-probe", "detail=another bridge replaced the ack", "end=1", "",
@@ -1238,7 +1454,7 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
             "protocol=8",
-            "pak_version=2.2.0",
+            "pak_version=2.3.0",
             "probe=test",
             "native_session=44-55",
             "trace=0",
@@ -1303,7 +1519,7 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
     }
     local bridge = NativePresentationBridge.Start({
         TRACE_EVENTS = false,
-        VERSION = "2.2.0",
+        VERSION = "2.3.0",
     })
     local component = {
         RollContext = 5,
@@ -1406,7 +1622,7 @@ test("client bridge prepares and queues BG3's stock lockpick task", function()
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
             "protocol=8",
-            "pak_version=2.2.0",
+            "pak_version=2.3.0",
             "probe=test",
             "native_session=44-55",
             "trace=0",
@@ -1456,10 +1672,15 @@ test("client bridge prepares and queues BG3's stock lockpick task", function()
             serverMessages[#serverMessages + 1] = payload
         end,
     }
+    local leftClick = true
+    local featureChanged
     NativePresentationBridge.Start({
         TRACE_EVENTS = false,
-        VERSION = "2.2.0",
-    }, channel)
+        VERSION = "2.3.0",
+    }, channel, {
+        IsEnabled = function() return leftClick end,
+        Subscribe = function(callback) featureChanged = callback end,
+    })
     assertEqual("function", type(handler), "quick-lockpick client handler registered")
     handler({
         actor = actorGuid,
@@ -1492,6 +1713,17 @@ test("client bridge prepares and queues BG3's stock lockpick task", function()
     })
     assertEqual(1, #serverMessages,
         "duplicate start does not acknowledge or queue twice")
+    leftClick = false
+    featureChanged()
+    assertContains(files["BestOfHandsNative.client"], "quick=42-0-1",
+        "turning Off preserves an already accepted fallback")
+    handler({
+        actor = actorGuid, operation = "start", request = "42-0-2", target = targetGuid,
+    })
+    assertEqual("rejected", serverMessages[2].operation, "new fallback is rejected when Off")
+    assertEqual("feature_disabled", serverMessages[2].reason, "personal Off is enforced on client")
+    assertEqual(nil, files["BestOfHandsNative.client"]:find("quick=42-0-2", 1, true),
+        "disabled fallback never reaches native activation")
     handler({ operation = "cancel", request = "unknown" })
     assertContains(
         files["BestOfHandsNative.client"],
@@ -1535,7 +1767,7 @@ test("client bridge rejects malformed or unpublishable fallback requests", funct
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
             "protocol=8",
-            "pak_version=2.2.0",
+            "pak_version=2.3.0",
             "probe=test",
             "native_session=44-55",
             "trace=0",
@@ -1580,7 +1812,7 @@ test("client bridge rejects malformed or unpublishable fallback requests", funct
     }
     NativePresentationBridge.Start({
         TRACE_EVENTS = false,
-        VERSION = "2.2.0",
+        VERSION = "2.3.0",
     }, channel)
 
     local function start(request, actor, targetValue)
@@ -1715,7 +1947,7 @@ test("client bridge publishes pre-use left-click interception state", function()
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
             "protocol=8",
-            "pak_version=2.2.0",
+            "pak_version=2.3.0",
             "probe=test",
             "native_session=44-55",
             "trace=0",
@@ -1764,10 +1996,15 @@ test("client bridge publishes pre-use left-click interception state", function()
         SetHandler = function(_, callback) handler = callback end,
         SendToServer = function() return true end,
     }
+    local leftClick = true
+    local featureChanged
     NativePresentationBridge.Start({
         TRACE_EVENTS = false,
-        VERSION = "2.2.0",
-    }, channel)
+        VERSION = "2.3.0",
+    }, channel, {
+        IsEnabled = function() return leftClick end,
+        Subscribe = function(callback) featureChanged = callback end,
+    })
     table.remove(nextTicks, 1)()
     assertContains(
         files["BestOfHandsNative.leftclick"],
@@ -1786,6 +2023,19 @@ test("client bridge publishes pre-use left-click interception state", function()
         "locked=" .. targetEntity.handle .. "\t88",
         "keyless locked target snapshot"
     )
+
+    leftClick = false
+    featureChanged()
+    assertEqual(nil, files["BestOfHandsNative.leftclick"]:find("eligible=", 1, true),
+        "personal Off immediately removes automatic click eligibility")
+    callbacks.KeyDestroy()
+    table.remove(nextTicks, 1)()
+    assertEqual(nil, files["BestOfHandsNative.leftclick"]:find("eligible=", 1, true),
+        "world updates cannot re-enable a disabled preference")
+    leftClick = true
+    featureChanged()
+    assertContains(files["BestOfHandsNative.leftclick"], "eligible=" .. actorEntity.handle,
+        "personal On restores click eligibility without reloading")
 
     handler({
         actor = actorEntity.guid,
@@ -1897,7 +2147,7 @@ test("client left-click snapshot isolates actors, keys, targets, and sessions", 
     local function actions(session)
         return table.concat({
             "protocol=8",
-            "pak_version=2.2.0",
+            "pak_version=2.3.0",
             "probe=test",
             "native_session=" .. session,
             "trace=0",
@@ -1960,7 +2210,7 @@ test("client left-click snapshot isolates actors, keys, targets, and sessions", 
     }
     NativePresentationBridge.Start({
         TRACE_EVENTS = false,
-        VERSION = "2.2.0",
+        VERSION = "2.3.0",
     }, channel)
 
     local function flush()
@@ -2538,7 +2788,7 @@ local function makeCoordinator(options)
             return true, true
         end,
         Schedule = function(_, callback) timers[#timers + 1] = callback end,
-    }, resolver, bridge, diagnostics)
+    }, resolver, bridge, diagnostics, options.features)
     return coordinator, bridge, upserts, removed, records, rollCorrelations, timers,
         presentationStates, rejections
 end
@@ -2550,6 +2800,70 @@ test("both actions use the same native delegation path without blocking vanilla"
     coordinator.Clear("test")
     assertEqual(false, coordinator.OnNativeRequest("disarm", "actor", "target", 5), "disarm observation")
     assertEqual("disarm", upserts[2].action, "disarm action")
+end)
+
+test("all eight feature combinations keep personal controls and host rolls independent", function()
+    local previousExt, previousMcm = Ext, MCM
+    for mask = 0, 7 do
+        local leftClick = mask % 2 == 1
+        local lockpick = math.floor(mask / 2) % 2 == 1
+        local disarm = math.floor(mask / 4) % 2 == 1
+        local h = localSettingsHarness(leftClick and "on" or "off", true)
+        MCM.Get = function(id)
+            if id == "best_in_party_lockpick" then return lockpick end
+            if id == "best_in_party_disarm" then return disarm end
+            error("unexpected host setting")
+        end
+        local coordinator, _, upserts = makeCoordinator({
+            features = FeatureSettings.Create(Settings),
+        })
+        coordinator.OnNativeRequest("lockpick", "actor", "target", 100 + mask)
+        coordinator.OnNativeRequest("disarm", "actor", "trap", 200 + mask)
+        assertEqual((lockpick and 1 or 0) + (disarm and 1 or 0), #upserts,
+            "only enabled host actions are delegated, mask " .. mask)
+        for _, record in ipairs(upserts) do
+            assertEqual(true, (record.action == "lockpick" and lockpick)
+                or (record.action == "disarm" and disarm), "correct action")
+        end
+        assertEqual(leftClick, h.features.IsEnabled(), "client preference ignores host, mask " .. mask)
+    end
+    Ext, MCM = previousExt, previousMcm
+end)
+
+test("host setting changes leave accepted rolls and retries intact", function()
+    local previous = MCM
+    local enabled = true
+    MCM = { Get = function() return enabled end }
+    local coordinator, _, upserts, removed, _, correlations, timers = makeCoordinator({
+        features = FeatureSettings.Create(Settings),
+    })
+    coordinator.OnNativeRequest("lockpick", "actor", "target", 81)
+    enabled = false
+    coordinator.OnNativeRequest("lockpick", "actor", "target", 81)
+    assertEqual(1, #upserts, "accepted request is not rebuilt on setting change")
+    assertEqual(0, #removed, "accepted bridge record remains")
+    coordinator.OnNativeRequest("disarm", "actor", "trap", 82)
+    assertEqual(1, #upserts, "next disabled action stays vanilla")
+    local roll = entity("00000000-0000-0000-0000-000000000081", "0200000200000081")
+    local component = {
+        RollUuid = "00000000-0000-0000-0000-000000000082",
+        Roller = actor, Subject = target,
+        Entity2Uuid = "", EntityUuid = "", FixedRollBonuses = {}, ResolvedRollBonuses = {},
+    }
+    roll.RequestedRoll = component
+    coordinator.OnRequestedRoll(roll, component)
+    assertEqual(1, #correlations, "accepted action still correlates after toggle Off")
+    coordinator.OnRollResult("Lockpick", "actor", "target", 0, 1, 0)
+    assertEqual(1, coordinator.Count(), "failure retains Inspiration retry")
+    coordinator.OnRollResult("Lockpick", "actor", "target", 1, 1, 0)
+    timers[#timers]()
+    assertEqual(0, coordinator.Count(), "completed action clears normally")
+    coordinator.OnNativeRequest("lockpick", "actor", "target", 83)
+    assertEqual(1, #upserts, "new lockpick stays vanilla after Off")
+    enabled = true
+    coordinator.OnNativeRequest("lockpick", "actor", "target", 84)
+    assertEqual(2, #upserts, "next action uses new On setting")
+    MCM = previous
 end)
 
 test("missing tools reject both native actions before a roll can open", function()

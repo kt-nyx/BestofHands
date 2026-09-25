@@ -129,12 +129,20 @@ if ($cmakeVersion -notmatch '^\d+\.\d+\.\d+$' -or
     throw 'Pinned native CMake toolchain metadata is missing or invalid.'
 }
 $workflowText = Get-Content -LiteralPath $workflowPath -Raw
-$expectedNexusDescription = '          description: ""'
+$expectedNexusDescription = @'
+          description: |-
+            [color=red][b]IMPORTANT:[/b][/color]
+            You need to MANUALLY install the Native Mod portion of this mod from the downloaded zip file.
+
+            Place the [b]bin[/b] folder from the zip [b]into your BG3 game folder[/b], overwriting if asked.
+
+            More info in description!
+'@
 $normalizedWorkflowText = $workflowText.Replace("`r`n", "`n")
 $normalizedExpectedNexusDescription =
     $expectedNexusDescription.Replace("`r`n", "`n")
 if (-not $normalizedWorkflowText.Contains($normalizedExpectedNexusDescription)) {
-    throw 'The Nexus release file description must be empty.'
+    throw 'The Nexus release file description must match the approved manual native-install instructions.'
 }
 
 $semanticVersion = (Get-Content -LiteralPath $versionPath -Raw).Trim()
@@ -173,14 +181,17 @@ if ($version -ne $expectedVersion64) {
 }
 
 $expectedPackageFiles = @(
+    'Mods/BestOfHands/MCM_blueprint.json',
     'Mods/BestOfHands/meta.lsx',
     'Mods/BestOfHands/ScriptExtender/Config.json',
     'Mods/BestOfHands/ScriptExtender/Lua/BootstrapClient.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/BootstrapServer.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Client/NativePresentationBridge.lua',
+    'Mods/BestOfHands/ScriptExtender/Lua/Client/LocalSettings.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Shared/Channels.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/LegacyAssistanceCleanup.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/Diagnostics.lua',
+    'Mods/BestOfHands/ScriptExtender/Lua/Server/FeatureSettings.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/Init.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/NativeBridge.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/NativeInteractionCoordinator.lua',

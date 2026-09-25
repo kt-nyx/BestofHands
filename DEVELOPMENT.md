@@ -1,8 +1,52 @@
 # Developing Best of Hands
 
-Best of Hands 2.2.0 consists of a normal BG3 PAK and a small Windows native plugin. The PAK selects the specialist and owns diagnostics; the DLL changes the roll-profile source at narrow validated server action boundaries and supplies the specialist's aggregate advantage at the exact client `DCActiveRoll` presentation boundary. A bounded, exact-roll-UUID client lease retains that presentation value after the replicated `RequestedRoll` is destroyed and preserves it through BG3's signature-validated modifier-aggregation and click-to-roll boundaries. These hooks never change the server roll component or outcome. On the client they may correct only presentation state, including the local advantage byte and immediate-total fallback flag; numeric result values and ownership remain unchanged. Neither half completes actions, rolls dice, consumes tools, or synthesizes success/failure outcomes. The left-click adapter activates only BG3's stock client Lockpick task through its validated native controller lifecycle; the only gameplay target rewrite is an accepted active-roll bonus: its already validated initiator target is changed to the specialist so the effect enters the delegated profile.
+Best of Hands 2.3.0 consists of a normal BG3 PAK and a small Windows native plugin. The PAK selects the specialist and owns diagnostics; the DLL changes the roll-profile source at narrow validated server action boundaries and supplies the specialist's aggregate advantage at the exact client `DCActiveRoll` presentation boundary. A bounded, exact-roll-UUID client lease retains that presentation value after the replicated `RequestedRoll` is destroyed and preserves it through BG3's signature-validated modifier-aggregation and click-to-roll boundaries. These hooks never change the server roll component or outcome. On the client they may correct only presentation state, including the local advantage byte and immediate-total fallback flag; numeric result values and ownership remain unchanged. Neither half completes actions, rolls dice, consumes tools, or synthesizes success/failure outcomes. The left-click adapter activates only BG3's stock client Lockpick task through its validated native controller lifecycle; the only gameplay target rewrite is an accepted active-roll bonus: its already validated initiator target is changed to the specialist so the effect enters the delegated profile.
 
 ## Runtime contract
+
+### Optional feature settings
+
+Players can independently disable left-click lockpick, best-in-party lockpick,
+and best-in-party disarm. All default to enabled, and MCM remains optional:
+`MCM_blueprint.json` declares `Optional: true`, with no metadata dependency.
+
+`Server/FeatureSettings.lua` reads the two party-roll settings through the
+public `MCM.Get(id, moduleUuid)` API at action admission. Missing APIs, missing
+values, errors, and non-boolean values retain enabled defaults. Resetting MCM
+settings or switching profiles therefore takes effect on the next action
+without a settings cache or an event-order dependency. Once accepted, a
+delegation keeps its existing specialist/bridge record throughout the roll
+and Inspiration retries. Settings do not clear or rewrite active records.
+
+MCM blueprint settings normally belong to the host. To provide a genuinely
+personal click preference, `Client/LocalSettings.lua` adds its checkbox to the
+same **Features** page as the two blueprint settings through the public
+`MCM.InsertModMenuTab` API, using the matching tab name. Repeated render callbacks
+reuse the existing personal-control group instead of appending duplicates or
+clearing MCM's host controls. A short multiplayer footnote closes each description.
+The personal checkbox uses MCM's standard faded-white description color and
+reset icon; its reset button appears only when disabled and saves the enabled
+default through the same persistence path as a checkbox change.
+The client saves its checkbox using
+`Ext.IO` to `BestOfHands/ClientSettings.json` under the local Script Extender
+directory. This file is independent of MCM profiles and save files. It is
+ignored when MCM is unavailable, so removing MCM restores all-enabled behavior.
+Failed writes restore the previous checkbox value and show an inline error.
+Split-screen players sharing one client share this preference.
+
+The client immediately republishes the native left-click eligibility snapshot
+when the preference changes. Off publishes no eligible initiators; it does not
+remove the already accepted fallback requests or roll presentation records.
+The failed-Use fallback also checks the preference on the owning client before
+publishing a native activation request, so the server cannot re-enable a
+guest's disabled click feature. No native hook or bridge-protocol change is
+needed. Context-menu interactions still reach the independent server-side
+party-roll gates.
+
+The integration uses MCM's [public API and custom-tab contract](https://github.com/AtilioA/BG3-MCM/blob/main/wiki.md).
+See [MCM-TESTING.md](MCM-TESTING.md) for the manual game checks.
+
+### Interaction flow
 
 Client Lua publishes a compact snapshot of eligible locally controlled
 initiator handles and replicated currently locked targets. It derives current
@@ -131,6 +175,7 @@ the callable originals while installing the replacement slots.
 ```text
 PAK / server Lua
   Init.lua
+    +-- FeatureSettings.lua -- optional host MCM settings at action admission
     +-- PartySkillResolver.lua
     +-- QuickLockpickCoordinator.lua -- failed-Use fallback + success invalidation
     +-- NativeInteractionCoordinator.lua
@@ -140,6 +185,7 @@ PAK / server Lua
     `-- Diagnostics.lua
 
 PAK / client Lua
+  LocalSettings.lua -> optional personal MCM checkbox and local persistence
   Channels.lua
   NativePresentationBridge.lua -> publish locked target + initiator snapshot
                                -> exclude available keys/combat/turn-based mode
@@ -194,16 +240,19 @@ native/
   tests/BridgeProtocolTests.cpp
 src/BestOfHands/Mods/BestOfHands/
   meta.lsx
+  MCM_blueprint.json
   ScriptExtender/
     Config.json
     Lua/
       BootstrapClient.lua
       BootstrapServer.lua
       Client/
+        LocalSettings.lua
         NativePresentationBridge.lua
       Shared/
         Channels.lua
       Server/
+        FeatureSettings.lua
         Diagnostics.lua
         Init.lua
         LegacyAssistanceCleanup.lua
@@ -300,7 +349,7 @@ Outputs:
 
 ```text
 dist\BestofHands.pak
-dist\BestofHands.zip
+dist\BestofHands-v2.3.0.zip
   BestofHands.pak
   info.json
   bin\NativeMods\BestofHands.dll
@@ -389,7 +438,7 @@ API usage is billed to the OpenAI API project behind `OPENAI_API_KEY`, separatel
 
 Start and final emails use `RESEND_API_KEY`, `NOTIFICATION_EMAIL_FROM`, and `NOTIFICATION_EMAIL_TO`. Final status is `succeeded`, `failed`, or `needs intervention` and includes the Actions, update issue, and draft PR links when available. If preparation fails, correct the actor, issue marker, evidence path/schema, or SHA. If Codex fails, inspect only the trusted action log and rerun manually. If patch policy fails, review the rejected paths and revise the fixed prompt/evidence rather than weakening policy. If Windows validation fails, keep the PR in draft, fix it manually, and rerun tests. Never enable automatic merge or reuse the compatibility workflow as a release workflow.
 
-The existing `.github/workflows/ci.yml` remains the only release workflow. Its `nexus-production` approval, `NEXUSMODS_FILE_ID`, and deliberately blank Nexus file description are protected by repository validation.
+The existing `.github/workflows/ci.yml` remains the only release workflow. Its `nexus-production` approval, `NEXUSMODS_FILE_ID`, and approved Nexus file description explaining manual native installation are protected by repository validation. GitHub release notes are left empty for the maintainer to write. Merge the release changes into `main`, wait for its CI/package checks, and tag that clean merged commit to publish.
 
 ## Manual release gates
 

@@ -20,20 +20,38 @@ The party member with highest modifiers is calculated when you start the roll so
 - [BG3 Script Extender](https://github.com/Norbyte/bg3se/releases/latest)
 - [Native Mod Loader](https://www.nexusmods.com/baldursgate3/mods/944)
 
+## Optional settings
+
+Version 2.3.0 adds support for [Mod Configuration Menu (MCM)](https://www.nexusmods.com/baldursgate3/mods/9162) if you want to turn individual features off. **MCM is optional.** Without it, or with the menu untouched, all three features are enabled with their usual behavior.
+
+Open MCM and select **Best of Hands → Features**. All three toggles share one page; a short note below each description explains its multiplayer scope:
+
+| Toggle | Who it affects |
+| --- | --- |
+| Left-click lockpick | Only your client. Other players keep their own preference. |
+| Best-in-party lockpick | Everyone, using the host's setting. |
+| Best-in-party disarm | Everyone, using the host's setting. |
+
+Each toggle has an enabled default. When a feature is disabled, its reset button restores that default.
+
+Changes apply to new actions without restarting. A roll already in progress, including its Inspiration rerolls, finishes with the behavior it started with. With left-click lockpick off, you can still choose **Lockpick** from the normal context menu. With either best-in-party feature off, the initiating character uses their own modifiers for that action.
+
+Your left-click preference is saved on your computer and is independent of MCM profiles. Party-roll preferences use MCM's normal settings and profiles. MCM's own host-only mode controls who may edit the shared party-roll settings; guests' local preferences never determine those rolls.
+
 ## Installation
 **Before you do anything, install [BG3 Script Extender](https://github.com/Norbyte/bg3se/releases/latest) and [Native Mod Loader](https://www.nexusmods.com/baldursgate3/mods/944)... and use [BG3 Mod Manager](https://github.com/LaughingLeader/BG3ModManager/releases/latest) ya animal!**
 
 1. Download this mod manually.
-2. In BG3 Mod Manager, select **File > Import Mod** and choose the downloaded `BestofHands.zip`.
+2. In BG3 Mod Manager, select **File > Import Mod** and choose the downloaded `BestofHands-v2.3.0.zip`.
 3. Move *Best of Hands - Quick Lockpick & Disarm* to the **Active Mods** side.
 4. Export the load order to the game.
 5. Navigate to your game folder (typically `C:\Program Files (x86)\Steam\steamapps\common\Baldurs Gate 3` for Steam installs).
-6. Open the downloaded `BestofHands.zip`.
+6. Open the downloaded `BestofHands-v2.3.0.zip`.
 7. Drag the **bin** folder from the ZIP file into your game folder.
 8. Profit!
 
 ## Compatibility
-Version 2.2.0 supports BG3 product version `4.1.1.7398727` on both DX11 and Vulkan. Exact build tables remain the preferred native path. Capabilities are resolved independently: an unknown identity may retain Quick Lockpick only when one reviewed exact-layout template still matches all four required native boundaries, while layout-sensitive delegated rolls require an exact build table. One unavailable capability no longer disables the other. See [DEVELOPMENT.md](DEVELOPMENT.md#capability-readiness-and-build-resolution) for the fail-closed details and update workflow.
+Version 2.3.0 supports BG3 product version `4.1.1.7398727` on both DX11 and Vulkan. Exact build tables remain the preferred native path. Capabilities are resolved independently: an unknown identity may retain Quick Lockpick only when one reviewed exact-layout template still matches all four required native boundaries, while layout-sensitive delegated rolls require an exact build table. One unavailable capability no longer disables the other. See [DEVELOPMENT.md](DEVELOPMENT.md#capability-readiness-and-build-resolution) for the fail-closed details and update workflow.
 
 As of v2.1.0, Best of Hands now has built-in compatibility with Eternal Lockpick or Eternal Trap Disarm Kit, no patch needed.
 
