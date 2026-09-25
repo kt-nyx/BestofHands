@@ -60,14 +60,17 @@ if ($LASTEXITCODE -ne 0) {
 $manifestOutput | ForEach-Object { Write-Host $_ }
 
 $expectedPackageFiles = @(
+    'Mods/BestOfHands/MCM_blueprint.json',
     'Mods/BestOfHands/meta.lsx',
     'Mods/BestOfHands/ScriptExtender/Config.json',
     'Mods/BestOfHands/ScriptExtender/Lua/BootstrapClient.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/BootstrapServer.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Client/NativePresentationBridge.lua',
+    'Mods/BestOfHands/ScriptExtender/Lua/Client/LocalSettings.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Shared/Channels.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/LegacyAssistanceCleanup.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/Diagnostics.lua',
+    'Mods/BestOfHands/ScriptExtender/Lua/Server/FeatureSettings.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/Init.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/NativeBridge.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/NativeInteractionCoordinator.lua',

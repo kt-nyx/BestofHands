@@ -1,0 +1,28 @@
+{
+    "SchemaVersion": 1,
+    "ModName": "Best of Hands",
+    "ModDescription": "Choose which features to use. Changes affect new actions; rolls already in progress finish unchanged. All features work without MCM.",
+    "Optional": true,
+    "Tabs": [
+        {
+            "TabId": "features",
+            "TabName": "Features",
+            "Settings": [
+                {
+                    "Id": "best_in_party_lockpick",
+                    "Name": "Best-in-party lockpick",
+                    "Type": "checkbox",
+                    "Default": true,
+                    "Description": "Use the best eligible party member's modifiers for lockpicking. When disabled, the character attempting the lockpick uses their own modifiers.\n\nIn multiplayer, the host's choice applies to everyone."
+                },
+                {
+                    "Id": "best_in_party_disarm",
+                    "Name": "Best-in-party disarm",
+                    "Type": "checkbox",
+                    "Default": true,
+                    "Description": "Use the best eligible party member's modifiers for disarming traps. When disabled, the character attempting the disarm uses their own modifiers.\n\nIn multiplayer, the host's choice applies to everyone."
+                }
+            ]
+        }
+    ]
+}

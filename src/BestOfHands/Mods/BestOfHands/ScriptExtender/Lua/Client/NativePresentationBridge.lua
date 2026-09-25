@@ -103,7 +103,7 @@ local function write(level, event, fields)
     Ext.Utils.Print(line)
 end
 
-function NativePresentationBridge.Start(settings, quickLockpickChannel)
+function NativePresentationBridge.Start(settings, quickLockpickChannel, features)
     local instance = {}
     local tracked = {}
     local clientRecords = {}
@@ -300,7 +300,9 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
         }
         local initiatorValues = {}
         for _, record in pairs(leftClickInitiators) do
-            initiatorValues[#initiatorValues + 1] = record
+            if features == nil or features.IsEnabled("left_click_lockpick") then
+                initiatorValues[#initiatorValues + 1] = record
+            end
         end
         table.sort(initiatorValues, function(left, right)
             return left.initiator < right.initiator
@@ -610,6 +612,9 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
     end
 
     local function prepareQuickLockpick(data)
+        if features ~= nil and not features.IsEnabled("left_click_lockpick") then
+            return false, "feature_disabled"
+        end
         if type(data) ~= "table"
             or type(data.request) ~= "string"
             or not data.request:match("^[%w%.%-]+$")
@@ -742,12 +747,14 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
                 end
                 local started, reason = prepareQuickLockpick(data)
                 if not started then
-                    write("WARN", "client_quick_lockpick_rejected", {
-                        actor = data.actor,
-                        reason = reason,
-                        request = data.request,
-                        target = data.target,
-                    })
+                    if reason ~= "feature_disabled" then
+                        write("WARN", "client_quick_lockpick_rejected", {
+                            actor = data.actor,
+                            reason = reason,
+                            request = data.request,
+                            target = data.target,
+                        })
+                    end
                     pcall(function()
                         quickLockpickChannel:SendToServer({
                             operation = "rejected",
@@ -827,6 +834,14 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel)
         end
         snapshotRefreshPending = true
         Ext.OnNextTick(runLeftClickSnapshotRefresh)
+    end
+
+    if features ~= nil then
+        features.Subscribe(function()
+            -- Republish eligibility immediately; leave accepted fallback
+            -- requests and all delegated roll/presentation records intact.
+            if not saveLeftClickSnapshot() then scheduleLeftClickSnapshot() end
+        end)
     end
 
     if type(Ext.OnNextTick) == "function"

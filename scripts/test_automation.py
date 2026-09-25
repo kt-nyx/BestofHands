@@ -133,6 +133,13 @@ assert "if: needs.prepare.result == 'success'" not in codex.split("completion_em
 assert "PREPARE_RESULT" in codex
 assert "environment:\n      name: nexus-production" in release
 assert "file_id: ${{ vars.NEXUSMODS_FILE_ID }}" in release
-assert 'description: ""' in release
+assert '''          description: |-
+            [color=red][b]IMPORTANT:[/b][/color]
+            You need to MANUALLY install the Native Mod portion of this mod from the downloaded zip file.
+
+            Place the [b]bin[/b] folder from the zip [b]into your BG3 game folder[/b], overwriting if asked.
+
+            More info in description!''' in release
+assert '--notes ""' in release and '--generate-notes' not in release
 
 print("Automation parser, evidence, patch-policy, and workflow tests passed.")

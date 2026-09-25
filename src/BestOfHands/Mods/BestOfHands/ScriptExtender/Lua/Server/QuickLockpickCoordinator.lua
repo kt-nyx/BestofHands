@@ -188,12 +188,16 @@ function QuickLockpickCoordinator.Create(
             return false
         end
         if data.operation == "rejected" then
-            diagnostics.Warn("quick_lockpick_client_rejected", {
-                actor = record.actor,
-                reason = data.reason or "client_rejected",
-                request = record.id,
-                target = record.target,
-            })
+            -- A personal Off preference is an ordinary vanilla click, not a
+            -- failed integration. Still clear its unused fallback request.
+            if data.reason ~= "feature_disabled" then
+                diagnostics.Warn("quick_lockpick_client_rejected", {
+                    actor = record.actor,
+                    reason = data.reason or "client_rejected",
+                    request = record.id,
+                    target = record.target,
+                })
+            end
             return clearRecord(record, "client_rejected")
         end
         if data.operation ~= "queued"

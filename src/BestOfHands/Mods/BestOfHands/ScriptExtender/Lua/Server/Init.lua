@@ -9,6 +9,7 @@ local NativeBridge = Ext.Require("Server/NativeBridge.lua")
 local NativeInteractionCoordinator = Ext.Require("Server/NativeInteractionCoordinator.lua")
 local QuickLockpickCoordinator = Ext.Require("Server/QuickLockpickCoordinator.lua")
 local Channels = Ext.Require("Shared/Channels.lua")
+local FeatureSettings = Ext.Require("Server/FeatureSettings.lua")
 
 Ext.Vars.RegisterModVariable(Settings.MODULE_UUID, Settings.ACTIVE_ASSISTANCE_VAR, {
     Server = true,
@@ -16,6 +17,7 @@ Ext.Vars.RegisterModVariable(Settings.MODULE_UUID, Settings.ACTIVE_ASSISTANCE_VA
 })
 
 local diagnostics = Diagnostics.Create(Settings)
+local features = FeatureSettings.Create(Settings)
 local api = NativeRuntimeApi.Create(Settings, diagnostics)
 local resolver = PartySkillResolver.Create(api, diagnostics)
 local legacyCleanup = LegacyAssistanceCleanup.Create(api, diagnostics)
@@ -25,7 +27,8 @@ local interaction = NativeInteractionCoordinator.Create(
     api,
     resolver,
     bridge,
-    diagnostics
+    diagnostics,
+    features
 )
 local quickLockpick = QuickLockpickCoordinator.Create(
     Settings,
@@ -54,6 +57,8 @@ local function statusFields()
     local status = bridge.GetStatus()
     local compatibility = api.GetToolCompatibilityStatus()
     return {
+        best_in_party_lockpick = features.IsEnabled("best_in_party_lockpick") and 1 or 0,
+        best_in_party_disarm = features.IsEnabled("best_in_party_disarm") and 1 or 0,
         bridge_detail = status.detail,
         bridge_state = status.state,
         eternal_lockpick_loaded =
@@ -251,6 +256,7 @@ end)
 return {
     Bridge = bridge,
     Diagnostics = diagnostics,
+    Features = features,
     Interaction = interaction,
     LegacyCleanup = legacyCleanup,
     QuickLockpick = quickLockpick,
