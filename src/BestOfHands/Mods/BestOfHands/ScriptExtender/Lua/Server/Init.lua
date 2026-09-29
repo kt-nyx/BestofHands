@@ -253,6 +253,12 @@ Ext.Events.ResetCompleted:Subscribe(function()
     emitStatus("lua_reset_completed")
 end)
 
+Ext.Events.GameStateChanged:Subscribe(function(event)
+    if event.ToState == "Running" then
+        api.Schedule(0, function() bridge.NotifyGameplayReady() end)
+    end
+end)
+
 return {
     Bridge = bridge,
     Diagnostics = diagnostics,

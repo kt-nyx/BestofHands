@@ -631,6 +631,48 @@ constexpr BuildSpec kBuilds[] = {
         0x01b4282f,
         0x01b40d10, 0x01b40290, 0x01b402b0,
     },
+    // BG3 4.1.1.7631656 / Steam 25605617. Reviewed separately for each
+    // renderer; notably the translated-name assignment moved independently.
+    {
+        L"bg3_dx11.exe", 0x6ab1357d, 0x065b5000,
+        0x05ff03c0, 0x2b0,
+        0x060d94b4, 0x0605052c,
+        0x032d2e3a, 0x03295614,
+        0x01546a96, 0x01546b28, kClientRollSourceContextSignature,
+        0x0154c549, 0x015475d0,
+        0x015479f6, 0x01547a05,
+        0x0154807e,
+        0x01548056, 0x0154cb70, 0x0154cc02, 0x0154cc3c,
+        0x0154cd96, 0x0154cdd0,
+        0x01696842,
+        0x01548061, 0x01548228,
+        0x020ee2d0, 0x0600fc88, 0x0154e6c0,
+        0x0154e7e0, 0x0154e630, 0x01340f40, 0x01340890,
+        0x0154e520, 0x0154f980, 0x01226240,
+        0x012eca90, 0x01485a80, 0x0410edb0,
+        0x01b4150f,
+        0x01b3f9f0, 0x01b3ef70, 0x01b3ef90,
+    },
+    {
+        L"bg3.exe", 0x6ab1367e, 0x0683f000,
+        0x06279d38, 0x2b0,
+        0x06362cf4, 0x062d9d64,
+        0x032d2cca, 0x032954a4,
+        0x01547a96, 0x01547b28, kClientRollSourceContextSignature,
+        0x0154d549, 0x015485d0,
+        0x015489f6, 0x01548a05,
+        0x0154907e,
+        0x01549056, 0x0154db70, 0x0154dc02, 0x0154dc3c,
+        0x0154dd96, 0x0154ddd0,
+        0x01697822,
+        0x01549061, 0x01549228,
+        0x020ef0f0, 0x062995a0, 0x0154f6c0,
+        0x0154f7e0, 0x0154f630, 0x01341f50, 0x013418a0,
+        0x0154f520, 0x01550980, 0x01227250,
+        0x012edaa0, 0x01486a80, 0x041450e0,
+        0x01b4281f,
+        0x01b40d00, 0x01b40280, 0x01b402a0,
+    },
 };
 
 struct ClientPresentationLease {
@@ -1123,8 +1165,11 @@ std::optional<std::string> QueryVersionString(
         return std::nullopt;
     }
     std::wstring_view text(value, valueCharacters);
-    while (!text.empty() && text.back() == L'\0') {
-        text.remove_suffix(1);
+    // Some BG3 version resources report a length extending past the string.
+    // Never include the following resource fields in status files or UI text.
+    if (auto const terminator = text.find(L'\0');
+        terminator != std::wstring_view::npos) {
+        text = text.substr(0, terminator);
     }
     if (text.empty()
         || text.find_first_of(L"\r\n|") != std::wstring_view::npos) {
