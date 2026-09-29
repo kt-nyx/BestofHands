@@ -1,6 +1,6 @@
 # Developing Best of Hands
 
-Best of Hands 2.3.0 consists of a normal BG3 PAK and a small Windows native plugin. The PAK selects the specialist and owns diagnostics; the DLL changes the roll-profile source at narrow validated server action boundaries and supplies the specialist's aggregate advantage at the exact client `DCActiveRoll` presentation boundary. A bounded, exact-roll-UUID client lease retains that presentation value after the replicated `RequestedRoll` is destroyed and preserves it through BG3's signature-validated modifier-aggregation and click-to-roll boundaries. These hooks never change the server roll component or outcome. On the client they may correct only presentation state, including the local advantage byte and immediate-total fallback flag; numeric result values and ownership remain unchanged. Neither half completes actions, rolls dice, consumes tools, or synthesizes success/failure outcomes. The left-click adapter activates only BG3's stock client Lockpick task through its validated native controller lifecycle; the only gameplay target rewrite is an accepted active-roll bonus: its already validated initiator target is changed to the specialist so the effect enters the delegated profile.
+Best of Hands 2.3.1 consists of a normal BG3 PAK and a small Windows native plugin. The PAK selects the specialist and owns diagnostics; the DLL changes the roll-profile source at narrow validated server action boundaries and supplies the specialist's aggregate advantage at the exact client `DCActiveRoll` presentation boundary. A bounded, exact-roll-UUID client lease retains that presentation value after the replicated `RequestedRoll` is destroyed and preserves it through BG3's signature-validated modifier-aggregation and click-to-roll boundaries. These hooks never change the server roll component or outcome. On the client they may correct only presentation state, including the local advantage byte and immediate-total fallback flag; numeric result values and ownership remain unchanged. Neither half completes actions, rolls dice, consumes tools, or synthesizes success/failure outcomes. The left-click adapter activates only BG3's stock client Lockpick task through its validated native controller lifecycle; the only gameplay target rewrite is an accepted active-roll bonus: its already validated initiator target is changed to the specialist so the effect enters the delegated profile.
 
 ## Runtime contract
 
@@ -169,6 +169,56 @@ and are never discarded while an installed hook could still call them. A
 temporary null server-world observation does not retire live hooks; a stable
 non-null replacement world drops only the retired slot addresses and reuses
 the callable originals while installing the replacement slots.
+
+### September 2026 compatibility update (2.3.1)
+
+BG3 `4.1.1.7631656`, Steam build `25605617`, moved several functions used by
+the mod. Version 2.3.1 adds separate DX11 and Vulkan tables, preserving older
+tables and the existing signature checks. No gameplay behavior or bridge
+protocol changed.
+
+| Executable | PE timestamp | SizeOfImage | SHA-256 |
+| --- | --- | --- | --- |
+| `bg3_dx11.exe` | `0x6AB1357D` | `0x065B5000` | `6FA3CD43E1ADE63C49D7AB9D82231F6E60FF5FC906DB62C1BE76CD926F37AF00` |
+| `bg3.exe` | `0x6AB1367E` | `0x0683F000` | `E37DACD2FE5E9B781E44DE7220266B9228F23F52C20F73099E9FACB2E62ECDA0` |
+
+All 33 guarded hook/helper addresses per executable match their exact
+signatures and instruction boundaries. The leaf `GetCharacterTask` routine
+has no unwind record; its complete short body was inspected separately.
+Server globals were located through the Script Extender's server/client
+mapping; system-index addresses through the named type-registration routines.
+Client collection, presentation, property-notification, and translated-name
+helpers were checked through their callers and field accesses. In particular,
+the translated-name assignment moved independently to `0x0410EDB0` (DX11)
+and `0x041450E0` (Vulkan), so a uniform address shift is incorrect. DX11's
+source-context call now matches the existing common exact signature.
+Game memory layouts used by these reviewed paths remain unchanged.
+Static validation is separate from gameplay validation. The maintainer
+confirmed normal mod behavior in-game on September 29 after installing 2.3.1;
+the renderer was not specified. Separate gameplay checks of both renderers and
+visual confirmation of the warning remain unverified.
+
+The missing warning was reproduced from the September 29 runtime log:
+both capabilities reported unavailable, but all three message attempts failed
+because `GetHostCharacter()` returned no character during loading. Lua now
+combines affected features into one plain-language message, rearms exhausted
+attempts on the server's `GameStateChanged` transition to `Running`, and retries
+on an affected action if necessary. Successful delivery is recorded as
+`native_bridge_warning_shown`; already shown failures remain deduplicated.
+The regression test exhausts every loading-time retry, makes the host
+available, and verifies one update notice plus no duplicates on later checks.
+
+The warning includes `nexusmods.com/baldursgate3/mods/23881` as plain text.
+The installed game's `MessageBoxTemplates.xaml` uses `TextBlockFormatter`,
+but offers no verified arbitrary-URL command. Other game pages explicitly
+bind their special hyperlinks to `OpenURLInBrowserCommand` with predefined
+parameters. Script Extender's ImGui `TextLink` emits a click callback and does
+not itself launch a browser. Do not promise a clickable link in this message
+box without validating a supported browser-opening route.
+
+Native version-resource strings are truncated at their first NUL terminator:
+this BG3 resource reports an overlong string length, which previously appended
+adjacent resource fields to the logged game version.
 
 ## Architecture
 
@@ -438,7 +488,7 @@ API usage is billed to the OpenAI API project behind `OPENAI_API_KEY`, separatel
 
 Start and final emails use `RESEND_API_KEY`, `NOTIFICATION_EMAIL_FROM`, and `NOTIFICATION_EMAIL_TO`. Final status is `succeeded`, `failed`, or `needs intervention` and includes the Actions, update issue, and draft PR links when available. If preparation fails, correct the actor, issue marker, evidence path/schema, or SHA. If Codex fails, inspect only the trusted action log and rerun manually. If patch policy fails, review the rejected paths and revise the fixed prompt/evidence rather than weakening policy. If Windows validation fails, keep the PR in draft, fix it manually, and rerun tests. Never enable automatic merge or reuse the compatibility workflow as a release workflow.
 
-The existing `.github/workflows/ci.yml` remains the only release workflow. Its `nexus-production` approval, `NEXUSMODS_FILE_ID`, and approved Nexus file description explaining manual native installation are protected by repository validation. GitHub release notes are left empty for the maintainer to write. Merge the release changes into `main`, wait for its CI/package checks, and tag that clean merged commit to publish.
+The existing `.github/workflows/ci.yml` remains the only release workflow. Its `nexus-production` approval and `NEXUSMODS_FILE_ID` remain in place. Nexus file descriptions and GitHub release notes are left empty for the maintainer to write; repository validation enforces the blank Nexus description. Merge the release changes into `main`, wait for its CI/package checks, and tag that clean merged commit to publish.
 
 ## Manual release gates
 

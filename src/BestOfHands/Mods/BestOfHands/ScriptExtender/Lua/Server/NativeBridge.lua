@@ -135,8 +135,8 @@ function NativeBridge.Create(settings, api, diagnostics)
     local state = "not_started"
     local detail = "handshake has not started"
     local warningShownGeneration = {}
-    local warningExhaustedGeneration = {}
-    local warningRetryGeneration = {}
+    local warningExhaustedGeneration
+    local warningRetryGeneration
     local handshakeGeneration = 0
     local visibleWarning
 
@@ -187,88 +187,88 @@ function NativeBridge.Create(settings, api, diagnostics)
         return true
     end
 
-    local function capabilityMessage(name)
-        local capability = capabilities[name]
-        local label = name == "quick_lockpick"
-            and "Quick Lockpick / left-click integration"
-            or "Best-in-party delegated rolls"
-        local otherName = name == "quick_lockpick" and "delegated_roll" or "quick_lockpick"
-        local fallback = capabilities[otherName].ready
-            and "Other validated Best of Hands features remain enabled."
-            or "Normal Baldur's Gate 3 behavior remains available for affected actions."
-        return table.concat({
-            "Best of Hands " .. tostring(settings.VERSION) .. ": " .. label
-                .. " is unavailable for this session.",
-            fallback,
-            "Reason: " .. tostring(capability.reason or state),
-            "Detected game: " .. tostring(capability.executable or "unknown")
-                .. " (" .. tostring(capability.gameVersion or "version unavailable") .. ")",
-            "Update Best of Hands after a BG3 patch, and verify Native Mod Loader is current.",
-        }, "\n")
+    local function warningKey(capability)
+        return tostring(capability.reason) .. "|" .. tostring(capability.executable)
+    end
+
+    local function warningDetails()
+        local affected, keys = {}, {}
+        local needsUpdate = false
+        for _, name in ipairs({ "quick_lockpick", "delegated_roll" }) do
+            local capability = capabilities[name]
+            if not capability.ready and capability.state == "unavailable" then
+                affected[#affected + 1] = name == "quick_lockpick"
+                    and "Left-click lockpicking is unavailable. Choose Lockpick from the normal action menu."
+                    or "Best-in-party lockpicking and trap disarming are unavailable. The character you control will use their own bonuses."
+                local key = warningKey(capability)
+                if warningShownGeneration[name] ~= key then
+                    keys[name] = key
+                end
+                local reason = tostring(capability.reason or "")
+                needsUpdate = needsUpdate or reason:find("build", 1, true) ~= nil
+                    or reason:find("exact_layout", 1, true) ~= nil
+            end
+        end
+        if next(keys) == nil then return nil end
+        local message = {
+            "Best of Hands " .. tostring(settings.VERSION)
+                .. (needsUpdate and " needs an update for this version of Baldur's Gate 3."
+                    or " could not start all of its features."),
+            table.concat(affected, "\n"),
+            needsUpdate
+                and "Check Nexus Mods for a compatible update. If none is available yet, you can keep playing with the normal game actions."
+                or "Reinstall both the PAK and DLL from the same Best of Hands download, and check that Native Mod Loader is installed.",
+            "Best of Hands on Nexus Mods (mod 23881):\nnexusmods.com/baldursgate3/mods/23881",
+        }
+        if capabilities.quick_lockpick.ready or capabilities.delegated_roll.ready then
+            message[#message + 1] = "The mod's other features are still available."
+        end
+        return table.concat(message, "\n\n"), keys
     end
 
     visibleWarning = function()
         local generation = handshakeGeneration
-        local function warnCapability(name)
-            local warningKey = tostring(capabilities[name].reason)
-                .. "|" .. tostring(capabilities[name].executable)
-            if capabilities[name].ready
-                or capabilities[name].state == "pending"
-                or warningShownGeneration[name] == warningKey
-                or warningExhaustedGeneration[name] == generation
-                or warningRetryGeneration[name] == generation then
+        if warningExhaustedGeneration == generation
+            or warningRetryGeneration == generation then return end
+        local function attempt(remaining)
+            if generation ~= handshakeGeneration then return end
+            local message, keys = warningDetails()
+            if message == nil then return end
+            local ok, errorMessage = pcall(function()
+                local host = Osi.GetHostCharacter()
+                if host == nil or tostring(host) == ""
+                    or tostring(host) == "00000000-0000-0000-0000-000000000000" then
+                    error("host character unavailable")
+                end
+                Osi.OpenMessageBox(host, message)
+            end)
+            if ok then
+                for name, key in pairs(keys) do warningShownGeneration[name] = key end
+                diagnostics.Info("native_bridge_warning_shown", { generation = generation })
                 return
             end
-            local attempts = math.max(1,
-                tonumber(settings.NATIVE_WARNING_ATTEMPTS) or 3)
-            local retryMs = math.max(1,
-                tonumber(settings.NATIVE_WARNING_RETRY_MS) or 500)
-            local function attempt(remaining)
-                if generation ~= handshakeGeneration
-                    or capabilities[name].ready
-                    or warningShownGeneration[name] == warningKey
-                    or warningExhaustedGeneration[name] == generation then
-                    return
-                end
-
-                local message = capabilityMessage(name)
-                local ok, errorMessage = pcall(function()
-                    local host = Osi.GetHostCharacter()
-                    if host ~= nil and tostring(host) ~= "" then
-                        Osi.OpenMessageBox(host, message)
-                    else
-                        error("host character unavailable")
-                    end
-                end)
-                if ok then
-                    warningShownGeneration[name] = warningKey
-                    warningRetryGeneration[name] = nil
-                    return
-                end
-
-                diagnostics.Error("native_bridge_warning_failed", {
-                    error = errorMessage,
-                    capability = name,
-                    generation = generation,
-                    remaining = remaining - 1,
-                })
-                if remaining <= 1 then
-                    warningRetryGeneration[name] = nil
-                    warningExhaustedGeneration[name] = generation
-                    return
-                end
-                warningRetryGeneration[name] = generation
-                api.Schedule(retryMs, function()
-                    if warningRetryGeneration[name] == generation then
-                        warningRetryGeneration[name] = nil
-                    end
-                    attempt(remaining - 1)
-                end)
+            diagnostics.Error("native_bridge_warning_failed", {
+                error = errorMessage, generation = generation, remaining = remaining - 1,
+            })
+            if remaining <= 1 then
+                warningExhaustedGeneration = generation
+                return
             end
-            attempt(attempts)
+            warningRetryGeneration = generation
+            api.Schedule(math.max(1, tonumber(settings.NATIVE_WARNING_RETRY_MS) or 500), function()
+                if generation ~= handshakeGeneration then return end
+                warningRetryGeneration = nil
+                attempt(remaining - 1)
+            end)
         end
-        warnCapability("quick_lockpick")
-        warnCapability("delegated_roll")
+        attempt(math.max(1, tonumber(settings.NATIVE_WARNING_ATTEMPTS) or 3))
+    end
+
+    function instance.NotifyGameplayReady()
+        -- SessionLoaded can precede the host character. A loading-time failure
+        -- must not permanently suppress the warning once gameplay is running.
+        warningExhaustedGeneration = nil
+        visibleWarning()
     end
 
     local function readCapabilities(status)
@@ -427,6 +427,9 @@ function NativeBridge.Create(settings, api, diagnostics)
             nativeStatusIsCurrent()
         end
         local capability = capabilities[name]
+        if capability ~= nil and capability.state == "unavailable" then
+            instance.NotifyGameplayReady()
+        end
         return ready and capability ~= nil and capability.ready == true
     end
 

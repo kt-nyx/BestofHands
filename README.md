@@ -42,16 +42,20 @@ Your left-click preference is saved on your computer and is independent of MCM p
 **Before you do anything, install [BG3 Script Extender](https://github.com/Norbyte/bg3se/releases/latest) and [Native Mod Loader](https://www.nexusmods.com/baldursgate3/mods/944)... and use [BG3 Mod Manager](https://github.com/LaughingLeader/BG3ModManager/releases/latest) ya animal!**
 
 1. Download this mod manually.
-2. In BG3 Mod Manager, select **File > Import Mod** and choose the downloaded `BestofHands-v2.3.0.zip`.
+2. In BG3 Mod Manager, select **File > Import Mod** and choose the downloaded `BestofHands-v2.3.1.zip`.
 3. Move *Best of Hands - Quick Lockpick & Disarm* to the **Active Mods** side.
 4. Export the load order to the game.
 5. Navigate to your game folder (typically `C:\Program Files (x86)\Steam\steamapps\common\Baldurs Gate 3` for Steam installs).
-6. Open the downloaded `BestofHands-v2.3.0.zip`.
+6. Open the downloaded `BestofHands-v2.3.1.zip`.
 7. Drag the **bin** folder from the ZIP file into your game folder.
 8. Profit!
 
 ## Compatibility
-Version 2.3.0 supports BG3 product version `4.1.1.7398727` on both DX11 and Vulkan. Exact build tables remain the preferred native path. Capabilities are resolved independently: an unknown identity may retain Quick Lockpick only when one reviewed exact-layout template still matches all four required native boundaries, while layout-sensitive delegated rolls require an exact build table. One unavailable capability no longer disables the other. See [DEVELOPMENT.md](DEVELOPMENT.md#capability-readiness-and-build-resolution) for the fail-closed details and update workflow.
+Version 2.3.1 adds compatibility tables for BG3 product version `4.1.1.7631656` (Steam build `25605617`) on both DX11 and Vulkan, retaining earlier supported builds. Both tables passed executable inspection and automated checks, and normal mod behavior was confirmed in-game by the maintainer. Separate gameplay checks of both renderers remain pending.
+
+If a future game update prevents a feature from starting, Best of Hands displays one message explaining which features are unavailable and where to check for an update on Nexus Mods. A warning that could not appear while your save was loading is retried when gameplay starts. The Nexus address is shown as plain text. You can continue using the normal game actions, and any working Best of Hands features stay available.
+
+Exact build tables remain the preferred native path. Capabilities are resolved independently: an unknown identity may retain Quick Lockpick only when one reviewed exact-layout template still matches all four required native boundaries, while layout-sensitive delegated rolls require an exact build table. One unavailable capability no longer disables the other. See [DEVELOPMENT.md](DEVELOPMENT.md#capability-readiness-and-build-resolution) for the fail-closed details and update workflow.
 
 As of v2.1.0, Best of Hands now has built-in compatibility with Eternal Lockpick or Eternal Trap Disarm Kit, no patch needed.
 
