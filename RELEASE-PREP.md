@@ -2,8 +2,8 @@
 
 The bugfix candidate is packaged and has passed the user's short local DX11
 test. Its logs show that both native features became ready, with no Best of
-Hands warnings or errors. This is a prepared candidate; nothing has been
-published to GitHub Releases or Nexus.
+Hands warnings or errors. Publication was authorized on October 2 through the
+existing GitHub Actions release workflow.
 
 ## Changes for players
 
@@ -69,6 +69,9 @@ dismissal, and the external users' exact failures also remain unverified.
 Use the existing release workflow when publication is authorized: merge the
 reviewed source into `main`, wait for its CI checks, then tag that clean commit
 `v2.3.2`. A pushed tag publishes the GitHub release and starts the protected
-Nexus upload. The existing `nexus-production` approval gate remains in place;
-the workflow leaves public descriptions empty for the maintainer. Do not
-describe the untested scenarios above as confirmed runtime results.
+Nexus upload. The existing `nexus-production` approval gate remains in place.
+The workflow copies the current main file's raw BBCode description, including
+formatting tags, keeps the previous
+version visible as an old version, and leaves the Nexus changelog and GitHub
+release notes blank. Its post-upload check verifies these metadata outcomes.
+Do not describe the untested scenarios above as confirmed runtime results.

@@ -129,12 +129,17 @@ if ($cmakeVersion -notmatch '^\d+\.\d+\.\d+$' -or
     throw 'Pinned native CMake toolchain metadata is missing or invalid.'
 }
 $workflowText = Get-Content -LiteralPath $workflowPath -Raw
-$expectedNexusDescription = '          description: ""'
+$expectedNexusDescription = '          description: ${{ steps.nexus_metadata.outputs.description }}'
 $normalizedWorkflowText = $workflowText.Replace("`r`n", "`n")
 $normalizedExpectedNexusDescription =
     $expectedNexusDescription.Replace("`r`n", "`n")
 if (-not $normalizedWorkflowText.Contains($normalizedExpectedNexusDescription)) {
-    throw 'The Nexus release file description must remain blank for the maintainer to write.'
+    throw 'The Nexus release file description must be copied from the current file.'
+}
+if (-not $normalizedWorkflowText.Contains('          archive_existing_version: false') -or
+    $normalizedWorkflowText.Contains('          changelog:') -or
+    -not $normalizedWorkflowText.Contains('--notes ""')) {
+    throw 'Nexus releases must retain visible old versions and leave changelogs/release notes blank.'
 }
 
 $semanticVersion = (Get-Content -LiteralPath $versionPath -Raw).Trim()

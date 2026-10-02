@@ -1,6 +1,6 @@
 # Developing Best of Hands
 
-The current source is the unpublished 2.3.2 release candidate. The user has
+The current source is version 2.3.2. The user has
 completed the short local DX11 test, and its logs show both native features
 ready with no Best of Hands warnings or errors. See
 [release preparation](RELEASE-PREP.md) for the package and coverage limits,
@@ -518,7 +518,21 @@ API usage is billed to the OpenAI API project behind `OPENAI_API_KEY`, separatel
 
 Start and final emails use `RESEND_API_KEY`, `NOTIFICATION_EMAIL_FROM`, and `NOTIFICATION_EMAIL_TO`. Final status is `succeeded`, `failed`, or `needs intervention` and includes the Actions, update issue, and draft PR links when available. If preparation fails, correct the actor, issue marker, evidence path/schema, or SHA. If Codex fails, inspect only the trusted action log and rerun manually. If patch policy fails, review the rejected paths and revise the fixed prompt/evidence rather than weakening policy. If Windows validation fails, keep the PR in draft, fix it manually, and rerun tests. Never enable automatic merge or reuse the compatibility workflow as a release workflow.
 
-The existing `.github/workflows/ci.yml` remains the only release workflow. Its `nexus-production` approval and `NEXUSMODS_FILE_ID` remain in place. Nexus file descriptions and GitHub release notes are left empty for the maintainer to write; repository validation enforces the blank Nexus description. Merge the release changes into `main`, wait for its CI/package checks, and tag that clean merged commit to publish.
+The existing `.github/workflows/ci.yml` remains the only release workflow. Its
+`nexus-production` approval and `NEXUSMODS_FILE_ID` remain in place. Before
+uploading, `scripts/nexus_release_metadata.py` reads the newest active main
+version in that file's update chain through Nexus API v3, then reads its
+raw BBCode description through the game-scoped API v1 file endpoint. The helper
+requires formatting tags and preserves them unchanged; it does not scrape the
+rendered page or strip tags. The official upload
+action receives that same description and `archive_existing_version: false`,
+so the preceding version becomes publicly visible under old versions. A
+post-upload check verifies its category, the copied description, and a blank
+file changelog. Missing descriptions or duplicate versions stop before upload.
+GitHub release notes remain empty, and no Nexus changelog is submitted.
+Repository validation enforces this publication policy. Merge the release
+changes into `main`, wait for its CI/package checks, and tag that clean merged
+commit to publish.
 
 ## Manual release gates
 

@@ -29,6 +29,11 @@ try {
         exit $LASTEXITCODE
     }
 
+    uv run --python 3.13 python .\scripts\test_nexus_release.py
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
     & (Join-Path $PSScriptRoot 'validate-workflows.ps1')
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE

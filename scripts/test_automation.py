@@ -133,7 +133,11 @@ assert "if: needs.prepare.result == 'success'" not in codex.split("completion_em
 assert "PREPARE_RESULT" in codex
 assert "environment:\n      name: nexus-production" in release
 assert "file_id: ${{ vars.NEXUSMODS_FILE_ID }}" in release
-assert '          description: ""' in release
+assert '          description: ${{ steps.nexus_metadata.outputs.description }}' in release
+assert '          archive_existing_version: false' in release
+assert '          changelog:' not in release
+assert 'nexus_release_metadata.py prepare' in release
+assert 'nexus_release_metadata.py verify' in release
 assert '--notes ""' in release and '--generate-notes' not in release
 
 print("Automation parser, evidence, patch-policy, and workflow tests passed.")
