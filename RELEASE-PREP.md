@@ -75,3 +75,20 @@ formatting tags, keeps the previous
 version visible as an old version, and leaves the Nexus changelog and GitHub
 release notes blank. Its post-upload check verifies these metadata outcomes.
 Do not describe the untested scenarios above as confirmed runtime results.
+
+## Published v2.3.2
+
+Published through release run `37059905039` at tag commit
+`e5a5b95a760681149c5aeef5ad50152e24b74308`. GitHub and Nexus uploads succeeded.
+The published ZIP SHA-256 is
+`E8FD60C834482D958923FDE65A8C6C38C2ABF7730D3BDD5AE12E21239A5D35DC`.
+Nexus global version ID is `14920716518244` (game-scoped file `131940`).
+
+The original post-upload check failed because API v1 returned the same breaks
+as `&lt;br /&gt;` for the new upload instead of `<br />` for the legacy source.
+The public page renders both descriptions identically, including red, bold,
+and paragraph breaks. Protected read-only run `37061439639` retrieved both
+API descriptions and confirmed v2.3.2 is main, v2.3.1 is `old_version`, and
+the new changelog is null. A focused correction normalizes only line breaks
+before upload and comparison, retaining the BBCode tags. The published file
+and release tag were preserved; no second package was uploaded.

@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from nexus_release_metadata import prepare, verify, write_output
+from nexus_release_metadata import description_bbcode, prepare, verify, write_output
 
 
 class NexusMetadataTests(unittest.TestCase):
@@ -77,6 +77,26 @@ class NexusMetadataTests(unittest.TestCase):
         opening, body = text.split("\n", 1)
         delimiter = opening.split("<<", 1)[1]
         self.assertEqual(value + "\n" + delimiter + "\n", body)
+
+    def test_api_break_encodings_become_newlines_without_changing_bbcode(self):
+        tags = "[color=red][b]IMPORTANT:[/b][/color]"
+        for line_break in ("<br />", "&lt;br /&gt;", "<br>", "<BR/>"):
+            with self.subTest(line_break=line_break):
+                description = tags + line_break + "[b]Install manually[/b]" + line_break * 2 + "Instructions"
+                expected = tags + "\n[b]Install manually[/b]\n\nInstructions"
+                self.assertEqual(expected, description_bbcode(description))
+                self.responses["/v1/games/baldursgate3/mods/23881/files/1001.json"]["description"] = description
+                self.assertEqual(expected, prepare("7663598", "2.3.2", self.read)["description"])
+
+    def test_post_upload_accepts_equivalent_break_encoding_but_rejects_lost_tags(self):
+        snapshot = self.published()
+        snapshot["description"] = snapshot["description"].replace("\n", "<br />")
+        details = self.responses["/v1/games/baldursgate3/mods/23881/files/1002.json"]
+        details["description"] = self.description.replace("\n", "&lt;br /&gt;")
+        self.assertTrue(verify(snapshot, "102", self.read)["bbcode_preserved"])
+        details["description"] = details["description"].replace("[b]", "").replace("[/b]", "")
+        with self.assertRaisesRegex(ValueError, "description"):
+            verify(snapshot, "102", self.read)
 
     def test_success_verifies_old_category_description_and_blank_changelog(self):
         result = verify(self.published(), "102", self.read)

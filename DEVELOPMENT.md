@@ -523,6 +523,12 @@ The existing `.github/workflows/ci.yml` remains the only release workflow. Its
 uploading, `scripts/nexus_release_metadata.py` reads the newest active main
 version in that file's update chain through Nexus API v3, then reads its
 raw BBCode description through the game-scoped API v1 file endpoint. The helper
+converts API line breaks (`<br />` and `&lt;br /&gt;`) to real newlines while
+preserving BBCode tags. Nexus returns those two encodings for the legacy and
+newly uploaded files respectively; the verification compares equivalent breaks.
+The protected, manual `Inspect published Nexus metadata` workflow can read
+public descriptions and categories after publication without another upload.
+It uses the same tag restrictions and approval gate as publication. The helper
 requires formatting tags and preserves them unchanged; it does not scrape the
 rendered page or strip tags. The official upload
 action receives that same description and `archive_existing_version: false`,

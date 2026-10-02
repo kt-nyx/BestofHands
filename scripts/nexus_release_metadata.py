@@ -20,6 +20,14 @@ API_ROOT = "https://api.nexusmods.com"
 GAME = "baldursgate3"
 MOD_ID = "23881"
 BBCODE = re.compile(r"\[/?(?:b|i|u|s|color|size|font|url|img|quote|code|list|center|left|right|spoiler)(?:[=\s][^\]]*)?\]", re.IGNORECASE)
+LINE_BREAK = re.compile(r"(?:<br\s*/?>|&lt;br\s*/?&gt;)", re.IGNORECASE)
+
+
+def description_bbcode(description: str) -> str:
+    # API v1 returns legacy breaks as <br />, but a v3 upload's breaks as
+    # &lt;br /&gt;. Both render identically on Nexus. Send actual newlines
+    # to avoid accumulating HTML escapes, leaving every BBCode tag intact.
+    return LINE_BREAK.sub("\n", description.replace("\r\n", "\n")).strip()
 
 
 def identifier(value: object) -> str:
@@ -67,7 +75,7 @@ def prepare(file_id: str, next_version: str, read=read_api) -> dict:
     if not isinstance(description, str) or not description.strip():
         raise ValueError("Current file description is empty; refusing to lose install instructions")
     # The official action trims input whitespace. Preserve its actual input.
-    description = description.strip()
+    description = description_bbcode(description)
     if not BBCODE.search(description):
         raise ValueError("Current description has no raw BBCode; refusing to copy rendered or plain text")
     return {
@@ -99,7 +107,7 @@ def verify(snapshot: dict, version_id: str, read=read_api) -> dict:
     details = file_details(published["game_scoped_id"], read)
     if identifier(details["file_id"]) != identifier(published["game_scoped_id"]):
         raise ValueError("Published description identity does not match")
-    if details.get("description", "").strip() != snapshot["description"]:
+    if description_bbcode(details.get("description") or "") != description_bbcode(snapshot["description"]):
         raise ValueError("Published description does not match the previous file")
     if (details.get("changelog_html") or "").strip():
         raise ValueError("Published file changelog is not blank")
