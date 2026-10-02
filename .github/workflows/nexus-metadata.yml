@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: Unlicense
+name: Inspect published Nexus metadata
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_id:
+        description: Published Nexus global version ID
+        required: true
+      previous_version_id:
+        description: Previous Nexus global version ID
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: nexus-production
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Read public file metadata without uploading
+        env:
+          NEXUSMODS_API_KEY: ${{ secrets.NEXUSMODS_API_KEY }}
+          NEXUSMODS_FILE_ID: ${{ vars.NEXUSMODS_FILE_ID }}
+          VERSION_ID: ${{ inputs.version_id }}
+          PREVIOUS_VERSION_ID: ${{ inputs.previous_version_id }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, 'scripts')
+          from nexus_release_metadata import identifier, read_api, file_details
+          result = {}
+          for label, variable in [('published', 'VERSION_ID'), ('previous', 'PREVIOUS_VERSION_ID')]:
+              version_id = identifier(os.environ[variable])
+              version = read_api('/v3/mod-file-versions/' + version_id)['data']
+              if identifier(version['file']['id']) != identifier(os.environ['NEXUSMODS_FILE_ID']):
+                  raise ValueError('Version belongs to another Nexus file')
+              details = file_details(version['game_scoped_id'])
+              if identifier(details['file_id']) != identifier(version['game_scoped_id']):
+                  raise ValueError('Description identity does not match')
+              result[label] = {key: version[key] for key in ['version', 'category', 'game_scoped_id']}
+              result[label].update(version_id=version_id, description=details.get('description'),
+                                   changelog_html=details.get('changelog_html'))
+          destination = Path(os.environ['RUNNER_TEMP']) / 'nexus-metadata.json'
+          destination.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+          print('Read the two public descriptions and categories; no file was uploaded or changed.')
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nexus-public-metadata
+          path: ${{ runner.temp }}/nexus-metadata.json
+          retention-days: 7
+          if-no-files-found: error
