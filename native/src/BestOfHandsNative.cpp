@@ -2,6 +2,7 @@
 #include "BridgeProtocol.h"
 #include "FixedSnapshot.h"
 #include "NativeStartupGate.h"
+#include "NativeStorage.h"
 #include "ProfileRouting.h"
 #include "QuickLockpickState.h"
 #include "SafeMemory.h"
@@ -721,6 +722,10 @@ std::atomic_bool g_stop{false};
 std::atomic_bool g_codeHooksReady{false};
 std::atomic_bool g_quickLockpickHooksReady{false};
 std::atomic_bool g_hooksReady{false};
+std::atomic_bool g_clientBridgeReady{false};
+std::mutex g_handshakeMutex;
+boh::BridgeDocument g_handshakeDocument;
+fs::path g_handshakePath;
 std::mutex g_capabilityStatusMutex;
 std::string g_buildResolutionSource{"none"};
 std::string g_quickLockpickFailure{"not_resolved"};
@@ -871,6 +876,9 @@ std::string g_hookFailure;
 std::optional<fs::file_time_type> g_actionWriteTime;
 std::optional<fs::file_time_type> g_clientActionWriteTime;
 std::optional<fs::file_time_type> g_leftClickActionWriteTime;
+ULONGLONG g_actionReadRetryAfter{};
+ULONGLONG g_clientReadRetryAfter{};
+ULONGLONG g_leftClickReadRetryAfter{};
 std::mutex g_profileTraceMutex;
 std::unordered_map<std::uint64_t, std::uint64_t> g_profilePasses;
 std::mutex g_clientPresentationLeaseMutex;
@@ -1730,6 +1738,13 @@ void ProcessQuickLockpick(void* controller) noexcept
         }
         auto const lockpickTaskAddress = *lockpickTask;
         auto* task = reinterpret_cast<void*>(*lockpickTask);
+        if (runningBefore == *lockpickTask) {
+            // Even a same-target duplicate must not reset a live task's flags.
+            // Different-target requests are discarded; a new click can retry
+            // after BG3 completes or cancels the current interaction.
+            MarkQuickLockpickConsumed(request->request);
+            return;
+        }
         if (!ConfigureStockLockpickTask(LeftClickRedirect{
                 lockpickTaskAddress,
                 request->target,
@@ -1742,11 +1757,6 @@ void ProcessQuickLockpick(void* controller) noexcept
                 + "|controller="
                 + Hex(reinterpret_cast<std::uintptr_t>(controller))
                 + "|task=" + Hex(*lockpickTask));
-            MarkQuickLockpickConsumed(request->request);
-            return;
-        }
-
-        if (runningBefore == *lockpickTask) {
             MarkQuickLockpickConsumed(request->request);
             return;
         }
@@ -2225,14 +2235,15 @@ std::optional<std::uint8_t> CurrentClientPresentationAdvantage(
         return lease.frozenAdvantage;
     }
 
-    // Modifier choices can change the server aggregate after the lease was
-    // first bound. Prefer the newest exact-roll record while it exists, then
+    // Modifier choices can change the host aggregate after the lease was
+    // first bound. Read its locally mapped client copy, including on guests,
+    // and prefer the newest exact-roll record while it exists, then
     // retain the last validated lease value through replicated destruction.
     {
-        std::shared_lock lock(g_documentMutex);
-        if (g_document.valid
-            && g_document.nativeSession == g_sessionUtf8) {
-            for (auto const& record : g_document.records) {
+        std::shared_lock lock(g_clientDocumentMutex);
+        if (g_clientDocument.valid
+            && g_clientDocument.nativeSession == g_sessionUtf8) {
+            for (auto const& record : g_clientDocument.records) {
                 if (record.id == lease.selection->record.id
                     && record.rollUuid == lease.selection->record.rollUuid
                     && record.presentationAdvantage <= 2) {
@@ -2319,6 +2330,15 @@ bool AtomicWrite(fs::path const& path, std::string const& contents)
 void WriteStatus(std::string_view state, std::string_view detail, std::string_view ack)
 {
     auto const capabilityStatus = ReadCapabilityStatus();
+    auto const pending = [](std::string const& reason) {
+        return reason.empty() || reason.starts_with("waiting_for_") || reason == "not_resolved";
+    };
+    std::string clientAck;
+    {
+        std::scoped_lock lock(g_handshakeMutex);
+        if (g_handshakeDocument.nativeSession == g_sessionUtf8)
+            clientAck = g_handshakeDocument.probe;
+    }
     std::scoped_lock lock(g_statusMutex);
     std::ostringstream status;
     status << "protocol=" << boh::kProtocolVersion << "\n"
@@ -2339,7 +2359,8 @@ void WriteStatus(std::string_view state, std::string_view detail, std::string_vi
            << "hooks=" << (g_hooksReady.load() ? kReportedHooks : "none") << "\n"
            << "features=" << kReportedFeatures << "\n"
            << "cap_quick_lockpick="
-           << (g_quickLockpickHooksReady.load() ? "ready" : "unavailable") << "\n"
+           << (g_quickLockpickHooksReady.load() ? "ready"
+               : (pending(capabilityStatus.quickFailure) ? "pending" : "unavailable")) << "\n"
            << "cap_quick_lockpick_source="
            << (g_quickLockpickHooksReady.load() ? capabilityStatus.source : "none") << "\n"
            << "cap_quick_lockpick_reason="
@@ -2349,7 +2370,8 @@ void WriteStatus(std::string_view state, std::string_view detail, std::string_vi
            << "cap_delegated_roll="
            << (g_codeHooksReady.load() && g_hooksReady.load()
                    ? "ready"
-                   : (g_codeHooksReady.load() ? "pending" : "unavailable")) << "\n"
+                   : (pending(capabilityStatus.delegatedFailure)
+                       ? "pending" : "unavailable")) << "\n"
            << "cap_delegated_roll_source="
            << (g_codeHooksReady.load() && g_hooksReady.load()
                    ? capabilityStatus.source : "none") << "\n"
@@ -2360,6 +2382,8 @@ void WriteStatus(std::string_view state, std::string_view detail, std::string_vi
            << (g_codeHooksReady.load() && g_hooksReady.load()
                    ? kReportedHooks : "none") << "\n"
            << "ack=" << ack << "\n"
+           << "client_ack=" << clientAck << "\n"
+           << "cap_client_presentation=" << (g_codeHooksReady.load() ? "ready" : "unavailable") << "\n"
            << "detail=" << detail << "\n"
            << "end=1\n";
     AtomicWrite(g_statusPath, status.str());
@@ -2381,7 +2405,7 @@ void WriteCurrentStatus(std::string_view ack)
     }
     if (g_quickLockpickHooksReady.load() || g_hooksReady.load()) {
         WriteStatus("partial",
-            "one native capability is unavailable; validated capabilities remain enabled",
+            "native capabilities are reported separately; validated capabilities remain enabled",
             ack);
         return;
     }
@@ -2393,13 +2417,37 @@ void WriteCurrentStatus(std::string_view ack)
     if (!failure.empty()) {
         WriteStatus("unavailable", failure, ack);
     } else if (!g_codeHooksReady.load() && !g_quickLockpickHooksReady.load()) {
-        WriteStatus("unavailable",
-            "no native capability passed its complete validation boundary",
-            ack);
+        auto const status = ReadCapabilityStatus();
+        bool const waiting = status.quickFailure.empty()
+            || status.quickFailure.starts_with("waiting_for_")
+            || status.delegatedFailure.empty()
+            || status.delegatedFailure.starts_with("waiting_for_");
+        WriteStatus(waiting ? "waiting_for_bridge" : "unavailable",
+            waiting ? "waiting for a current Lua session challenge"
+                : "no native capability passed its complete validation boundary", ack);
     } else {
         WriteStatus("waiting_for_server",
             "waiting for the server entity world; client presentation hook validated",
             ack);
+    }
+}
+
+void RefreshLocalHandshake()
+{
+    auto parsed = boh::ParseBridgeDocument(ReadAll(g_handshakePath));
+    bool changed{};
+    {
+        std::scoped_lock lock(g_handshakeMutex);
+        changed = parsed.probe != g_handshakeDocument.probe
+            || parsed.nativeSession != g_handshakeDocument.nativeSession;
+        g_clientBridgeReady.store(boh::BridgeDocumentAllowsNativeHooks(parsed, g_sessionUtf8),
+            std::memory_order_release);
+        g_handshakeDocument = std::move(parsed);
+    }
+    if (changed) {
+        std::string ack;
+        { std::shared_lock lock(g_documentMutex); ack = g_document.probe; }
+        WriteCurrentStatus(ack);
     }
 }
 
@@ -2412,17 +2460,21 @@ void RefreshDocument(bool force, bool waitForLock = true)
     } else if (!refreshLock.try_lock()) {
         return;
     }
+    if (!force && GetTickCount64() < g_actionReadRetryAfter) return;
     auto const writeTime = LastWrite(g_actionPath);
     if (!force && writeTime == g_actionWriteTime) {
         return;
     }
-    g_actionWriteTime = writeTime;
     auto parsed = boh::ParseBridgeDocument(ReadAll(g_actionPath));
     if (!parsed.valid) {
+        g_actionWriteTime.reset();
+        g_actionReadRetryAfter = GetTickCount64() + 25;
         std::unique_lock lock(g_documentMutex);
         g_document = {};
         return;
     }
+    g_actionWriteTime = writeTime;
+    g_actionReadRetryAfter = 0;
 
     auto const ack = parsed.probe;
     bool probeChanged = false;
@@ -2440,13 +2492,15 @@ void RefreshDocument(bool force, bool waitForLock = true)
 void RefreshClientDocument(bool force)
 {
     std::scoped_lock refreshLock(g_clientDocumentRefreshMutex);
+    if (!force && GetTickCount64() < g_clientReadRetryAfter) return;
     auto const writeTime = LastWrite(g_clientActionPath);
     if (!force && writeTime == g_clientActionWriteTime) {
         return;
     }
-    g_clientActionWriteTime = writeTime;
     auto parsed = boh::ParseClientBridgeDocument(ReadAll(g_clientActionPath));
     if (!parsed.valid) {
+        g_clientActionWriteTime.reset();
+        g_clientReadRetryAfter = GetTickCount64() + 25;
         {
             std::unique_lock lock(g_clientDocumentMutex);
             g_clientDocument = {};
@@ -2458,18 +2512,26 @@ void RefreshClientDocument(bool force)
         }
         return;
     }
+    g_clientActionWriteTime = writeTime;
+    g_clientReadRetryAfter = 0;
     auto const recordCount = parsed.records.size();
     auto const quickCount = parsed.quickLockpicks.size();
     auto const currentSession = parsed.nativeSession;
+    auto const currentProbe = parsed.probe;
     std::string previousSession;
+    std::string previousProbe;
     {
         std::unique_lock lock(g_clientDocumentMutex);
         previousSession = g_clientDocument.nativeSession;
+        previousProbe = g_clientDocument.probe;
         g_clientDocument = std::move(parsed);
     }
     if (previousSession != currentSession) {
         std::scoped_lock lock(g_quickLockpickMutex);
         g_consumedQuickLockpicks.clear();
+    }
+    if (previousProbe != currentProbe) {
+        ClearClientPresentationLeases("client_source_changed");
     }
     RefreshQuickLockpickPendingFlag();
     if (TraceEnabled()) {
@@ -2482,13 +2544,15 @@ void RefreshClientDocument(bool force)
 void RefreshLeftClickDocument(bool force)
 {
     std::scoped_lock refreshLock(g_leftClickDocumentRefreshMutex);
+    if (!force && GetTickCount64() < g_leftClickReadRetryAfter) return;
     auto const writeTime = LastWrite(g_leftClickActionPath);
     if (!force && writeTime == g_leftClickActionWriteTime) {
         return;
     }
-    g_leftClickActionWriteTime = writeTime;
     auto parsed = boh::BuildLeftClickRoutingSnapshot(
         boh::ParseClientBridgeDocument(ReadAll(g_leftClickActionPath)));
+    g_leftClickActionWriteTime = parsed.valid ? writeTime : std::nullopt;
+    g_leftClickReadRetryAfter = parsed.valid ? 0 : GetTickCount64() + 25;
     {
         std::unique_lock lock(g_leftClickDocumentMutex);
         g_leftClickDocument = std::move(parsed);
@@ -2496,7 +2560,7 @@ void RefreshLeftClickDocument(bool force)
 }
 
 std::optional<boh::ProfileSelection> FindProfileRecord(
-    void const* component, bool* usedClientLease = nullptr)
+    void const* component, bool* usedClientLease = nullptr, bool server = false)
 {
     if (usedClientLease != nullptr) {
         *usedClientLease = false;
@@ -2517,21 +2581,18 @@ std::optional<boh::ProfileSelection> FindProfileRecord(
 
     std::optional<boh::ProfileSelection> selection;
     {
-        std::shared_lock serverLock(g_documentMutex);
-        if (!g_document.valid
-            || g_document.nativeSession != g_sessionUtf8) {
-            return {};
+        if (server) {
+            std::shared_lock lock(g_documentMutex);
+            if (!g_document.valid || g_document.nativeSession != g_sessionUtf8) return {};
+            auto const record = boh::MatchProfileSource(g_document.records, identity);
+            if (record) selection = boh::ProfileSelection{.record = *record,
+                .specialist = record->specialist, .scope = boh::ProfileScope::Server};
+            return selection;
+        } else {
+            std::shared_lock lock(g_clientDocumentMutex);
+            if (!g_clientDocument.valid || g_clientDocument.nativeSession != g_sessionUtf8) return {};
+            selection = boh::MatchClientProfileSelection(g_clientDocument.records, identity);
         }
-        std::shared_lock clientLock(g_clientDocumentMutex);
-        std::span<boh::ClientActionRecord const> clientRecords;
-        if (g_clientDocument.valid
-            && g_clientDocument.nativeSession == g_document.nativeSession) {
-            clientRecords = g_clientDocument.records;
-        }
-        selection = boh::MatchProfileSelection(
-            g_document.records,
-            clientRecords,
-            identity);
     }
     if (selection.has_value()) {
         RememberClientPresentationLease(*selection, identity);
@@ -2589,7 +2650,7 @@ void ProfileUiMidHook(safetyhook::Context& context) noexcept
     PerfScope perf(PerfMetric::ProfileUi);
     try {
         auto const component = reinterpret_cast<void const*>(context.r13);
-        auto const selection = FindProfileRecord(component);
+        auto const selection = FindProfileRecord(component, nullptr, true);
         if (!selection) {
             return;
         }
@@ -2611,7 +2672,7 @@ void ProfileMathMidHook(safetyhook::Context& context) noexcept
     PerfScope perf(PerfMetric::ProfileMath);
     try {
         auto const component = reinterpret_cast<void const*>(context.r8);
-        auto const selection = FindProfileRecord(component);
+        auto const selection = FindProfileRecord(component, nullptr, true);
         if (!selection) {
             return;
         }
@@ -2661,7 +2722,7 @@ SelectedRollBonusBindingResult BindSelectedRollBonusPresentation(
 
 void ClientRollPresentationMidHook(safetyhook::Context& context) noexcept
 {
-    if (!g_hooksReady.load(std::memory_order_acquire)) return;
+    if ((!g_codeHooksReady.load(std::memory_order_acquire) || !g_clientBridgeReady.load(std::memory_order_acquire))) return;
     try {
         // At this validated DCActiveRoll site:
         //   r14 = the replicated client RequestedRoll component
@@ -2742,7 +2803,7 @@ void ClientRollPresentationMidHook(safetyhook::Context& context) noexcept
 
 void ClientRollSourceContextMidHook(safetyhook::Context& context) noexcept
 {
-    if (!g_hooksReady.load(std::memory_order_acquire)) return;
+    if ((!g_codeHooksReady.load(std::memory_order_acquire) || !g_clientBridgeReady.load(std::memory_order_acquire))) return;
     try {
         // At the validated call site:
         //   r14 = the replicated client RequestedRoll component
@@ -2789,7 +2850,7 @@ void ClientRollSourceContextMidHook(safetyhook::Context& context) noexcept
 
 void ClientRollAggregateMidHook(safetyhook::Context& context) noexcept
 {
-    if (!g_hooksReady.load(std::memory_order_acquire)) return;
+    if ((!g_codeHooksReady.load(std::memory_order_acquire) || !g_clientBridgeReady.load(std::memory_order_acquire))) return;
     PerfScope perf(PerfMetric::Aggregate);
     try {
         // This is the final vanilla modifier-aggregation write before
@@ -2861,7 +2922,7 @@ void ClientRollAggregateMidHook(safetyhook::Context& context) noexcept
 
 void ClientRollStartMidHook(safetyhook::Context& context) noexcept
 {
-    if (!g_hooksReady.load(std::memory_order_acquire)) return;
+    if ((!g_codeHooksReady.load(std::memory_order_acquire) || !g_clientBridgeReady.load(std::memory_order_acquire))) return;
     BeginPerfRoll();
     PerfScope perf(PerfMetric::RollStart);
     try {
@@ -2969,7 +3030,7 @@ void ClientRollStartMidHook(safetyhook::Context& context) noexcept
 
 void ClientRollPayloadReadyMidHook(safetyhook::Context& context) noexcept
 {
-    if (!g_hooksReady.load(std::memory_order_acquire)) return;
+    if ((!g_codeHooksReady.load(std::memory_order_acquire) || !g_clientBridgeReady.load(std::memory_order_acquire))) return;
     PerfScope perf(PerfMetric::PayloadReady);
     try {
         // Reaching this hook proves the successful WaitForStart path has
@@ -3012,7 +3073,7 @@ void ClientRollPayloadReadyMidHook(safetyhook::Context& context) noexcept
 
 void ClientRollPostDispatchMidHook(safetyhook::Context& context) noexcept
 {
-    if (!g_hooksReady.load(std::memory_order_acquire)) return;
+    if ((!g_codeHooksReady.load(std::memory_order_acquire) || !g_clientBridgeReady.load(std::memory_order_acquire))) return;
     PerfScope perf(PerfMetric::PostDispatch);
     try {
         // The epilogue is shared by early-exit paths, so only a pair armed by
@@ -3035,7 +3096,7 @@ void ClientRollPostDispatchMidHook(safetyhook::Context& context) noexcept
 
 void ClientRollResultMidHook(safetyhook::Context& context) noexcept
 {
-    if (!g_hooksReady.load(std::memory_order_acquire)) return;
+    if ((!g_codeHooksReady.load(std::memory_order_acquire) || !g_clientBridgeReady.load(std::memory_order_acquire))) return;
     PerfScope perf(PerfMetric::Result);
     try {
         // This is the result-consistency decision immediately after BG3 loads
@@ -3989,7 +4050,7 @@ bool ClientModifierCollectionContains(void* collection,
 bool ClientRollBonusKeepSelectedDetour(
     void* collection, void* viewModel) noexcept
 {
-    if (!g_hooksReady.load(std::memory_order_acquire)) {
+    if ((!g_codeHooksReady.load(std::memory_order_acquire) || !g_clientBridgeReady.load(std::memory_order_acquire))) {
         return g_clientRollBonusKeepSelectedHook.call<bool>(
             collection, viewModel);
     }
@@ -5003,7 +5064,7 @@ SelectedRollBonusBindingResult BindSelectedRollBonusPresentation(
 void ClientRollBonusReconcileStartMidHook(
     safetyhook::Context& context) noexcept
 {
-    if (!g_hooksReady.load(std::memory_order_acquire)) return;
+    if ((!g_codeHooksReady.load(std::memory_order_acquire) || !g_clientBridgeReady.load(std::memory_order_acquire))) return;
     PerfScope perf(PerfMetric::ReconcileStart);
     try {
         DrainDeferredClientViewModelReleases();
@@ -5222,7 +5283,7 @@ void TraceAdvantageSourceModifierBinding(
 void ClientRollBonusReconcileViewModelMidHook(
     safetyhook::Context& context) noexcept
 {
-    if (!g_hooksReady.load(std::memory_order_acquire)) return;
+    if ((!g_codeHooksReady.load(std::memory_order_acquire) || !g_clientBridgeReady.load(std::memory_order_acquire))) return;
     PerfScope perf(PerfMetric::ReconcileViewModel);
     try {
         TraceAdvantageSourceModifierBinding(context);
@@ -5436,7 +5497,7 @@ void LogPreservedAdvantageSourceModifier(
 void ClientRollBonusPreserveMatchedMidHook(
     safetyhook::Context& context) noexcept
 {
-    if (!g_hooksReady.load(std::memory_order_acquire)) return;
+    if ((!g_codeHooksReady.load(std::memory_order_acquire) || !g_clientBridgeReady.load(std::memory_order_acquire))) return;
     PerfScope perf(PerfMetric::PreserveMatched);
     try {
         auto const currentDisabled = static_cast<std::uint8_t>(
@@ -5473,7 +5534,7 @@ void ClientRollBonusPreserveMatchedMidHook(
 void ClientRollBonusPreserveMissingMidHook(
     safetyhook::Context& context) noexcept
 {
-    if (!g_hooksReady.load(std::memory_order_acquire)) return;
+    if ((!g_codeHooksReady.load(std::memory_order_acquire) || !g_clientBridgeReady.load(std::memory_order_acquire))) return;
     PerfScope perf(PerfMetric::PreserveMissing);
     try {
         auto const currentDisabled = static_cast<std::uint8_t>(
@@ -5677,7 +5738,7 @@ void TraceAdvantageViewModelBinding(
 void ClientAdvantagePreserveMatchedMidHook(
     safetyhook::Context& context) noexcept
 {
-    if (!g_hooksReady.load(std::memory_order_acquire)) return;
+    if ((!g_codeHooksReady.load(std::memory_order_acquire) || !g_clientBridgeReady.load(std::memory_order_acquire))) return;
     PerfScope perf(PerfMetric::AdvantageMatched);
     try {
         TraceAdvantageViewModelBinding(context, "matched_static");
@@ -5707,7 +5768,7 @@ void ClientAdvantagePreserveMatchedMidHook(
 void ClientAdvantagePreserveMissingMidHook(
     safetyhook::Context& context) noexcept
 {
-    if (!g_hooksReady.load(std::memory_order_acquire)) return;
+    if ((!g_codeHooksReady.load(std::memory_order_acquire) || !g_clientBridgeReady.load(std::memory_order_acquire))) return;
     PerfScope perf(PerfMetric::AdvantageMissing);
     try {
         TraceAdvantageViewModelBinding(context, "missing_static");
@@ -5736,7 +5797,7 @@ void ClientAdvantagePreserveMissingMidHook(
 void ClientRollBonusRendererAddMidHook(
     safetyhook::Context& context) noexcept
 {
-    if (!g_hooksReady.load(std::memory_order_acquire)) return;
+    if ((!g_codeHooksReady.load(std::memory_order_acquire) || !g_clientBridgeReady.load(std::memory_order_acquire))) return;
     PerfScope perf(PerfMetric::RendererAdd);
     try {
         if (context.rsi == 0
@@ -5950,7 +6011,7 @@ void ClientRollBonusRendererAddMidHook(
 void ClientRollBonusReconcileEndMidHook(
     safetyhook::Context& context) noexcept
 {
-    if (!g_hooksReady.load(std::memory_order_acquire)) return;
+    if ((!g_codeHooksReady.load(std::memory_order_acquire) || !g_clientBridgeReady.load(std::memory_order_acquire))) return;
     PerfScope perf(PerfMetric::ReconcileEnd);
     try {
         auto observation = g_rollBonusReconciliationObservation;
@@ -6183,7 +6244,7 @@ void ClientRollBonusReconcileEndMidHook(
 
 void ClientRollFinalizeMidHook(safetyhook::Context& context) noexcept
 {
-    if (!g_hooksReady.load(std::memory_order_acquire)) return;
+    if ((!g_codeHooksReady.load(std::memory_order_acquire) || !g_clientBridgeReady.load(std::memory_order_acquire))) return;
     PerfRollCompletion completion;
     PerfScope perf(PerfMetric::Finalize);
     try {
@@ -7305,20 +7366,29 @@ DWORD WINAPI Worker(void*)
             nullptr, &localAppData) != S_OK) {
         return 1;
     }
-    auto const root = fs::path(localAppData)
-        / L"Larian Studios" / L"Baldur's Gate 3";
+    auto root = fs::path(localAppData) / L"Larian Studios" / L"Baldur's Gate 3";
+    std::array<wchar_t, 32768> executablePath{};
+    auto const pathLength = GetModuleFileNameW(nullptr, executablePath.data(),
+        static_cast<DWORD>(executablePath.size()));
+    if (pathLength > 0 && pathLength < executablePath.size()) {
+        auto const configPath = fs::path(executablePath.data()).parent_path()
+            / L"ScriptExtenderSettings.json";
+        if (auto const profile = boh::CustomProfileFromSettings(ReadAll(configPath))) {
+            root = fs::path(localAppData) / L"Larian Studios" / fs::path(std::u8string(
+                reinterpret_cast<char8_t const*>(profile->data()), profile->size()));
+        }
+    }
     CoTaskMemFree(localAppData);
     std::error_code error;
     fs::create_directories(root / L"Script Extender", error);
     fs::create_directories(root / L"Script Extender Logs", error);
     g_actionPath = root / L"Script Extender" / L"BestOfHandsNative.actions";
+    g_handshakePath = root / L"Script Extender" / L"BestOfHandsNative.handshake";
     g_clientActionPath = root / L"Script Extender" / L"BestOfHandsNative.client";
     g_leftClickActionPath =
         root / L"Script Extender" / L"BestOfHandsNative.leftclick";
     g_statusPath = root / L"Script Extender" / L"BestOfHandsNative.status";
     g_logPath = root / L"Script Extender Logs" / L"BestOfHandsNative.log";
-    auto const actionWriteTimeAtStartup = LastWrite(g_actionPath);
-    g_actionWriteTime = actionWriteTimeAtStartup;
     LARGE_INTEGER qpcFrequency{};
     if (QueryPerformanceFrequency(&qpcFrequency)) {
         g_perfQpcFrequency.store(
@@ -7369,7 +7439,6 @@ DWORD WINAPI Worker(void*)
     void* lastRejectedWorld{};
     std::string lastRejectedReason;
     std::string lastLoggedFailure;
-    bool currentChallengeObserved = false;
     bool quickInstallAttempted = false;
     bool delegatedInstallAttempted = false;
     boh::StableWorldCandidateGate worldGate;
@@ -7377,10 +7446,11 @@ DWORD WINAPI Worker(void*)
         std::shared_lock lock(g_documentMutex);
         return g_document.probe;
     };
-    auto bridgeAllowsNativeHooks = [&currentChallengeObserved]() {
+    auto bridgeAllowsNativeHooks = []() {
         std::shared_lock lock(g_documentMutex);
-        return boh::BridgeDocumentAllowsNativeHooks(
-            g_document, currentChallengeObserved);
+        if (boh::BridgeDocumentAllowsNativeHooks(g_document, g_sessionUtf8)) return true;
+        std::scoped_lock handshakeLock(g_handshakeMutex);
+        return boh::BridgeDocumentAllowsNativeHooks(g_handshakeDocument, g_sessionUtf8);
     };
     auto bridgeAllowsWorldHooks = []() {
         std::shared_lock lock(g_documentMutex);
@@ -7393,12 +7463,9 @@ DWORD WINAPI Worker(void*)
         // evaluation. The worker is only a fallback and must not make those
         // hooks wait behind background parsing.
         RefreshDocument(false, false);
+        RefreshLocalHandshake();
         RefreshClientDocument(false);
         RefreshLeftClickDocument(false);
-        if (!currentChallengeObserved
-            && LastWrite(g_actionPath) != actionWriteTimeAtStartup) {
-            currentChallengeObserved = true;
-        }
         if (!quickInstallAttempted || !delegatedInstallAttempted) {
             if (!bridgeAllowsNativeHooks()) {
                 worldGate.Reset();

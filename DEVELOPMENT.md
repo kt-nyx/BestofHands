@@ -1,6 +1,13 @@
 # Developing Best of Hands
 
-Best of Hands 2.3.1 consists of a normal BG3 PAK and a small Windows native plugin. The PAK selects the specialist and owns diagnostics; the DLL changes the roll-profile source at narrow validated server action boundaries and supplies the specialist's aggregate advantage at the exact client `DCActiveRoll` presentation boundary. A bounded, exact-roll-UUID client lease retains that presentation value after the replicated `RequestedRoll` is destroyed and preserves it through BG3's signature-validated modifier-aggregation and click-to-roll boundaries. These hooks never change the server roll component or outcome. On the client they may correct only presentation state, including the local advantage byte and immediate-total fallback flag; numeric result values and ownership remain unchanged. Neither half completes actions, rolls dice, consumes tools, or synthesizes success/failure outcomes. The left-click adapter activates only BG3's stock client Lockpick task through its validated native controller lifecycle; the only gameplay target rewrite is an accepted active-roll bonus: its already validated initiator target is changed to the specialist so the effect enters the delegated profile.
+The current source is the unpublished 2.3.2 release candidate. The user has
+completed the short local DX11 test, and its logs show both native features
+ready with no Best of Hands warnings or errors. See
+[release preparation](RELEASE-PREP.md) for the package and coverage limits,
+[the audit](BUGFIX-AUDIT.md) for the findings and fix record, and
+[the local checklist](BUGFIX-TESTING.md) for the test steps.
+
+Best of Hands 2.3.2 consists of a normal BG3 PAK and a small Windows native plugin. The PAK selects the specialist and owns diagnostics; the DLL changes the roll-profile source at narrow validated server action boundaries and supplies the specialist's aggregate advantage at the exact client `DCActiveRoll` presentation boundary. A bounded, exact-roll-UUID client lease retains that presentation value after the replicated `RequestedRoll` is destroyed and preserves it through BG3's signature-validated modifier-aggregation and click-to-roll boundaries. These hooks never change the server roll component or outcome. On the client they may correct only presentation state, including the local advantage byte and immediate-total fallback flag; numeric result values and ownership remain unchanged. Neither half completes actions, rolls dice, consumes tools, or synthesizes success/failure outcomes. The left-click adapter activates only BG3's stock client Lockpick task through its validated native controller lifecycle; the only gameplay target rewrite is an accepted active-roll bonus: its already validated initiator target is changed to the specialist so the effect enters the delegated profile.
 
 ## Runtime contract
 
@@ -150,8 +157,10 @@ The handshake is challenge/acknowledgement based. A status file from an old BG3 
 The native worker does not install any code hooks, inspect the server ECS
 system table, or patch game memory during early process startup. It remains
 dormant until the matching PAK's current-version Lua challenge is present.
-The challenge file must have been rewritten after this BG3 process started and
-must not carry a completed native session from an older process. Only then are
+The challenge must echo the DLL's current process session, a fresh identifier
+written into its status file. This avoids depending on which side starts first
+or on file modification times. An identifier from an older process is rejected.
+Only then are
 the signature-validated code hooks installed, after which the same server-world
 pointer must pass four consecutive observations. Before either refresh slot is
 written, the server/world objects and the two exact update-pointer slots must be
@@ -268,12 +277,31 @@ Native DLL
 
 `LegacyAssistanceCleanup.lua` exists only to remove persisted temporary boosts from experimental/pre-v2 builds. Current interactions never add a boost.
 
-The bridge files live under `%LOCALAPPDATA%\Larian Studios\Baldur's Gate 3\Script Extender`:
+The Lua and native parts exchange small files under
+`%LOCALAPPDATA%\Larian Studios\Baldur's Gate 3\Script Extender`. If Script
+Extender's `CustomProfile` setting is present, both use that profile name in
+place of the `Baldur's Gate 3` folder.
 
 - `BestOfHandsNative.actions`
 - `BestOfHandsNative.client`
 - `BestOfHandsNative.leftclick`
 - `BestOfHandsNative.status`
+- `BestOfHandsNative.handshake`
+
+In protocol 9, each client performs its own startup exchange through the
+handshake file. The host separately sends action records through the
+`NativeActions` network channel using stable character, target, and roll UUIDs
+(identifiers shared across computers). Each client resolves those identifiers
+to its own memory handles before publishing its client file; host memory
+handles and the host's native session are never used on a guest. Updated
+advantage values are also published in that client file.
+
+Temporary startup waiting does not immediately show a failure notice. Failed
+reads are retried without requiring another file modification. After the fast
+startup polling expires, Lua continues recovery checks every two seconds.
+Confirmed feature failures still produce one deduplicated warning, bounded to
+240 ASCII characters before calling BG3's message box. Full reasons stay in
+diagnostics.
 
 The native log is `%LOCALAPPDATA%\Larian Studios\Baldur's Gate 3\Script Extender Logs\BestOfHandsNative.log`.
 
@@ -286,6 +314,7 @@ native/
   include/CapabilityResolver.h
   include/FixedSnapshot.h
   include/NativeStartupGate.h
+  include/NativeStorage.h
   src/BestOfHandsNative.cpp
   tests/BridgeProtocolTests.cpp
 src/BestOfHands/Mods/BestOfHands/
@@ -299,6 +328,7 @@ src/BestOfHands/Mods/BestOfHands/
       Client/
         LocalSettings.lua
         NativePresentationBridge.lua
+        NativeSession.lua
       Shared/
         Channels.lua
       Server/

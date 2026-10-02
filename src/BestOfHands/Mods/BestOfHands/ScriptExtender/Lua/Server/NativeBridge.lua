@@ -4,7 +4,7 @@ local NativeBridge = {}
 
 local ACTION_FILE = "BestOfHandsNative.actions"
 local STATUS_FILE = "BestOfHandsNative.status"
-local PROTOCOL = "8"
+local PROTOCOL = "9"
 local DELEGATED_ROLL_HOOKS =
     "profile_ui,profile_math,client_roll_presentation,"
     .. "client_roll_aggregate,client_roll_start,"
@@ -138,7 +138,13 @@ function NativeBridge.Create(settings, api, diagnostics)
     local warningExhaustedGeneration
     local warningRetryGeneration
     local handshakeGeneration = 0
+    local handshakeExpired = false
+    local recoveryPending = false
+    local poll
+    local scheduleRecovery
     local visibleWarning
+    local revision = 0
+    local snapshot = nil
 
     local function save()
         local lines = {
@@ -182,8 +188,21 @@ function NativeBridge.Create(settings, api, diagnostics)
             if visibleWarning ~= nil then
                 visibleWarning()
             end
+            if scheduleRecovery ~= nil then scheduleRecovery() end
             return false
         end
+        revision = revision + 1
+        local exported = {}
+        for _, record in ipairs(stableRecords(records)) do
+            exported[#exported + 1] = {
+                id = record.id, action = record.action, rollUuid = record.rollUuid,
+                initiatorUuid = record.initiatorUuid, specialistUuid = record.specialistUuid,
+                targetUuid = record.targetUuid, presentationAdvantage = record.presentationAdvantage,
+            }
+        end
+        snapshot = {protocol = PROTOCOL, version = settings.VERSION, probe = probe,
+            revision = revision, trace = trace, records = exported}
+        if api.PublishNativeActions ~= nil then api.PublishNativeActions(snapshot) end
         return true
     end
 
@@ -210,20 +229,19 @@ function NativeBridge.Create(settings, api, diagnostics)
             end
         end
         if next(keys) == nil then return nil end
-        local message = {
-            "Best of Hands " .. tostring(settings.VERSION)
-                .. (needsUpdate and " needs an update for this version of Baldur's Gate 3."
-                    or " could not start all of its features."),
-            table.concat(affected, "\n"),
-            needsUpdate
-                and "Check Nexus Mods for a compatible update. If none is available yet, you can keep playing with the normal game actions."
-                or "Reinstall both the PAK and DLL from the same Best of Hands download, and check that Native Mod Loader is installed.",
-            "Best of Hands on Nexus Mods (mod 23881):\nnexusmods.com/baldursgate3/mods/23881",
-        }
-        if capabilities.quick_lockpick.ready or capabilities.delegated_roll.ready then
-            message[#message + 1] = "The mod's other features are still available."
-        end
-        return table.concat(message, "\n\n"), keys
+        -- Osi's notification buffer is only 255 characters. Keep every
+        -- variant short, ASCII, and independent of unbounded version strings.
+        local message = "Best of Hands: "
+            .. (keys.quick_lockpick and "Left-click lockpicking is unavailable. " or "")
+            .. (keys.delegated_roll and "Party lockpick/disarm bonuses are unavailable. " or "")
+            .. (needsUpdate and "Check Nexus for an update. " or "See the mod log for details. ")
+            .. "Normal game actions still work.\nnexusmods.com/baldursgate3/mods/23881"
+        diagnostics.Warn("native_feature_unavailable", {
+            detail = table.concat(affected, " "), state = state,
+            quick_lockpick = capabilities.quick_lockpick.reason,
+            delegated_roll = capabilities.delegated_roll.reason,
+        })
+        return message:sub(1, 240), keys
     end
 
     visibleWarning = function()
@@ -278,7 +296,12 @@ function NativeBridge.Create(settings, api, diagnostics)
         }
         for _, name in ipairs({ "quick_lockpick", "delegated_roll" }) do
             local prefix = "cap_" .. name
-            local declaredState = status[prefix] or "unavailable"
+            local reason = status[prefix .. "_reason"] or status.detail or status.state
+            local waiting = status.state == "waiting_for_bridge"
+                or status.state == "waiting_for_server"
+                or tostring(reason):match("^waiting_for_") ~= nil
+            local declaredState = waiting and not handshakeExpired and "pending"
+                or status[prefix] or (handshakeExpired and "unavailable" or "pending")
             local expectedHooks = name == "quick_lockpick"
                 and QUICK_LOCKPICK_HOOKS or DELEGATED_ROLL_HOOKS
             local source = status[prefix .. "_source"] or "none"
@@ -303,6 +326,7 @@ function NativeBridge.Create(settings, api, diagnostics)
         local validState = status.state == "ready"
             or status.state == "partial"
             or status.state == "unavailable"
+            or status.state == "waiting_for_server"
         return status.protocol == PROTOCOL
             and status.version == settings.VERSION
             and validState
@@ -331,18 +355,19 @@ function NativeBridge.Create(settings, api, diagnostics)
             state = status.state or "native_status_missing"
             detail = status.detail or "the native status file was not found"
             invalidateCapabilities("native_status_not_current")
+            for _, capability in pairs(capabilities) do capability.state = "pending" end
             diagnostics.Error("native_bridge_lost", {
                 detail = detail,
                 hooks = status.hooks,
                 native_session = status.session,
                 state = state,
             })
-            visibleWarning()
+            scheduleRecovery()
         end
         return current
     end
 
-    local function poll(generation, remaining)
+    poll = function(generation, remaining)
         if generation ~= handshakeGeneration then
             return
         end
@@ -356,6 +381,7 @@ function NativeBridge.Create(settings, api, diagnostics)
             local wasReady = ready
             nativeSession = status.session
             ready = true
+            handshakeExpired = false
             state = "ready"
             detail = status.detail
             if not save() then
@@ -373,16 +399,26 @@ function NativeBridge.Create(settings, api, diagnostics)
                 })
             end
             visibleWarning()
-            if remaining > 0 and (capabilities.quick_lockpick.state == "pending"
-                or capabilities.delegated_roll.state == "pending") then
-                api.Schedule(settings.NATIVE_HANDSHAKE_POLL_MS, function()
-                    poll(generation, remaining - 1)
-                end)
+            if capabilities.quick_lockpick.state == "pending"
+                or capabilities.delegated_roll.state == "pending" then
+                if remaining <= 0 then
+                    for _, capability in pairs(capabilities) do
+                        if capability.state == "pending" then
+                            capability.state = "unavailable"
+                            capability.reason = "native_startup_timed_out"
+                        end
+                    end
+                    visibleWarning()
+                    scheduleRecovery()
+                else
+                    scheduleRecovery(remaining - 1, settings.NATIVE_HANDSHAKE_POLL_MS)
+                end
             end
             return
         end
         if remaining <= 0 then
             ready = false
+            handshakeExpired = true
             invalidateCapabilities("native_handshake_unavailable")
             diagnostics.Error("native_bridge_unavailable", {
                 detail = detail,
@@ -392,15 +428,35 @@ function NativeBridge.Create(settings, api, diagnostics)
                 version = status.version,
             })
             visibleWarning()
+            scheduleRecovery()
             return
         end
-        api.Schedule(settings.NATIVE_HANDSHAKE_POLL_MS, function()
-            poll(generation, remaining - 1)
+        -- The current DLL's session is the startup nonce. Rewriting the
+        -- challenge with that nonce works even if Lua ran before its worker.
+        if status.protocol == PROTOCOL and status.version == settings.VERSION
+            and type(status.session) == "string" and status.session ~= ""
+            then
+            nativeSession = status.session
+            save()
+        end
+        scheduleRecovery(remaining - 1, settings.NATIVE_HANDSHAKE_POLL_MS)
+    end
+
+    scheduleRecovery = function(remaining, delay)
+        if recoveryPending then return end
+        recoveryPending = true
+        local generation = handshakeGeneration
+        api.Schedule(delay or settings.NATIVE_RECOVERY_POLL_MS or 2000, function()
+            if generation ~= handshakeGeneration then return end
+            recoveryPending = false
+            poll(generation, remaining or settings.NATIVE_HANDSHAKE_ATTEMPTS)
         end)
     end
 
     function instance.BeginHandshake()
         handshakeGeneration = handshakeGeneration + 1
+        recoveryPending = false
+        handshakeExpired = false
         ready = false
         capabilities = {
             delegated_roll = { ready = false, reason = "waiting_for_native_ack", source = "none" },
@@ -411,7 +467,13 @@ function NativeBridge.Create(settings, api, diagnostics)
         state = "waiting_for_native_ack"
         detail = "waiting for BestofHands.dll"
         probe = uniqueProbe(handshakeGeneration)
+        local ok, text = pcall(Ext.IO.LoadFile, STATUS_FILE)
+        local status = ok and parseDocument(text) or {}
+        if status.protocol == PROTOCOL and status.version == settings.VERSION then
+            nativeSession = status.session or ""
+        end
         if not save() then
+            scheduleRecovery()
             return false
         end
         poll(handshakeGeneration, settings.NATIVE_HANDSHAKE_ATTEMPTS)
@@ -425,6 +487,8 @@ function NativeBridge.Create(settings, api, diagnostics)
     function instance.IsCapabilityReady(name)
         if ready then
             nativeStatusIsCurrent()
+        elseif probe ~= nil then
+            scheduleRecovery()
         end
         local capability = capabilities[name]
         if capability ~= nil and capability.state == "unavailable" then
@@ -587,6 +651,8 @@ function NativeBridge.Create(settings, api, diagnostics)
             state = state,
         }
     end
+
+    function instance.GetSnapshot() return snapshot end
 
     return instance
 end

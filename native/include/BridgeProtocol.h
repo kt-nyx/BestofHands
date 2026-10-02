@@ -13,8 +13,8 @@
 
 namespace best_of_hands {
 
-inline constexpr std::string_view kProtocolVersion = "8";
-inline constexpr std::string_view kPluginVersion = "2.3.1";
+inline constexpr std::string_view kProtocolVersion = "9";
+inline constexpr std::string_view kPluginVersion = "2.3.2";
 
 enum class ActionKind {
     Lockpick,
@@ -47,6 +47,8 @@ struct ClientActionRecord {
     std::uint64_t initiator{};
     std::uint64_t specialist{};
     std::uint64_t target{};
+    ActionKind kind{};
+    std::uint8_t presentationAdvantage{0xff};
 };
 
 struct QuickLockpickRequest {
@@ -70,6 +72,7 @@ struct ClientBridgeDocument {
     bool valid{ false };
     bool trace{ false };
     std::string nativeSession;
+    std::string probe;
     std::vector<ClientActionRecord> records;
     std::vector<QuickLockpickRequest> quickLockpicks;
     std::vector<LeftClickInitiator> leftClickInitiators;
@@ -235,11 +238,13 @@ inline ClientBridgeDocument ParseClientBridgeDocument(std::string_view text)
             versionOk = line.substr(12) == kPluginVersion;
         } else if (line.starts_with("native_session=")) {
             document.nativeSession.assign(line.substr(15));
+        } else if (line.starts_with("probe=")) {
+            document.probe.assign(line.substr(6));
         } else if (line.starts_with("trace=")) {
             document.trace = line.substr(6) == "1";
         } else if (line.starts_with("record=")) {
             auto const parsedFields =
-                SplitExact<5>(line.substr(7), '\t');
+                SplitExact<7>(line.substr(7), '\t');
             if (!parsedFields.has_value()) {
                 return {};
             }
@@ -257,6 +262,14 @@ inline ClientBridgeDocument ParseClientBridgeDocument(std::string_view text)
                 return {};
             }
             record.rollUuid.assign(fields[1]);
+            if (fields[5] == "lockpick") record.kind = ActionKind::Lockpick;
+            else if (fields[5] == "disarm") record.kind = ActionKind::Disarm;
+            else return {};
+            std::uint64_t advantage{};
+            if (fields[6] == "-1") record.presentationAdvantage = 0xff;
+            else if (ParseUnsigned(fields[6], 10, advantage) && advantage <= 2)
+                record.presentationAdvantage = static_cast<std::uint8_t>(advantage);
+            else return {};
             document.records.push_back(std::move(record));
         } else if (line.starts_with("quick=")) {
             auto const parsedFields =

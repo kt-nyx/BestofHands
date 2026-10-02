@@ -100,13 +100,12 @@ private:
 
 inline bool BridgeDocumentAllowsNativeHooks(
     BridgeDocument const& document,
-    bool challengeWrittenAfterStartup) noexcept
+    std::string_view currentNativeSession) noexcept
 {
-    return challengeWrittenAfterStartup
-        && document.valid
+    return !currentNativeSession.empty() && document.valid
         && !document.probe.empty()
         && document.probe != std::string_view{"not-started"}
-        && document.nativeSession.empty();
+        && document.nativeSession == currentNativeSession;
 }
 
 inline bool BridgeDocumentAllowsWorldHooks(
@@ -116,8 +115,8 @@ inline bool BridgeDocumentAllowsWorldHooks(
     return document.valid
         && !document.probe.empty()
         && document.probe != std::string_view{"not-started"}
-        && (document.nativeSession.empty()
-            || document.nativeSession == currentNativeSession);
+        && !currentNativeSession.empty()
+        && document.nativeSession == currentNativeSession;
 }
 
 } // namespace best_of_hands

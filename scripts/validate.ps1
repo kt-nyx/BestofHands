@@ -179,6 +179,7 @@ $expectedPackageFiles = @(
     'Mods/BestOfHands/ScriptExtender/Lua/BootstrapClient.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/BootstrapServer.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Client/NativePresentationBridge.lua',
+    'Mods/BestOfHands/ScriptExtender/Lua/Client/NativeSession.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Client/LocalSettings.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Shared/Channels.lua',
     'Mods/BestOfHands/ScriptExtender/Lua/Server/LegacyAssistanceCleanup.lua',

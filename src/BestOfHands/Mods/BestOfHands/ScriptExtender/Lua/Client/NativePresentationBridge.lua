@@ -4,7 +4,7 @@ local NativePresentationBridge = {}
 local ACTION_FILE = "BestOfHandsNative.actions"
 local CLIENT_FILE = "BestOfHandsNative.client"
 local LEFT_CLICK_FILE = "BestOfHandsNative.leftclick"
-local PROTOCOL = "8"
+local PROTOCOL = "9"
 local GUID_PATTERN = "%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x"
 local SAVE_RETRY_DELAYS_MS = { 250, 1000, 5000 }
 
@@ -103,7 +103,8 @@ local function write(level, event, fields)
     Ext.Utils.Print(line)
 end
 
-function NativePresentationBridge.Start(settings, quickLockpickChannel, features)
+function NativePresentationBridge.Start(settings, quickLockpickChannel, features,
+    nativeSession, actionChannel)
     local instance = {}
     local tracked = {}
     local clientRecords = {}
@@ -119,6 +120,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
     local saveClientRecords
     local clientRecordsSaveRetryPending = false
     local clientRecordsSaveRetryAttempt = 0
+    local remoteSnapshot = nil
 
     local function scheduleClientRecordsSaveRetry()
         if clientRecordsSaveRetryPending then
@@ -150,6 +152,29 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
 
     local function loadActionText()
         local ok, text = pcall(Ext.IO.LoadFile, ACTION_FILE)
+        if nativeSession ~= nil then
+            local localSession = nativeSession.GetSession()
+            if localSession == "" then return nil end
+            local snapshot = remoteSnapshot
+            -- Guests cannot read the host's filesystem. Even before the host
+            -- snapshot arrives, the local session can enable personal clicks.
+            if snapshot ~= nil or not Ext.Net.IsHost() then
+                local lines = {"protocol=" .. PROTOCOL, "pak_version=" .. settings.VERSION,
+                    "probe=" .. (snapshot and snapshot.probe or "client-local"),
+                    "native_session=" .. localSession,
+                    "trace=" .. (snapshot and snapshot.trace and "1" or "0")}
+                for _, record in ipairs(snapshot and snapshot.records or {}) do
+                    lines[#lines + 1] = table.concat({"record=" .. record.id, record.action,
+                        "0", "0", "0", "0", "0", record.rollUuid or "0",
+                        record.initiatorUuid, record.specialistUuid, record.targetUuid,
+                        tostring(record.presentationAdvantage or -1)}, "\t")
+                end
+                lines[#lines + 1] = "end=1"
+                text, ok = table.concat(lines, "\n") .. "\n", true
+            elseif ok and type(text) == "string" then
+                text = text:gsub("native_session=[^\r\n]*", "native_session=" .. localSession)
+            end
+        end
         if not ok or type(text) ~= "string" then
             traceEnabled = false
             return nil
@@ -244,6 +269,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
             "protocol=" .. PROTOCOL,
             "pak_version=" .. settings.VERSION,
             "native_session=" .. lastSession,
+            "probe=" .. lastProbe,
             "trace=" .. (traceEnabled and "1" or "0"),
         }
         for _, record in ipairs(values) do
@@ -253,6 +279,8 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
                 record.initiatorHandle,
                 record.specialistHandle,
                 record.targetHandle,
+                record.action,
+                tostring(record.presentationAdvantage or -1),
             }, "\t")
         end
         local quickValues = {}
@@ -484,6 +512,10 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
             record.initiatorHandle = previous.initiatorHandle
             record.specialistHandle = previous.specialistHandle
             record.targetHandle = previous.targetHandle
+            if previous.presentationAdvantage ~= record.presentationAdvantage then
+                previous.presentationAdvantage = record.presentationAdvantage
+                saveClientRecords()
+            end
             return record
         end
         local initiatorHandle = entityHandle(safeField(component, "Roller"))
@@ -591,6 +623,12 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
             return record
         end
         record.presentationAdvantage = fresh.presentationAdvantage
+        local mapped = clientRecords[tostring(record.delegationId)]
+        if mapped ~= nil and mapped.rollUuid == record.rollUuid
+            and mapped.presentationAdvantage ~= fresh.presentationAdvantage then
+            mapped.presentationAdvantage = fresh.presentationAdvantage
+            saveClientRecords()
+        end
         return record
     end
 
@@ -834,6 +872,49 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
         end
         snapshotRefreshPending = true
         Ext.OnNextTick(runLeftClickSnapshotRefresh)
+    end
+
+    if actionChannel ~= nil then
+        actionChannel:SetHandler(protected("client_native_action_sync_failed", function(data)
+            if type(data) ~= "table" or data.protocol ~= PROTOCOL
+                or data.version ~= settings.VERSION or type(data.probe) ~= "string"
+                or data.probe == "" or type(data.records) ~= "table"
+                or type(data.revision) ~= "number" then return end
+            if remoteSnapshot ~= nil and remoteSnapshot.probe == data.probe
+                and data.revision <= remoteSnapshot.revision then return end
+            for _, record in ipairs(data.records) do
+                if type(record) ~= "table" or positiveInteger(record.id) == nil
+                    or (record.action ~= "lockpick" and record.action ~= "disarm")
+                    or objectGuid(record.initiatorUuid) == nil
+                    or objectGuid(record.specialistUuid) == nil
+                    or objectGuid(record.targetUuid) == nil then return end
+            end
+            remoteSnapshot = data
+            loadActionText()
+            local retained = {}
+            for _, record in ipairs(data.records) do retained[tostring(record.id)] = true end
+            for id in pairs(clientRecords) do
+                if not retained[tostring(id)] then clientRecords[id] = nil end
+            end
+            -- Replication may have delivered RequestedRoll before its host
+            -- metadata. Remap existing rolls when the authoritative data arrives.
+            for _, roll in pairs(Ext.Entity.GetAllEntitiesWithComponent("RequestedRoll") or {}) do
+                tracked[tostring(roll)] = nil
+                if roll.RequestedRoll ~= nil then mapClientProfile(roll, roll.RequestedRoll) end
+            end
+            saveClientRecords()
+            scheduleLeftClickSnapshot()
+        end))
+        local function subscribe()
+            remoteSnapshot = nil
+            tracked, clientRecords, quickRequests = {}, {}, {}
+            lastProbe, lastSession, lastLeftClickPayload = "", "", ""
+            pcall(function() actionChannel:SendToServer({operation = "subscribe"}) end)
+            scheduleLeftClickSnapshot()
+        end
+        Ext.Events.SessionLoaded:Subscribe(subscribe)
+        Ext.Events.ResetCompleted:Subscribe(subscribe)
+        nativeSession.Subscribe(scheduleLeftClickSnapshot)
     end
 
     if features ~= nil then

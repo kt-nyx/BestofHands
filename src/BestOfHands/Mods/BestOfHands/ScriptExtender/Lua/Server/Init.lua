@@ -19,9 +19,24 @@ Ext.Vars.RegisterModVariable(Settings.MODULE_UUID, Settings.ACTIVE_ASSISTANCE_VA
 local diagnostics = Diagnostics.Create(Settings)
 local features = FeatureSettings.Create(Settings)
 local api = NativeRuntimeApi.Create(Settings, diagnostics)
+api.PublishNativeActions = function(snapshot)
+    local ok, err = pcall(function() Channels.NativeActions:Broadcast(snapshot) end)
+    if not ok then diagnostics.Error("native_action_sync_failed", {error = err}) end
+end
 local resolver = PartySkillResolver.Create(api, diagnostics)
 local legacyCleanup = LegacyAssistanceCleanup.Create(api, diagnostics)
 local bridge = NativeBridge.Create(Settings, api, diagnostics)
+Channels.NativeActions:SetHandler(function(data, userId)
+    if type(data) == "table" and data.operation == "subscribe" then
+        local snapshot = bridge.GetSnapshot()
+        if snapshot ~= nil then
+            local ok, err = pcall(function()
+                Channels.NativeActions:SendToClient(snapshot, userId)
+            end)
+            if not ok then diagnostics.Error("native_action_sync_failed", {error = err}) end
+        end
+    end
+end)
 local interaction = NativeInteractionCoordinator.Create(
     Settings,
     api,
@@ -135,7 +150,7 @@ listen("RequestCanLockpick", 3, "before", function(character, item, requestId)
             target = item,
         })
     end
-    quickLockpick.OnNativeRequest(character, item)
+    quickLockpick.OnNativeRequest(character, item, requestId)
     interaction.OnNativeRequest("lockpick", character, item, requestId)
 end)
 
@@ -151,6 +166,8 @@ listen("RequestCanDisarmTrap", 3, "before", function(character, item, requestId)
 end)
 
 listen("RequestProcessed", 3, "after", function(character, requestId, result)
+    quickLockpick.OnRequestProcessed(character, requestId, result)
+    interaction.OnRequestProcessed(character, requestId, result)
     if diagnostics.IsTraceEnabled() then
         diagnostics.Trace("request_processed", {
             actor = character,

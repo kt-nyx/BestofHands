@@ -87,7 +87,9 @@ function QuickLockpickCoordinator.Create(
         local nativeInteraction = nativeInteractions[key]
         if nativeInteraction ~= nil then
             local now = api.MonotonicTime() or 0
-            if nativeInteraction.active
+            if (nativeInteraction.active and (nativeInteraction.started
+                    or now - nativeInteraction.updatedAt
+                        <= (settings.NATIVE_REQUEST_TIMEOUT_MS or 10000)))
                 or now - nativeInteraction.updatedAt
                     <= (settings.QUICK_LOCKPICK_NATIVE_SUPPRESSION_MS
                         or 2000) then
@@ -216,12 +218,16 @@ function QuickLockpickCoordinator.Create(
         return true
     end
 
-    function instance.OnNativeRequest(actor, target)
+    function instance.OnNativeRequest(actor, target, requestId)
         local key = objectKey(actor, target)
-        nativeInteractions[key] = {
+        local interaction = {
             active = true,
+            actor = actor,
+            requestId = requestId,
+            target = target,
             updatedAt = api.MonotonicTime() or 0,
         }
+        nativeInteractions[key] = interaction
         local record = pending[key]
         if record == nil then
             return false
@@ -230,10 +236,23 @@ function QuickLockpickCoordinator.Create(
     end
 
     function instance.OnNativeStarted(actor, target)
-        nativeInteractions[objectKey(actor, target)] = {
-            active = true,
-            updatedAt = api.MonotonicTime() or 0,
-        }
+        local key = objectKey(actor, target)
+        local interaction = nativeInteractions[key] or {}
+        interaction.active = true
+        interaction.started = true
+        interaction.updatedAt = api.MonotonicTime() or 0
+        nativeInteractions[key] = interaction
+    end
+
+    function instance.OnRequestProcessed(actor, requestId, result)
+        if tonumber(result) ~= 0 then return end
+        for _, interaction in pairs(nativeInteractions) do
+            if interaction.actor == actor and interaction.requestId == requestId
+                and not interaction.started then
+                instance.OnNativeStopped(actor, interaction.target)
+                return
+            end
+        end
     end
 
     function instance.OnNativeStopped(actor, target)

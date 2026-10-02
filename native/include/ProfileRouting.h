@@ -194,4 +194,25 @@ inline std::optional<ProfileSelection> MatchProfileSelection(
     return match;
 }
 
+inline std::optional<ProfileSelection> MatchClientProfileSelection(
+    std::span<ClientActionRecord const> records,
+    RequestedRollIdentity const& identity)
+{
+    std::optional<ProfileSelection> match;
+    for (auto const& record : records) {
+        if (record.rollUuid != identity.rollUuid || identity.rollUuid.empty()
+            || record.initiator != identity.roller || record.target != identity.subject
+            || record.specialist == 0 || record.specialist == record.initiator) continue;
+        if (match.has_value()) return {};
+        match = ProfileSelection{
+            .record = ActionRecord{.id = record.id, .kind = record.kind,
+                .initiator = record.initiator, .specialist = record.specialist,
+                .target = record.target, .rollUuid = record.rollUuid,
+                .presentationAdvantage = record.presentationAdvantage},
+            .specialist = record.specialist, .scope = ProfileScope::Client,
+        };
+    }
+    return match;
+}
+
 } // namespace best_of_hands

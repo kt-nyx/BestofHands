@@ -448,9 +448,11 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
         -- A repeated permission request for an accepted action must retain
         -- its chosen profile, including after an MCM change or during retry.
         local accepted = pendingByTarget[targetKey(action, target)]
-        if accepted ~= nil and sameObject(accepted.initiator, actor) then
+        if accepted ~= nil and sameObject(accepted.initiator, actor)
+            and accepted.requestId == requestId then
             return false
         end
+        if accepted ~= nil then clear(accepted, "native_request_superseded") end
         if features ~= nil and not features.IsEnabled("best_in_party_" .. action) then
             return false
         end
@@ -597,9 +599,20 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
         return false
     end
 
+    function instance.OnRequestProcessed(actor, requestId, result)
+        if tonumber(result) ~= 0 then return end
+        for _, record in pairs(pendingByTarget) do
+            if sameObject(record.initiator, actor) and record.requestId == requestId
+                and record.rollEntityKey == nil then
+                clear(record, "native_request_rejected")
+                return
+            end
+        end
+    end
+
     function instance.OnNativeStarted(action, actor, target)
         local record = pendingByTarget[targetKey(action, target)]
-        if record ~= nil then
+        if record ~= nil and sameObject(record.initiator, actor) then
             record.phase = "native_action_started"
             if traceEnabled() then
                 diagnostics.Trace("native_action_started", {
@@ -615,7 +628,7 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
 
     function instance.OnNativeStopped(action, actor, target)
         local record = pendingByTarget[targetKey(action, target)]
-        if record ~= nil then
+        if record ~= nil and sameObject(record.initiator, actor) then
             if record.rollEntityKey ~= nil then
                 if traceEnabled() then
                     diagnostics.Trace("native_action_stopped_deferred", {
@@ -772,6 +785,7 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
         local previousRollUuid = record.rollUuid
         record.rollEntity = tostring(entity)
         record.rollEntityKey = tostring(entity)
+        record.liveRollComponent = component
         if previousRollEntityKey ~= nil
             and pendingByRollEntity[previousRollEntityKey] == record then
             pendingByRollEntity[previousRollEntityKey] = nil
@@ -799,6 +813,7 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
                 target = record.target,
             })
             record.phase = "roll_correlation_failed"
+            record.liveRollComponent = nil
             bridge.Remove(record.delegationId)
             return false
         end
@@ -877,6 +892,7 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
             return true
         end
         pendingByRollEntity[rollEntityKey] = nil
+        record.liveRollComponent = nil
         -- RequestedRoll is destroyed before BG3's later RollResult/post-roll
         -- UI path, including ordinary failures. Keep the bridge record alive
         -- so native Inspiration and lockpick Try Again retain the specialist
@@ -1076,23 +1092,32 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
         local source = safeField(component, "Source")
         local record = nil
         for _, candidate in pairs(pendingByTarget) do
-            for _, value in ipairs(targetValues) do
-                if matchesParticipant(candidate, value) then
-                    record = candidate
-                    break
+            if candidate.liveRollComponent ~= nil then
+                local matches = false
+                for _, value in ipairs(targetValues) do
+                    matches = matches or matchesParticipant(candidate, value)
                 end
-            end
-            if record == nil
-                and (matchesParticipant(candidate, caster)
-                    or matchesParticipant(candidate, source)) then
-                record = candidate
-            end
-            if record ~= nil then
-                break
+                if matches then
+                    if record ~= nil then return false end
+                    record = candidate
+                end
             end
         end
         if record == nil then
             return false
+        end
+
+        -- Participant identity is ambiguous if another check for this actor is
+        -- active. A retained post-roll lease cannot claim a new UI bonus either.
+        local ok, rolls = pcall(Ext.Entity.GetAllEntitiesWithComponent, "RequestedRoll")
+        if not ok then return false end
+        for _, roll in pairs(rolls or {}) do
+            local current = safeField(roll, "RequestedRoll")
+            if current ~= nil and tostring(roll) ~= record.rollEntityKey
+                and sameObject(entityGuid(safeField(current, "Roller")),
+                    entityGuid(record.initiator)) then
+                return false
+            end
         end
 
         local targetMatchesInitiator = false
