@@ -189,6 +189,23 @@ function NativeRuntimeApi.Create(settings, diagnostics)
         end)
     end
 
+    function api.IsSneaking(character)
+        return safe(diagnostics, "Darkness.CharacterSneaking", false, function()
+            local entity = Ext.Entity.Get(character)
+            return entity ~= nil and entity.Darkness ~= nil
+                and entity.Darkness.CharacterSneaking == true
+        end)
+    end
+
+    function api.IsAutoLockpickBlocked(character, target)
+        return safe(diagnostics, "AutoLockpickStoryPermission", true, function()
+            -- Core story scripts use IsSpeakerReserved to protect dialogue actors.
+            if Osi.IsSpeakerReserved(character) == 1 then return true end
+            local responses = Osi.DB_CustomUseItemResponse:Get(character, target, nil)
+            return next(responses or {}) ~= nil
+        end)
+    end
+
     function api.GetEntityUuid(value)
         return safe(diagnostics, "EntityUuid", nil, function()
             local entity = Ext.Entity.Get(value)

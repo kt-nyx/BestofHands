@@ -89,13 +89,13 @@ local function resolverApi(scores, overrides)
     }
 end
 
-test("optional MCM host settings default On and accept only booleans", function()
+test("optional MCM host modes default On and read legacy booleans", function()
     local previous = MCM
     for _, unavailable in ipairs({ false, {}, { Get = function() error("not ready") end } }) do
         MCM = unavailable
         local values = FeatureSettings.Read(Settings.MODULE_UUID)
-        assertEqual(true, values.best_in_party_lockpick, "missing MCM keeps lockpick On")
-        assertEqual(true, values.best_in_party_disarm, "missing MCM keeps disarm On")
+        assertEqual("On", values.best_in_party_lockpick, "missing MCM keeps lockpick On")
+        assertEqual("On", values.best_in_party_disarm, "missing MCM keeps disarm On")
     end
     MCM = { Get = function(id, uuid)
         assertEqual(Settings.MODULE_UUID, uuid, "explicit mod identity")
@@ -116,6 +116,7 @@ local function localSettingsHarness(initial, withMcm)
     local events, ticks = {}, {}
     local registrations, writes, reads, notifications = 0, 0, 0, 0
     local failSave = false
+    local lastCheckbox
     local function installMcm()
         MCM = {
             Get = function() error("personal preference must not read host settings") end,
@@ -142,10 +143,17 @@ local function localSettingsHarness(initial, withMcm)
         Json = {
             Parse = function(text)
                 if text == "bad" then error("malformed json") end
+                if text == "sneak-on" then return {left_click_lockpick=true, sneak_only_lockpick=true} end
+                if text == "off-sneak-on" then return {left_click_lockpick=false, sneak_only_lockpick=true} end
+                if text == "mode-sneak" then return {left_click_lockpick="Only while sneaking"} end
                 if text == "off" then return { left_click_lockpick = false } end
                 return { left_click_lockpick = text == "on" and true or "invalid" }
             end,
-            Stringify = function(value) return value.left_click_lockpick and "on" or "off" end,
+            Stringify = function(value)
+                assertEqual(nil, value.sneak_only_lockpick, "separate sneak switch removed from new saves")
+                if value.left_click_lockpick == "Only while sneaking" then return "mode-sneak" end
+                return value.left_click_lockpick == "On" and "on" or "off"
+            end,
         },
         Events = {},
         OnNextTick = function(callback) ticks[#ticks + 1] = callback end,
@@ -162,22 +170,25 @@ local function localSettingsHarness(initial, withMcm)
             return group
         end
         function node:AddText(label)
-            errorText = { Label = label }
-            function errorText:SetColor(name, value) self[name .. "Color"] = value end
-            self.Children[#self.Children + 1] = errorText
-            return errorText
+            local widget = {Label=label}
+            function widget:SetColor(name, value) self[name .. "Color"] = value end
+            if lastCheckbox == "Left-click lockpick" then errorText = widget end
+            self.Children[#self.Children + 1] = widget
+            return widget
         end
-        function node:AddCheckbox(label, value)
-            assertEqual("Left-click lockpick", label, "local checkbox title")
-            checkbox = { Checked = value }
-            self.Children[#self.Children + 1] = checkbox
-            return checkbox
+        function node:AddCombo(label)
+            lastCheckbox = label
+            local widget = {SelectedIndex=0}
+            if label == "Left-click lockpick" then checkbox = widget end
+            self.Children[#self.Children + 1] = widget
+            return widget
         end
         function node:AddImageButton(label, icon, size)
             assertEqual("ico_randomize_d", icon, "standard MCM reset icon")
-            resetButton = { Label = label, Image = { Icon = icon }, Size = size }
-            self.Children[#self.Children + 1] = resetButton
-            return resetButton
+            local widget = {Label=label, Image={Icon=icon}, Size=size}
+            if lastCheckbox == "Left-click lockpick" then resetButton = widget end
+            self.Children[#self.Children + 1] = widget
+            return widget
         end
         return node
     end
@@ -194,7 +205,10 @@ local function localSettingsHarness(initial, withMcm)
         events = events,
         render = render,
         change = function(value)
-            checkbox.Checked = value
+            if type(value) == "boolean" then value = value and "On" or "Off" end
+            for index, option in ipairs(checkbox.Options) do
+                if option == value then checkbox.SelectedIndex = index - 1 end
+            end
             checkbox.OnChange(checkbox)
         end,
         failSave = function() failSave = true end,
@@ -223,7 +237,7 @@ test("personal left-click setting ignores persisted Off without MCM", function()
     Ext, MCM = previousExt, previousMcm
 end)
 
-test("personal MCM checkbox persists and save failures retain previous value", function()
+test("personal MCM mode persists and save failures retain previous value", function()
     local previousExt, previousMcm = Ext, MCM
     for _, initial in ipairs({ "", "bad", "on", "invalid" }) do
         local h = localSettingsHarness(initial, true)
@@ -241,7 +255,7 @@ test("personal MCM checkbox persists and save failures retain previous value", f
     h.change(false)
     local _, _, _, _, _, checkbox, errorText = h.state()
     assertEqual(true, h.features.IsEnabled(), "failed save retains active value")
-    assertEqual(true, checkbox.Checked, "failed save restores UI")
+    assertEqual(0, checkbox.SelectedIndex, "failed save restores UI")
     assertContains(errorText.Label, "Could not save", "visible persistence error")
     -- A second client's configuration is independent of the first client's Off.
     local first = localSettingsHarness("off", true)
@@ -251,12 +265,12 @@ test("personal MCM checkbox persists and save failures retain previous value", f
     Ext, MCM = previousExt, previousMcm
 end)
 
-test("shared feature page renders the personal checkbox once per UI instance", function()
+test("shared feature page renders one personal mode per UI instance", function()
     local previousExt, previousMcm = Ext, MCM
     local h = localSettingsHarness("off", true)
     local tab = h.render()
     local personalGroup = tab.Children[1]
-    assertEqual(4, #personalGroup.Children, "one checkbox, reset, explanation, and error text")
+    assertEqual(4, #personalGroup.Children, "one personal mode with reset, explanation, and error text")
     local hostControl = { IDContext = "host_party_controls" }
     tab.Children[#tab.Children + 1] = hostControl
     h.render(tab)
@@ -268,7 +282,7 @@ test("shared feature page renders the personal checkbox once per UI instance", f
     assertEqual(true, h.features.IsEnabled(), "the single checkbox remains functional")
     local rebuiltTab = h.render()
     assertEqual(1, #rebuiltTab.Children, "a rebuilt UI gets its own personal controls")
-    assertEqual(true, rebuiltTab.Children[1].Children[1].Checked, "rebuilt checkbox shows current preference")
+    assertEqual(0, rebuiltTab.Children[1].Children[1].SelectedIndex, "rebuilt mode shows current preference")
     h.render(rebuiltTab)
     assertEqual(1, #rebuiltTab.Children, "rebuilt UI also rejects duplicate render")
     Ext, MCM = previousExt, previousMcm
@@ -285,20 +299,20 @@ test("personal reset restores and persists the enabled default", function()
     h.reset()
     local saved, _, writes, _, notifications, checkbox = h.state()
     assertEqual("on", saved, "reset persists enabled default")
-    assertEqual(true, checkbox.Checked, "reset updates checkbox")
+    assertEqual(0, checkbox.SelectedIndex, "reset updates mode")
     assertEqual(true, h.features.IsEnabled(), "reset enables behavior immediately")
     assertEqual(false, reset.Visible, "reset hides after returning to default")
     assertEqual(2, writes, "toggle and reset each persist once")
     assertEqual(2, notifications, "toggle and reset both notify the bridge")
     local description = tab.Children[1].Children[3]
     assertEqual(0.67, description.TextColor[4], "standard MCM description opacity")
-    assertContains(description.Label, "In multiplayer, this affects only your controls.",
-        "short multiplayer footnote")
+    assertEqual("Multiplayer: your setting here applies only to you.", description.Label,
+        "only the requested multiplayer explanation")
     h.change(false)
     h.failSave()
     h.reset()
     assertEqual(false, h.features.IsEnabled(), "failed reset save preserves disabled setting")
-    assertEqual(false, checkbox.Checked, "failed reset keeps checkbox unchecked")
+    assertEqual(2, checkbox.SelectedIndex, "failed reset keeps mode Off")
     assertEqual(true, reset.Visible, "failed reset retains reset control")
     Ext, MCM = previousExt, previousMcm
 end)
@@ -958,7 +972,7 @@ test("native bridge requires a live matching challenge acknowledgement", functio
         NATIVE_HANDSHAKE_ATTEMPTS = 2,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.3.2",
+        VERSION = "2.4.0",
     }
     local bridge = NativeBridge.Create(settings, api, recordingDiagnostics())
     bridge.BeginHandshake()
@@ -966,7 +980,7 @@ test("native bridge requires a live matching challenge acknowledgement", functio
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
         "protocol=9",
-        "version=2.3.2",
+        "version=2.4.0",
         "state=ready",
         "session=123-456",
         "pid=123",
@@ -1099,14 +1113,14 @@ test("native bridge isolates quick lockpick from unavailable delegated rolls", f
         NATIVE_HANDSHAKE_ATTEMPTS = 1,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.3.2",
+        VERSION = "2.4.0",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, recordingDiagnostics())
     bridge.BeginHandshake()
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=9", "version=2.3.2", "state=partial", "session=session-p",
+        "protocol=9", "version=2.4.0", "state=partial", "session=session-p",
         "features=" .. NativeBridge.REQUIRED_FEATURES, "ack=" .. probe,
         "cap_quick_lockpick=ready", "cap_quick_lockpick_source=structural_compatibility",
         "cap_quick_lockpick_reason=ok",
@@ -1150,14 +1164,14 @@ test("native bridge refreshes pending capabilities and validates manifests", fun
         NATIVE_HANDSHAKE_ATTEMPTS = 3,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.3.2",
+        VERSION = "2.4.0",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, recordingDiagnostics())
     bridge.BeginHandshake()
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=9", "version=2.3.2", "state=partial", "session=session-p",
+        "protocol=9", "version=2.4.0", "state=partial", "session=session-p",
         "features=" .. NativeBridge.REQUIRED_FEATURES, "ack=" .. probe,
         "cap_quick_lockpick=ready", "cap_quick_lockpick_source=exact_table",
         "cap_quick_lockpick_hooks=wrong_manifest",
@@ -1171,7 +1185,7 @@ test("native bridge refreshes pending capabilities and validates manifests", fun
         "pending delegated capability remains disabled")
 
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=9", "version=2.3.2", "state=ready", "session=session-p",
+        "protocol=9", "version=2.4.0", "state=ready", "session=session-p",
         "features=" .. NativeBridge.REQUIRED_FEATURES, "ack=" .. probe,
         "cap_quick_lockpick=ready", "cap_quick_lockpick_source=exact_table",
         "cap_quick_lockpick_hooks=" .. NativeBridge.QUICK_LOCKPICK_HOOKS,
@@ -1218,14 +1232,14 @@ test("native bridge cannot report ready when its session acknowledgement write f
         NATIVE_HANDSHAKE_ATTEMPTS = 1,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.3.2",
+        VERSION = "2.4.0",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, diagnostics)
     bridge.BeginHandshake()
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=9", "version=2.3.2", "state=ready", "session=session-a",
+        "protocol=9", "version=2.4.0", "state=ready", "session=session-a",
         "pid=10", "hooks=" .. NativeBridge.REQUIRED_HOOKS,
         "features=" .. NativeBridge.REQUIRED_FEATURES,
         "cap_quick_lockpick=ready", "cap_quick_lockpick_source=exact_table",
@@ -1269,7 +1283,7 @@ test("native bridge fails closed and warns once when the DLL is unavailable", fu
         NATIVE_HANDSHAKE_ATTEMPTS = 1,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.3.2",
+        VERSION = "2.4.0",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, recordingDiagnostics())
@@ -1308,7 +1322,7 @@ test("native bridge warning retries a temporarily unavailable host once per gene
         NATIVE_WARNING_ATTEMPTS = 3,
         NATIVE_WARNING_RETRY_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.3.2",
+        VERSION = "2.4.0",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, recordingDiagnostics())
@@ -1359,7 +1373,7 @@ test("native bridge drops warning retries from a superseded handshake generation
         NATIVE_WARNING_ATTEMPTS = 2,
         NATIVE_WARNING_RETRY_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.3.2",
+        VERSION = "2.4.0",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, recordingDiagnostics())
@@ -1390,14 +1404,14 @@ test("native bridge retries the patch warning after loading exhausted every atte
     }
     local diagnostics, records = recordingDiagnostics()
     local bridge = NativeBridge.Create({
-        VERSION = "2.3.2", NATIVE_HANDSHAKE_ATTEMPTS = 1,
+        VERSION = "2.4.0", NATIVE_HANDSHAKE_ATTEMPTS = 1,
         NATIVE_HANDSHAKE_POLL_MS = 1, NATIVE_WARNING_ATTEMPTS = 3,
         NATIVE_WARNING_RETRY_MS = 1,
     }, { Schedule = function(_, cb) scheduled[#scheduled + 1] = cb end }, diagnostics)
     bridge.BeginHandshake()
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=9", "version=2.3.2", "state=unavailable", "session=new-build",
+        "protocol=9", "version=2.4.0", "state=unavailable", "session=new-build",
         "features=" .. NativeBridge.REQUIRED_FEATURES, "ack=" .. probe,
         "executable=bg3_dx11.exe", "product_version=4.1.1.7631656",
         "cap_quick_lockpick=unavailable",
@@ -1444,14 +1458,14 @@ test("native bridge disables delegation if its acknowledgement is replaced", fun
         NATIVE_HANDSHAKE_ATTEMPTS = 1,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.3.2",
+        VERSION = "2.4.0",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, recordingDiagnostics())
     bridge.BeginHandshake()
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=9", "version=2.3.2", "state=ready", "session=session-a",
+        "protocol=9", "version=2.4.0", "state=ready", "session=session-a",
         "pid=10", "hooks=" .. NativeBridge.REQUIRED_HOOKS,
         "features=" .. NativeBridge.REQUIRED_FEATURES,
         "cap_quick_lockpick=ready", "cap_quick_lockpick_source=exact_table",
@@ -1463,7 +1477,7 @@ test("native bridge disables delegation if its acknowledgement is replaced", fun
     scheduled[1]()
     assertEqual(true, bridge.IsReady(), "initially ready")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=9", "version=2.3.2", "state=ready", "session=session-a",
+        "protocol=9", "version=2.4.0", "state=ready", "session=session-a",
         "pid=10", "hooks=" .. NativeBridge.REQUIRED_HOOKS,
         "features=" .. NativeBridge.REQUIRED_FEATURES,
         "ack=replaced-probe", "detail=another bridge replaced the ack", "end=1", "",
@@ -1504,7 +1518,7 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
             "protocol=9",
-            "pak_version=2.3.2",
+            "pak_version=2.4.0",
             "probe=test",
             "native_session=44-55",
             "trace=0",
@@ -1569,7 +1583,7 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
     }
     local bridge = NativePresentationBridge.Start({
         TRACE_EVENTS = false,
-        VERSION = "2.3.2",
+        VERSION = "2.4.0",
     })
     local component = {
         RollContext = 5,
@@ -1674,7 +1688,7 @@ test("client bridge prepares and queues BG3's stock lockpick task", function()
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
             "protocol=9",
-            "pak_version=2.3.2",
+            "pak_version=2.4.0",
             "probe=test",
             "native_session=44-55",
             "trace=0",
@@ -1688,6 +1702,7 @@ test("client bridge prepares and queues BG3's stock lockpick task", function()
     local timers = {}
     Ext = {
         Entity = {
+            GetAllEntitiesWithComponent = function(name) return name == "ClientControl" and {actorEntity} or {} end,
             Get = function(value) return entities[value] end,
             UuidToHandle = function(value)
                 return value == targetGuid and targetHandle or nil
@@ -1728,8 +1743,9 @@ test("client bridge prepares and queues BG3's stock lockpick task", function()
     local featureChanged
     NativePresentationBridge.Start({
         TRACE_EVENTS = false,
-        VERSION = "2.3.2",
+        VERSION = "2.4.0",
     }, channel, {
+        GetMode = function() return leftClick and "On" or "Off" end,
         IsEnabled = function() return leftClick end,
         Subscribe = function(callback) featureChanged = callback end,
     })
@@ -1819,7 +1835,7 @@ test("client bridge rejects malformed or unpublishable fallback requests", funct
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
             "protocol=9",
-            "pak_version=2.3.2",
+            "pak_version=2.4.0",
             "probe=test",
             "native_session=44-55",
             "trace=0",
@@ -1833,6 +1849,7 @@ test("client bridge rejects malformed or unpublishable fallback requests", funct
     local messages = {}
     Ext = {
         Entity = {
+            GetAllEntitiesWithComponent = function(name) return name == "ClientControl" and {actorEntity} or {} end,
             Get = function(value) return entities[value] end,
             UuidToHandle = function(value)
                 return value == targetGuid and targetEntity or nil
@@ -1864,7 +1881,7 @@ test("client bridge rejects malformed or unpublishable fallback requests", funct
     }
     NativePresentationBridge.Start({
         TRACE_EVENTS = false,
-        VERSION = "2.3.2",
+        VERSION = "2.4.0",
     }, channel)
 
     local function start(request, actor, targetValue)
@@ -1956,519 +1973,6 @@ test("client bridge rejects malformed or unpublishable fallback requests", funct
         (files["BestOfHandsNative.client"] or ""):find(
             "quick=ack-failure", 1, true),
         "failed acknowledgement removes the published native request")
-end)
-
-test("client bridge publishes pre-use left-click interception state", function()
-    local actorEntity = entity(
-        "20000000-0000-0000-0000-000000000001",
-        "01c0000100000201"
-    )
-    local targetEntity = entity(
-        "20000000-0000-0000-0000-000000000002",
-        "01c0000100000202"
-    )
-    local keyEntity = entity(
-        "20000000-0000-0000-0000-000000000003",
-        "01c0000100000203"
-    )
-    local task = setmetatable({ TaskType = "Lockpick" }, {
-        __tostring = function()
-            return "EclCharacterTaskLockpick (000001d000004000)"
-        end,
-    })
-    local controller = setmetatable({ Tasks = { task } }, {
-        __tostring = function()
-            return "EclInputController (000001d000003000)"
-        end,
-    })
-    actorEntity.ClientCharacter = { InputController = controller }
-    targetEntity.Lock = { Key_M = "TEST_KEY" }
-    targetEntity.LockBoost = { Lock = targetEntity.guid }
-    targetEntity.GetNetId = function() return 88 end
-    keyEntity.Key = { Key = "TEST_KEY" }
-    keyEntity.InventoryTopOwner = { TopOwner = actorEntity }
-
-    local componentEntities = {
-        ClientControl = { actorEntity },
-        Key = { keyEntity },
-        Lock = { targetEntity },
-        LockBoost = { targetEntity },
-    }
-    local callbacks = {}
-    local nextTicks = {}
-    local files = {
-        ["BestOfHandsNative.actions"] = table.concat({
-            "protocol=9",
-            "pak_version=2.3.2",
-            "probe=test",
-            "native_session=44-55",
-            "trace=0",
-            "end=1",
-            "",
-        }, "\n"),
-    }
-    local handler = nil
-    Ext = {
-        Entity = {
-            Get = function(value) return value end,
-            UuidToHandle = function(value)
-                return value == targetEntity.guid and targetEntity or nil
-            end,
-            GetAllEntitiesWithComponent = function(component)
-                return componentEntities[component] or {}
-            end,
-            OnCreate = function(component, callback)
-                callbacks[component .. "Create"] = callback
-            end,
-            OnChange = function(component, callback)
-                callbacks[component .. "Change"] = callback
-            end,
-            OnDestroy = function(component, callback)
-                callbacks[component .. "Destroy"] = callback
-            end,
-        },
-        Events = {
-            SessionLoaded = { Subscribe = function() end },
-            ResetCompleted = { Subscribe = function() end },
-        },
-        IO = {
-            LoadFile = function(path) return files[path] end,
-            SaveFile = function(path, value)
-                files[path] = value
-                return true
-            end,
-        },
-        OnNextTick = function(callback)
-            nextTicks[#nextTicks + 1] = callback
-        end,
-        Utils = { Print = function() end },
-    }
-
-    local channel = {
-        SetHandler = function(_, callback) handler = callback end,
-        SendToServer = function() return true end,
-    }
-    local leftClick = true
-    local featureChanged
-    NativePresentationBridge.Start({
-        TRACE_EVENTS = false,
-        VERSION = "2.3.2",
-    }, channel, {
-        IsEnabled = function() return leftClick end,
-        Subscribe = function(callback) featureChanged = callback end,
-    })
-    table.remove(nextTicks, 1)()
-    assertContains(
-        files["BestOfHandsNative.leftclick"],
-        "eligible=" .. actorEntity.handle .. "\t1",
-        "eligible initiator snapshot"
-    )
-    assertEqual(nil,
-        files["BestOfHandsNative.leftclick"]:find("locked=", 1, true),
-        "matching party key preserves vanilla use")
-
-    componentEntities.Key = {}
-    callbacks.KeyDestroy()
-    table.remove(nextTicks, 1)()
-    assertContains(
-        files["BestOfHandsNative.leftclick"],
-        "locked=" .. targetEntity.handle .. "\t88",
-        "keyless locked target snapshot"
-    )
-
-    leftClick = false
-    featureChanged()
-    assertEqual(nil, files["BestOfHandsNative.leftclick"]:find("eligible=", 1, true),
-        "personal Off immediately removes automatic click eligibility")
-    callbacks.KeyDestroy()
-    table.remove(nextTicks, 1)()
-    assertEqual(nil, files["BestOfHandsNative.leftclick"]:find("eligible=", 1, true),
-        "world updates cannot re-enable a disabled preference")
-    leftClick = true
-    featureChanged()
-    assertContains(files["BestOfHandsNative.leftclick"], "eligible=" .. actorEntity.handle,
-        "personal On restores click eligibility without reloading")
-
-    handler({
-        actor = actorEntity.guid,
-        operation = "invalidate",
-        target = targetEntity.guid,
-    })
-    assertEqual(nil,
-        files["BestOfHandsNative.leftclick"]:find(
-            "locked=" .. targetEntity.handle, 1, true),
-        "successful lockpick removes the stale replicated lock immediately")
-    callbacks.LockBoostChange(targetEntity)
-    table.remove(nextTicks, 1)()
-    assertEqual(nil,
-        files["BestOfHandsNative.leftclick"]:find(
-            "locked=" .. targetEntity.handle, 1, true),
-        "stale LockBoost changes cannot re-add an authoritatively unlocked target")
-    callbacks.LockCreate(targetEntity)
-    table.remove(nextTicks, 1)()
-    assertEqual(nil,
-        files["BestOfHandsNative.leftclick"]:find(
-            "locked=" .. targetEntity.handle, 1, true),
-        "persistent Lock metadata cannot revive an unlocked target")
-    callbacks.LockBoostCreate(targetEntity)
-    table.remove(nextTicks, 1)()
-    assertContains(
-        files["BestOfHandsNative.leftclick"],
-        "locked=" .. targetEntity.handle .. "\t88",
-        "a future LockBoost creation permits a genuinely relocked target")
-
-    actorEntity.IsInCombat = {}
-    callbacks.IsInCombatCreate()
-    table.remove(nextTicks, 1)()
-    assertContains(
-        files["BestOfHandsNative.leftclick"],
-        "eligible=" .. actorEntity.handle .. "\t0",
-        "combat disables pre-use interception"
-    )
-end)
-
-test("client left-click snapshot isolates actors, keys, targets, and sessions", function()
-    local actorA = entity(
-        "21000000-0000-0000-0000-000000000001",
-        "01c0000100000211"
-    )
-    local actorB = entity(
-        "21000000-0000-0000-0000-000000000002",
-        "01c0000100000212"
-    )
-    local outsider = entity(
-        "21000000-0000-0000-0000-000000000099",
-        "01c0000100000299"
-    )
-    local keyedTarget = entity(
-        "21000000-0000-0000-0000-000000000011",
-        "01c0000100000311"
-    )
-    local freeTarget = entity(
-        "21000000-0000-0000-0000-000000000012",
-        "01c0000100000312"
-    )
-    local invalidTarget = entity(
-        "21000000-0000-0000-0000-000000000013",
-        "01c0000100000313"
-    )
-    local unlockedDoor = entity(
-        "21000000-0000-0000-0000-000000000014",
-        "01c0000100000314"
-    )
-    local keyEntity = entity(
-        "21000000-0000-0000-0000-000000000021",
-        "01c0000100000411"
-    )
-    actorB.IsInTurnBasedMode = {}
-    keyedTarget.Lock = { Key_M = "KEYED_TARGET" }
-    freeTarget.Lock = { Key_M = "" }
-    invalidTarget.Lock = { Key_M = "" }
-    unlockedDoor.Lock = { Key_M = "" }
-    keyedTarget.GetNetId = function() return 111 end
-    freeTarget.GetNetId = function() return 112 end
-    unlockedDoor.GetNetId = function() return 113 end
-    local invalidTargetNetId = 0
-    invalidTarget.GetNetId = function()
-        if invalidTargetNetId == "throw" then
-            error("simulated snapshot NetID failure")
-        end
-        return invalidTargetNetId
-    end
-    keyEntity.Key = { Key = "KEYED_TARGET" }
-    keyEntity.InventoryTopOwner = { TopOwner = outsider }
-
-    local componentEntities = {
-        ClientControl = { actorA, actorB },
-        Key = { keyEntity },
-        Lock = { keyedTarget, freeTarget, invalidTarget, unlockedDoor },
-        LockBoost = { keyedTarget, freeTarget, invalidTarget },
-    }
-    local byGuid = {
-        [keyedTarget.guid] = keyedTarget,
-        [freeTarget.guid] = freeTarget,
-        [invalidTarget.guid] = invalidTarget,
-    }
-    local callbacks = {}
-    local nextTicks = {}
-    local timers = {}
-    local files = {}
-    local handler = nil
-    local failSnapshotSave = false
-    local snapshotSaveCount = 0
-    local function actions(session)
-        return table.concat({
-            "protocol=9",
-            "pak_version=2.3.2",
-            "probe=test",
-            "native_session=" .. session,
-            "trace=0",
-            "end=1",
-            "",
-        }, "\n")
-    end
-    files["BestOfHandsNative.actions"] = actions("session-a")
-    Ext = {
-        Entity = {
-            Get = function(value) return value end,
-            UuidToHandle = function(value) return byGuid[value] end,
-            GetAllEntitiesWithComponent = function(component)
-                return componentEntities[component] or {}
-            end,
-            OnCreate = function(component, callback)
-                callbacks[component .. "Create"] = callback
-            end,
-            OnChange = function(component, callback)
-                callbacks[component .. "Change"] = callback
-            end,
-            OnDestroy = function(component, callback)
-                callbacks[component .. "Destroy"] = callback
-            end,
-        },
-        Events = {
-            SessionLoaded = { Subscribe = function() end },
-            ResetCompleted = { Subscribe = function() end },
-        },
-        IO = {
-            LoadFile = function(path) return files[path] end,
-            SaveFile = function(path, value)
-                if path == "BestOfHandsNative.leftclick"
-                    and failSnapshotSave then
-                    return false
-                end
-                if path == "BestOfHandsNative.leftclick" then
-                    snapshotSaveCount = snapshotSaveCount + 1
-                end
-                files[path] = value
-                return true
-            end,
-        },
-        OnNextTick = function(callback)
-            nextTicks[#nextTicks + 1] = callback
-        end,
-        Timer = {
-            WaitFor = function(delay, callback)
-                timers[#timers + 1] = {
-                    callback = callback,
-                    delay = delay,
-                }
-            end,
-        },
-        Utils = { Print = function() end },
-    }
-    local channel = {
-        SetHandler = function(_, callback) handler = callback end,
-        SendToServer = function() return true end,
-    }
-    NativePresentationBridge.Start({
-        TRACE_EVENTS = false,
-        VERSION = "2.3.2",
-    }, channel)
-
-    local function flush()
-        local callback = table.remove(nextTicks, 1)
-        assertEqual("function", type(callback), "snapshot refresh scheduled")
-        callback()
-    end
-    local function snapshot()
-        return files["BestOfHandsNative.leftclick"] or ""
-    end
-
-    flush()
-    assertContains(snapshot(),
-        "eligible=" .. actorA.handle .. "\t1",
-        "ordinary controlled actor is eligible")
-    assertContains(snapshot(),
-        "eligible=" .. actorB.handle .. "\t0",
-        "turn-based actor is ineligible")
-    assertContains(snapshot(),
-        "locked=" .. keyedTarget.handle .. "\t111",
-        "key owned outside the controlled party does not suppress lockpicking")
-    assertContains(snapshot(),
-        "locked=" .. freeTarget.handle .. "\t112",
-        "keyless lock is published")
-    assertEqual(nil,
-        snapshot():find("locked=" .. invalidTarget.handle, 1, true),
-        "invalid network ID is excluded")
-    assertEqual(nil,
-        snapshot():find("locked=" .. unlockedDoor.handle, 1, true),
-        "persistent Lock metadata cannot classify an unlocked door as locked")
-    for _, invalidNetId in ipairs({
-        -1,
-        1.5,
-        math.huge,
-        0 / 0,
-        "not-a-number",
-        "throw",
-    }) do
-        invalidTargetNetId = invalidNetId
-        callbacks.LockBoostChange(invalidTarget)
-        flush()
-        assertEqual(nil,
-            snapshot():find("locked=" .. invalidTarget.handle, 1, true),
-            "non-positive, non-integral, and unreadable NetIDs stay excluded")
-    end
-    invalidTargetNetId = 0
-
-    keyEntity.InventoryTopOwner.TopOwner = actorA
-    callbacks.InventoryTopOwnerChange(keyEntity)
-    flush()
-    assertEqual(nil,
-        snapshot():find("locked=" .. keyedTarget.handle, 1, true),
-        "matching controlled-party key restores vanilla key use")
-    assertContains(snapshot(),
-        "locked=" .. freeTarget.handle .. "\t112",
-        "unrelated keyless target remains eligible")
-
-    actorB.IsInTurnBasedMode = nil
-    callbacks.IsInTurnBasedModeDestroy(actorB)
-    flush()
-    assertContains(snapshot(),
-        "eligible=" .. actorB.handle .. "\t1",
-        "leaving turn-based mode restores eligibility")
-
-    componentEntities.LockBoost = { keyedTarget, invalidTarget }
-    callbacks.LockBoostDestroy(freeTarget)
-    flush()
-    assertEqual(nil,
-        snapshot():find("locked=" .. freeTarget.handle, 1, true),
-        "removing live lock state removes a lock-capable target")
-    componentEntities.LockBoost = { keyedTarget, freeTarget, invalidTarget }
-    callbacks.LockBoostCreate(freeTarget)
-    flush()
-    assertContains(snapshot(),
-        "locked=" .. freeTarget.handle .. "\t112",
-        "creating live lock state restores a genuinely locked target")
-
-    callbacks.LockBoostChange(freeTarget)
-    callbacks.LockBoostChange(freeTarget)
-    callbacks.KeyChange(keyEntity)
-    assertEqual(1, #nextTicks,
-        "multiple component changes coalesce into one snapshot refresh")
-    local savesBeforeUnchangedRefresh = snapshotSaveCount
-    flush()
-    assertEqual(savesBeforeUnchangedRefresh, snapshotSaveCount,
-        "unchanged snapshot does not rewrite the bridge file")
-
-    handler({
-        actor = actorA.guid,
-        operation = "invalidate",
-        target = freeTarget.guid,
-    })
-    assertEqual(nil,
-        snapshot():find("locked=" .. freeTarget.handle, 1, true),
-        "target invalidation removes only the unlocked target")
-    callbacks.LockBoostChange(freeTarget)
-    flush()
-    assertEqual(nil,
-        snapshot():find("locked=" .. freeTarget.handle, 1, true),
-        "late changes cannot revive the invalidated target")
-    callbacks.LockBoostCreate(keyedTarget)
-    flush()
-    assertEqual(nil,
-        snapshot():find("locked=" .. freeTarget.handle, 1, true),
-        "another target's LockBoost creation cannot clear the tombstone")
-    callbacks.LockCreate(freeTarget)
-    flush()
-    assertEqual(nil,
-        snapshot():find("locked=" .. freeTarget.handle, 1, true),
-        "Lock metadata creation cannot clear a target tombstone")
-    callbacks.LockBoostCreate(freeTarget)
-    flush()
-    assertContains(snapshot(),
-        "locked=" .. freeTarget.handle .. "\t112",
-        "matching LockBoost creation permits genuine relocking")
-
-    byGuid[freeTarget.guid] = nil
-    handler({
-        actor = actorA.guid,
-        operation = "invalidate",
-        target = freeTarget.guid,
-    })
-    assertEqual(nil,
-        snapshot():find("locked=" .. freeTarget.handle, 1, true),
-        "UUID invalidation remains immediate if handle lookup is unavailable")
-    byGuid[freeTarget.guid] = freeTarget
-    callbacks.LockBoostCreate(freeTarget)
-    flush()
-
-    failSnapshotSave = true
-    handler({
-        actor = actorA.guid,
-        operation = "invalidate",
-        target = freeTarget.guid,
-    })
-    handler({
-        actor = actorA.guid,
-        operation = "invalidate",
-        target = freeTarget.guid,
-    })
-    assertEqual(1, #nextTicks,
-        "repeated failed invalidations coalesce into one snapshot refresh")
-    flush()
-    assertEqual(1, #timers,
-        "continued invalidation write failure enters bounded backoff")
-    failSnapshotSave = false
-    table.remove(timers, 1).callback()
-    assertEqual(nil,
-        snapshot():find("locked=" .. freeTarget.handle, 1, true),
-        "invalidation retry removes the target without another component event")
-
-    files["BestOfHandsNative.actions"] = actions("session-b")
-    callbacks.ClientControlChange(actorA)
-    flush()
-    assertContains(snapshot(),
-        "locked=" .. freeTarget.handle .. "\t112",
-        "new native session cannot inherit stale target tombstones")
-
-    files["BestOfHandsNative.actions"] = nil
-    callbacks.KeyChange(keyEntity)
-    flush()
-    assertEqual(0, #nextTicks,
-        "failed refresh does not spin on every client tick")
-    assertEqual(1, #timers,
-        "unavailable handshake schedules one bounded retry")
-    assertEqual(250, timers[1].delay,
-        "handshake retry uses the configured backoff")
-    files["BestOfHandsNative.actions"] = actions("session-c")
-    table.remove(timers, 1).callback()
-    assertContains(snapshot(), "native_session=session-c",
-        "retry publishes the recovered native session")
-
-    local beforeInvalidMessage = snapshot()
-    handler({
-        operation = "invalidate",
-        target = "not-a-guid",
-    })
-    assertEqual(beforeInvalidMessage, snapshot(),
-        "malformed invalidation cannot alter the target snapshot")
-
-    failSnapshotSave = true
-    actorA.IsInCombat = {}
-    callbacks.IsInCombatCreate(actorA)
-    flush()
-    assertEqual(1, #timers,
-        "snapshot write failure schedules one bounded retry")
-    failSnapshotSave = false
-    table.remove(timers, 1).callback()
-    assertContains(snapshot(), "native_session=session-c",
-        "snapshot write retry recovers without another component event")
-
-    local getAllEntities = Ext.Entity.GetAllEntitiesWithComponent
-    Ext.Entity.GetAllEntitiesWithComponent = function(component)
-        if component == "LockBoost" then
-            error("simulated entity enumeration failure")
-        end
-        return getAllEntities(component)
-    end
-    callbacks.LockBoostChange(freeTarget)
-    flush()
-    assertEqual(1, #timers,
-        "entity enumeration failure enters bounded snapshot retry")
-    Ext.Entity.GetAllEntitiesWithComponent = getAllEntities
-    table.remove(timers, 1).callback()
-    assertContains(snapshot(), "native_session=session-c",
-        "snapshot retry recovers after entity enumeration resumes")
 end)
 
 test("runtime tool precheck uses BG3 party inventory without consuming anything", function()
@@ -2881,6 +2385,89 @@ test("all eight feature combinations keep personal controls and host rolls indep
         assertEqual(leftClick, h.features.IsEnabled(), "client preference ignores host, mask " .. mask)
     end
     Ext, MCM = previousExt, previousMcm
+end)
+
+test("all 27 mode combinations independently gate standing and hiding initiators", function()
+    local previousExt, previousMcm = Ext, MCM
+    local modes = {"On", "Only while sneaking", "Off"}
+    for _, clickMode in ipairs(modes) do
+        for _, lockpickMode in ipairs(modes) do
+            for _, disarmMode in ipairs(modes) do
+                local h = localSettingsHarness("on", true)
+                h.render(); h.change(clickMode)
+                MCM.Get = function(id)
+                    if id == "best_in_party_lockpick" then return lockpickMode end
+                    if id == "best_in_party_disarm" then return disarmMode end
+                    error("unexpected host setting")
+                end
+                local hiding = false
+                local features = FeatureSettings.Create(Settings, {IsSneaking=function(actor)
+                    assertEqual("actor", actor, "check initiator, never the specialist")
+                    return hiding
+                end})
+                for _, state in ipairs({false, true}) do
+                    hiding = state
+                    local function permits(mode)
+                        return mode == "On" or (mode == "Only while sneaking" and hiding)
+                    end
+                    local c, _, upserts = makeCoordinator({features=features})
+                    c.OnNativeRequest("lockpick", "actor", "target", 1)
+                    c.OnNativeRequest("disarm", "actor", "trap", 2)
+                    assertEqual((permits(lockpickMode) and 1 or 0) + (permits(disarmMode) and 1 or 0),
+                        #upserts, "host modes independently control delegation")
+                    for _, record in ipairs(upserts) do
+                        assertEqual(true, permits(record.action == "lockpick" and lockpickMode or disarmMode),
+                            "only the matching permitted action delegates")
+                    end
+                    assertEqual(permits(clickMode), h.features.IsEnabled("left_click_lockpick", hiding),
+                        "personal mode remains independent of both host modes")
+                end
+            end
+        end
+    end
+    Ext, MCM = previousExt, previousMcm
+end)
+
+test("sneak-only host actions keep accepted profiles after standing or changing modes", function()
+    local previousMcm = MCM
+    local mode, hiding = "Only while sneaking", true
+    MCM = {Get=function() return mode end}
+    local features = FeatureSettings.Create(Settings, {IsSneaking=function() return hiding end})
+    for _, action in ipairs({"lockpick", "disarm"}) do
+        hiding, mode = true, "Only while sneaking"
+        local c, _, upserts, removed = makeCoordinator({features=features})
+        c.OnNativeRequest(action, "actor", "target", 1)
+        assertEqual(1, #upserts, "hiding admits an action")
+        hiding, mode = false, "Off"
+        c.OnNativeRequest(action, "actor", "target", 1)
+        assertEqual(1, #upserts, "accepted permission retry retains original profile")
+        assertEqual(0, #removed, "standing or switching Off does not cancel an accepted action")
+        c.Clear("finished")
+        mode = "Only while sneaking"
+        c.OnNativeRequest(action, "actor", "target", 2)
+        assertEqual(1, #upserts, "standing next action uses own modifiers")
+        hiding = true
+        c.OnNativeRequest(action, "actor", "target", 3)
+        assertEqual(2, #upserts, "hiding next action shares modifiers again")
+    end
+    MCM = previousMcm
+end)
+
+test("server Hide check uses CharacterSneaking and fails closed on missing state", function()
+    local previousExt = Ext
+    local value = {Darkness={CharacterSneaking=true, ActuallySneaking=false}}
+    Ext = {Entity={Get=function() return value end}}
+    local api = NativeRuntimeApi.Create({}, recordingDiagnostics())
+    assertEqual(true, api.IsSneaking("actor"), "Hide mode does not require being unseen")
+    value.Darkness.CharacterSneaking = false
+    assertEqual(false, api.IsSneaking("actor"), "standing detected")
+    value = {}
+    assertEqual(false, api.IsSneaking("actor"), "missing component is not hiding")
+    value = nil
+    assertEqual(false, api.IsSneaking("actor"), "unavailable actor is not hiding")
+    Ext.Entity.Get = function() error("unavailable world") end
+    assertEqual(false, api.IsSneaking("actor"), "query failures cannot enable sharing")
+    Ext = previousExt
 end)
 
 test("host setting changes leave accepted rolls and retries intact", function()
@@ -3851,7 +3438,8 @@ test("v2 left-click path activates BG3's stock task through native lifecycle", f
     local observerOffset = assert(source:find("interaction.Subscribe()", 1, true))
     assertEqual(true, commandOffset < observerOffset, "diagnostic commands precede observers")
     assertEqual(nil, source:find("RequestActiveRoll", 1, true), "no custom active roll")
-    assertContains(source, 'listen("UseFinished"', "failed ordinary Use entry listener")
+    assertEqual(nil, source:find('listen("UseFinished"', 1, true), "raw failure cannot bypass story permission")
+    assertContains(source, 'event == "GLO_UsedLockedItem"', "stock story-safe locked-use admission")
     assertContains(source, "quickLockpick.OnUseFinished",
         "failed Use delegates to the stock-task coordinator")
     assertEqual(nil, source:find("TemplateRemove", 1, true), "no custom tool path")
@@ -3889,14 +3477,8 @@ test("v2 left-click path activates BG3's stock task through native lifecycle", f
     ))
     local nativeSource = nativeFile:read("*a")
     nativeFile:close()
-    assertContains(nativeSource, "ClientTaskSelectionMidHook",
-        "ordinary ItemUse is intercepted at BG3's task-selection boundary")
-    assertContains(nativeSource, "kClientTaskSelectionSignature",
-        "the task-selection boundary is exact-signature guarded")
-    assertContains(nativeSource, "context.r15 = redirect->lockpickTask",
-        "the selected stock ItemUse task is replaced before it can start")
-    assertContains(nativeSource, "BG3 clears ItemUse.Ready",
-        "substitution happens before non-winning task readiness is retired")
+    assertEqual(nil, nativeSource:find("ClientTaskSelectionMidHook", 1, true),
+        "normal Use runs before automatic lockpicking; no task-selection interception")
     assertEqual(nil, nativeSource:find("0x01b3a2d2", 1, true),
         "the late preparation-only hook site cannot leave ItemUse armed")
     assertEqual(nil,
@@ -4040,10 +3622,11 @@ end)
 
 test("client session retries startup and rejects old generation acknowledgements", function()
     local NativeSession = dofile(luaRoot .. "../Client/NativeSession.lua")
-    local files, timers, events = {}, {}, {}
+    local files, timers, events, logs = {}, {}, {}, {}
+    local failSave = false
     Ext = {IO={LoadFile=function(p) return files[p] end,
-        SaveFile=function(p,v) files[p]=v return true end},
-        Utils={Print=function() end, MonotonicTime=function() return 940 end},
+        SaveFile=function(p,v) if failSave then return false end files[p]=v return true end},
+        Utils={Print=function(v) logs[#logs+1]=v end, MonotonicTime=function() return 940 end},
         Timer={WaitFor=function(_,cb) timers[#timers+1]=cb end}, Events={}}
     for _, name in ipairs({"SessionLoaded", "ResetCompleted"}) do
         Ext.Events[name] = {Subscribe=function(_,cb) events[name]=cb end}
@@ -4055,11 +3638,20 @@ test("client session retries startup and rejects old generation acknowledgements
         .."\nstate=waiting_for_bridge\nsession=client-process\nfeatures="
         ..NativeBridge.REQUIRED_FEATURES.."\nend=1\n"
     timers[1]()
+    assertContains(logs[#logs], "state=waiting_for_client_ack|", "native state alone cannot report client readiness")
     assertContains(files["BestOfHandsNative.handshake"], "native_session=client-process", "current nonce written")
     local probe = files["BestOfHandsNative.handshake"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = files["BestOfHandsNative.status"].."client_ack="..probe.."\n"
     timers[2]()
     assertEqual("client-process", session.GetSession(), "current client ack enables exchange")
+    assertContains(logs[#logs], "state=ready|", "acknowledged session reports ready")
+    failSave = true
+    timers[3]()
+    assertEqual("", session.GetSession(), "failed handshake write disables exchange")
+    assertContains(logs[#logs], "state=native_handshake_write_failed|", "write failure is actionable")
+    failSave = false
+    timers[4]()
+    assertEqual("client-process", session.GetSession(), "write retry recovers without reset")
     events.ResetCompleted()
     assertEqual("", session.GetSession(), "old ack cannot enable a reset generation")
 end)
@@ -4100,6 +3692,152 @@ test("remote action sync remaps existing guest rolls without host files or handl
         records={{id=901, action="lockpick", rollUuid=roll.guid, initiatorUuid=actor.guid,
             specialistUuid=specialist.guid, targetUuid=target.guid, presentationAdvantage=1}}})
     assertEqual(nil, files["BestOfHandsNative.client"]:find("record=901",1,true), "old revision cannot resurrect mapping")
+end)
+
+test("story response and dialogue block automatic admission including deferred starts", function()
+    local dialogue, custom, failRead = false, false, false
+    Osi={IsSpeakerReserved=function() return dialogue and 1 or 0 end,
+        DB_CustomUseItemResponse={Get=function()
+            if failRead then error("story database unavailable") end
+            return custom and {{"actor","target",0}} or {}
+        end}}
+    local api=NativeRuntimeApi.Create({},recordingDiagnostics())
+    assertEqual(false,api.IsAutoLockpickBlocked("actor","target"),"ordinary Use permitted")
+    dialogue=true
+    assertEqual(true,api.IsAutoLockpickBlocked("actor","target"),"dialogue protected")
+    dialogue=false;custom=true
+    assertEqual(true,api.IsAutoLockpickBlocked("actor","target"),"custom story response protected")
+    custom=false;failRead=true
+    assertEqual(true,api.IsAutoLockpickBlocked("actor","target"),"unknown permission remains vanilla")
+    failRead=false
+    local timers,sent={},{}
+    api.IsPlayer=function() return true end; api.IsLocked=function() return true end
+    api.IsInCombat=function() return false end; api.MonotonicTime=function() return 50 end
+    api.GetEntityUuid=function(v) return v.."-uuid" end;api.GetReservedUserId=function() return 1 end
+    api.Schedule=function(_,cb) timers[#timers+1]=cb end
+    api.SendQuickLockpick=function(_,v) sent[#sent+1]=v return true end
+    local c=QuickLockpickCoordinator.Create({QUICK_LOCKPICK_TIMEOUT_MS=100},api,
+        {IsReady=function() return true end},{},recordingDiagnostics(false))
+    custom=true
+    assertEqual(false,c.OnUseFinished("actor","target",0),"story response cannot queue")
+    custom=false
+    assertEqual(true,c.OnUseFinished("actor","target",0),"ordinary locked failure queues")
+    dialogue=true;timers[1]()
+    for _,v in ipairs(sent) do assertEqual("cancel",v.operation,"dialogue that starts before dispatch cancels") end
+    assertEqual(0,c.Count(),"deferred story cancellation clears pending request")
+end)
+
+test("status diagnostics distinguish missing unreadable malformed and mixed versions", function()
+    local text, readError
+    Ext = {IO={LoadFile=function() if readError then error("access denied") end return text end}}
+    local _, reason = NativeBridge.ReadStatus(Settings.VERSION)
+    assertEqual("native_status_unavailable", reason, "nil read does not falsely prove absence")
+    readError = true
+    _, reason = NativeBridge.ReadStatus(Settings.VERSION)
+    assertEqual("native_status_read_failed", reason, "read failure")
+    readError = false
+    for _, value in ipairs({"", "protocol=9\nend=1\n", "state=ready\nstate=duplicate\nend=1\n"}) do
+        text=value
+        _, reason = NativeBridge.ReadStatus(Settings.VERSION)
+        assertEqual("native_status_invalid", reason, "invalid envelope")
+    end
+    text="protocol=8\nversion=2.3.0\nstate=waiting_for_bridge\nsession=old\nend=1\n"
+    local _, mismatch, detail = NativeBridge.ReadStatus(Settings.VERSION)
+    assertEqual("native_version_mismatch", mismatch, "mixed pair")
+    assertContains(detail, "2.3.0", "actual DLL version")
+    assertContains(detail, Settings.VERSION, "expected DLL version")
+end)
+
+test("personal modes migrate old preferences and retain saved modes on write failure", function()
+    local previousExt, previousMcm = Ext, MCM
+    local h=localSettingsHarness("on", true)
+    h.render()
+    assertEqual("On", h.features.GetMode(), "default stays normal")
+    h.change("Only while sneaking")
+    assertEqual(false, h.features.IsEnabled(nil, false), "standing skips automatic lockpick")
+    assertEqual(true, h.features.IsEnabled(nil, true), "hiding permits automatic lockpick")
+    local stored=h.state()
+    assertEqual("mode-sneak", stored, "one mode replaces both old preferences")
+    local restored=localSettingsHarness(stored, true)
+    restored.render()
+    assertEqual("Only while sneaking", restored.features.GetMode(), "personal mode persists")
+    restored.failSave()
+    restored.change("Off")
+    assertEqual("Only while sneaking", restored.features.GetMode(), "failed write preserves preference")
+    local _,_,_,_,_,combo = restored.state()
+    assertEqual(1, combo.SelectedIndex, "failed write restores middle choice")
+    local absent=localSettingsHarness("sneak-on", false)
+    assertEqual("On", absent.features.GetMode(), "no MCM preserves original defaults")
+    local reset=localSettingsHarness("sneak-on", true)
+    reset.render()
+    assertEqual("Only while sneaking", reset.features.GetMode(), "legacy separate sneak switch migrates")
+    reset.reset()
+    assertEqual("On", reset.features.GetMode(), "reset restores default On")
+    local oldOff = localSettingsHarness("off-sneak-on", true)
+    assertEqual("Off", oldOff.features.GetMode(), "old disabled setting takes priority over sneak switch")
+    Ext, MCM = previousExt, previousMcm
+end)
+
+test("automatic admission checks current hide state without touching manual actions", function()
+    local a=entity("31000000-0000-0000-0000-000000000001", "01c0000100000501")
+    local t=entity("31000000-0000-0000-0000-000000000002", "01c0000100000502")
+    t.GetNetId=function() return 25 end
+    local files, messages, ticks, logs={}, {}, {}, {}
+    files["BestOfHandsNative.actions"]="protocol=9\npak_version="..Settings.VERSION
+        .."\nprobe=host\nnative_session=session\nend=1\n"
+    local handler, sneak=true, true
+    Ext={IO={LoadFile=function(p) return files[p] end, SaveFile=function(p,v) files[p]=v return true end},
+        Utils={Print=function(v) logs[#logs+1]=v end}, OnNextTick=function(cb) ticks[#ticks+1]=cb end,
+        Events={SessionLoaded={Subscribe=function() end},ResetCompleted={Subscribe=function() end}},
+        Entity={Get=function(v) return v==a.guid and a or (type(v)=="table" and v or nil) end,
+            UuidToHandle=function(v) return v==t.guid and t or nil end,
+            GetAllEntitiesWithComponent=function(name) return name=="ClientControl" and {a} or {} end,
+            OnCreate=function() end, OnChange=function() end, OnDestroy=function() end}}
+    NativePresentationBridge.Start(Settings, {SetHandler=function(_,cb) handler=cb end,
+        SendToServer=function(_,v) messages[#messages+1]=v return true end},
+        {IsEnabled=function(_, hiding) return not sneak or hiding end, Subscribe=function() end})
+    table.remove(ticks,1)()
+    assertEqual(nil, files["BestOfHandsNative.leftclick"]:find("locked=",1,true),
+        "no locked object can preempt vanilla Use")
+    local function start(id) handler({operation="start",request=id,actor=a.guid,target=t.guid}) return messages[#messages] end
+    assertEqual("automatic_conditions_not_met", start("standing").reason, "standing fails sneak-only")
+    a.Darkness={CharacterSneaking=true, ActuallySneaking=false}
+    assertEqual("queued", start("hiding-visible").operation, "Hide mode suffices even before concealment")
+    a.Darkness.CharacterSneaking=false
+    assertEqual("rejected", start("stood-up").operation, "new actions use fresh state")
+    assertContains(files["BestOfHandsNative.client"],"quick=hiding-visible", "accepted action retained")
+    sneak=false
+    assertEqual("queued", start("normal-mode").operation, "default mode permits standing")
+    a.ClientCharacter={InDialog=true}
+    assertEqual("rejected", start("dialogue").operation, "dialogue cannot start an automatic roll")
+    a.ClientCharacter=nil; a.IsInCombat={}
+    assertEqual("rejected", start("combat").operation, "combat remains vanilla")
+    for _, line in ipairs(logs) do
+        assertEqual(nil, line:find("client_quick_lockpick_rejected",1,true),
+            "intentional automatic skips do not log warnings")
+    end
+end)
+
+test("story-safe game signal is the sole automatic entry point", function()
+    local f=assert(io.open(luaRoot.."Init.lua","rb"));local s=f:read("*a");f:close()
+    local a=assert(s:find('listen("DualEntityEvent"',1,true))
+    local b=assert(s:find('listen("EnteredForceTurnBased"',a,true))
+    local handler, calls
+    calls=0
+    local environment={listen=function(name,arity,timing,callback)
+        assertEqual("DualEntityEvent", name, "game signal")
+        assertEqual(3, arity, "event arity")
+        handler=callback
+    end, quickLockpick={OnUseFinished=function(actor,target,result)
+        assertEqual("actor",actor,"original actor"); assertEqual("target",target,"original object")
+        assertEqual(0,result,"ordinary locked failure");calls=calls+1
+    end}}
+    assert(load(s:sub(a,b-1),"stock-signal-listener","t",environment))()
+    handler("actor","target","some-story-event")
+    assertEqual(0,calls,"unrelated story events ignored")
+    handler("actor","target","GLO_UsedLockedItem")
+    assertEqual(1,calls,"ordinary locked use admitted")
+    assertEqual(nil,s:find('listen("UseFinished"',1,true),"raw story-rejected Use cannot admit a roll")
 end)
 
 if failed > 0 then

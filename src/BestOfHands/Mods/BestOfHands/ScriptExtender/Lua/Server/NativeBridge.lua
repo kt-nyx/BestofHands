@@ -23,7 +23,7 @@ local DELEGATED_ROLL_HOOKS =
     .. ",client_roll_bonus_reconcile_end"
     .. ",client_roll_finalize"
 local QUICK_LOCKPICK_HOOKS =
-    "client_task_selection,client_input_controller_update,"
+    "client_input_controller_update,"
     .. "client_get_character_task,client_set_running_task"
 local REQUIRED_FEATURES = "native_profile_substitution,quick_lockpick_task_adapter"
 
@@ -41,12 +41,40 @@ local function parseDocument(text)
         local key, value = line:match("^([^=]+)=(.*)$")
         if key ~= nil then
             if result[key] ~= nil then
-                return {}
+                return {}, "duplicate field: " .. key
             end
             result[key] = value
+        else
+            return {}, "invalid field line"
         end
     end
     return result
+end
+
+-- Shared by client and server so a bad read cannot masquerade as a missing DLL.
+function NativeBridge.ReadStatus(expectedVersion)
+    local ok, text = pcall(Ext.IO.LoadFile, STATUS_FILE)
+    if not ok then return {}, "native_status_read_failed", "could not read native status: " .. tostring(text) end
+    if text == nil then
+        -- Ext.IO cannot distinguish absence from every access failure.
+        return {}, "native_status_unavailable",
+            "native status could not be loaded; check missing/blocked files and the profile path in BestOfHandsNative.log"
+    end
+    if type(text) ~= "string" or text == "" then
+        return {}, "native_status_invalid", "the native status file is empty or unreadable"
+    end
+    local status, errorMessage = parseDocument(text)
+    if errorMessage ~= nil or status["end"] ~= "1"
+        or status.protocol == nil or status.version == nil or status.state == nil
+        or status.session == nil or status.session == "" then
+        return status, "native_status_invalid", "incomplete or malformed native status: " .. (errorMessage or "required fields missing")
+    end
+    if status.protocol ~= PROTOCOL or status.version ~= expectedVersion then
+        return status, "native_version_mismatch", "expected DLL " .. expectedVersion
+            .. " / protocol " .. PROTOCOL .. "; observed " .. status.version
+            .. " / protocol " .. status.protocol .. ". Update both DLL and PAK from the same ZIP."
+    end
+    return status
 end
 
 local function safeField(value, field)
@@ -345,15 +373,14 @@ function NativeBridge.Create(settings, api, diagnostics)
     end
 
     local function nativeStatusIsCurrent()
-        local ok, text = pcall(Ext.IO.LoadFile, STATUS_FILE)
-        local status = ok and parseDocument(text) or {}
+        local status, readReason, readDetail = NativeBridge.ReadStatus(settings.VERSION)
         readCapabilities(status)
-        local current = statusEnvelopeIsCurrent(status, false)
+        local current = readReason == nil and statusEnvelopeIsCurrent(status, false)
             and status.session == nativeSession
         if not current then
             ready = false
-            state = status.state or "native_status_missing"
-            detail = status.detail or "the native status file was not found"
+            state = readReason or (status.session ~= nativeSession and "native_session_changed" or "native_ack_mismatch")
+            detail = readDetail or "the native session or acknowledgement changed; retrying startup"
             invalidateCapabilities("native_status_not_current")
             for _, capability in pairs(capabilities) do capability.state = "pending" end
             diagnostics.Error("native_bridge_lost", {
@@ -371,12 +398,11 @@ function NativeBridge.Create(settings, api, diagnostics)
         if generation ~= handshakeGeneration then
             return
         end
-        local ok, text = pcall(Ext.IO.LoadFile, STATUS_FILE)
-        local status = ok and parseDocument(text) or {}
-        state = status.state or "native_status_missing"
-        detail = status.detail or "the native status file was not found"
+        local status, readReason, readDetail = NativeBridge.ReadStatus(settings.VERSION)
+        state = readReason or status.state
+        detail = readDetail or status.detail or "waiting for a current native acknowledgement"
         readCapabilities(status)
-        local compatible = statusEnvelopeIsCurrent(status, true)
+        local compatible = readReason == nil and statusEnvelopeIsCurrent(status, true)
         if compatible then
             local wasReady = ready
             nativeSession = status.session
@@ -419,13 +445,16 @@ function NativeBridge.Create(settings, api, diagnostics)
         if remaining <= 0 then
             ready = false
             handshakeExpired = true
-            invalidateCapabilities("native_handshake_unavailable")
+            invalidateCapabilities(readReason or "native_handshake_unavailable")
             diagnostics.Error("native_bridge_unavailable", {
                 detail = detail,
                 hooks = status.hooks,
                 protocol = status.protocol,
                 state = state,
                 version = status.version,
+                expected_version = settings.VERSION,
+                expected_protocol = PROTOCOL,
+                file = STATUS_FILE,
             })
             visibleWarning()
             scheduleRecovery()

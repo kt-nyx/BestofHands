@@ -453,8 +453,19 @@ function NativeInteractionCoordinator.Create(settings, api, resolver, bridge, di
             return false
         end
         if accepted ~= nil then clear(accepted, "native_request_superseded") end
-        if features ~= nil and not features.IsEnabled("best_in_party_" .. action) then
-            return false
+        if features ~= nil then
+            local featureId = "best_in_party_" .. action
+            local enabled = features.IsEnabled(featureId, actor)
+            if traceEnabled() and type(features.GetMode) == "function" then
+                diagnostics.Trace("native_feature_mode", {
+                    action = action,
+                    actor = actor,
+                    enabled = enabled and 1 or 0,
+                    mode = features.GetMode(featureId),
+                    request_id = requestId,
+                })
+            end
+            if not enabled then return false end
         end
         if not delegatedRollReady() then
             diagnostics.Warn("native_delegation_skipped", {

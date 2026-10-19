@@ -6,6 +6,7 @@
 #include "ProfileRouting.h"
 #include "QuickLockpickState.h"
 #include "SafeMemory.h"
+#include "StatusPublication.h"
 
 #include <Windows.h>
 #include <ShlObj.h>
@@ -17,6 +18,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cerrno>
 #include <cwchar>
 #include <cstring>
 #include <filesystem>
@@ -181,7 +183,7 @@ constexpr std::string_view kReportedHooks =
 constexpr std::string_view kReportedFeatures =
     "native_profile_substitution,quick_lockpick_task_adapter";
 constexpr std::string_view kQuickLockpickHooks =
-    "client_task_selection,client_input_controller_update,"
+    "client_input_controller_update,"
     "client_get_character_task,client_set_running_task";
 
 constexpr std::array<std::byte, 11> kProfileUiSignature{
@@ -792,7 +794,6 @@ safetyhook::InlineHook g_clientRollBonusKeepSelectedHook{};
 safetyhook::MidHook g_clientRollBonusRendererAddHook{};
 safetyhook::MidHook g_clientRollBonusReconcileEndHook{};
 safetyhook::MidHook g_clientRollFinalizeHook{};
-safetyhook::MidHook g_clientTaskSelectionHook{};
 safetyhook::InlineHook g_clientInputControllerUpdateHook{};
 std::atomic_bool g_quickLockpickPending{false};
 std::mutex g_quickLockpickMutex;
@@ -862,6 +863,8 @@ fs::path g_statusPath;
 fs::path g_logPath;
 std::mutex g_logMutex;
 std::mutex g_statusMutex;
+boh::StatusPublication g_statusPublication;
+std::string g_statusWriteFailure;
 std::mutex g_documentRefreshMutex;
 std::mutex g_clientDocumentRefreshMutex;
 std::mutex g_leftClickDocumentRefreshMutex;
@@ -1593,63 +1596,6 @@ struct LeftClickRedirect {
     bool alreadyRunning{};
 };
 
-std::optional<LeftClickRedirect> ResolveLeftClickRedirect(
-    void* controller, void* requestedTask) noexcept
-{
-    std::uint64_t target{};
-    if (controller == nullptr
-        || requestedTask == nullptr) {
-        return {};
-    }
-    auto const itemUseTask = FindStockCharacterTaskCandidate(
-        controller, kClientItemUseTaskType);
-    if (!boh::ValidateSelectedStockTaskCandidate(
-            itemUseTask,
-            reinterpret_cast<std::uintptr_t>(requestedTask),
-            &IsStockCharacterTaskReadable)) {
-        return {};
-    }
-    if (!Read(At<std::uint64_t>(
-            requestedTask, kClientItemUseTargetOffset), target)
-        || target == 0) {
-        return {};
-    }
-
-    std::uint64_t targetNetId{};
-    std::uint64_t owner{};
-    if (!Read(At<std::uint64_t>(
-            controller, kClientControllerOwnerOffset), owner)
-        || owner == 0) {
-        return {};
-    }
-    {
-        std::shared_lock documentLock(g_leftClickDocumentMutex);
-        auto const resolvedTarget = boh::ResolveLeftClickTarget(
-            g_leftClickDocument, g_sessionUtf8, owner, target);
-        if (!resolvedTarget.has_value()) {
-            return {};
-        }
-        targetNetId = *resolvedTarget;
-    }
-
-    auto const lockpickTask = FindStockCharacterTask(
-        controller, kClientLockpickTaskType);
-    std::uintptr_t runningTask{};
-    if (!lockpickTask.has_value()) {
-        return {};
-    }
-    if (!Read(At<std::uintptr_t>(
-            controller, kClientControllerRunningTaskOffset), runningTask)) {
-        return {};
-    }
-    return LeftClickRedirect{
-        *lockpickTask,
-        target,
-        targetNetId,
-        runningTask == *lockpickTask,
-    };
-}
-
 bool ConfigureStockLockpickTask(
     LeftClickRedirect const& redirect) noexcept
 {
@@ -1660,35 +1606,6 @@ bool ConfigureStockLockpickTask(
     };
     return Write(At<boh::StockLockpickTaskConfiguration>(
         lockpickTask, kClientLockpickTargetOffset), configuration);
-}
-
-void ClientTaskSelectionMidHook(safetyhook::Context& context) noexcept
-{
-    try {
-        auto* controller = reinterpret_cast<void*>(context.rsi);
-        auto* selectedTask = reinterpret_cast<void*>(context.r15);
-        auto const redirect =
-            ResolveLeftClickRedirect(controller, selectedTask);
-        if (!redirect.has_value()) {
-            return;
-        }
-
-        // The engine has ranked ItemUse but has not yet retired the other task
-        // candidates, prepared the winner, or installed RunningTask. Replacing
-        // r15 here makes all three stock lifecycle stages consistently observe
-        // Lockpick. In particular, BG3 clears ItemUse.Ready instead of leaving
-        // it armed to win the next frame again.
-        if (redirect->alreadyRunning) {
-            context.r15 = redirect->lockpickTask;
-            return;
-        }
-        if (!ConfigureStockLockpickTask(*redirect)) {
-            return;
-        }
-        context.r15 = redirect->lockpickTask;
-    } catch (...) {
-        // Preserve BG3's selected task if any intercepted state is unavailable.
-    }
 }
 
 void ProcessQuickLockpick(void* controller) noexcept
@@ -2308,23 +2225,66 @@ std::string ReadAll(fs::path const& path)
     return contents;
 }
 
-bool AtomicWrite(fs::path const& path, std::string const& contents)
+bool AtomicWrite(fs::path const& path, std::string const& contents, std::string& failure)
 {
+    // Startup may have failed to create this directory while storage was
+    // unavailable. Retry it along with publication after storage recovers.
+    std::error_code directoryError;
+    fs::create_directories(path.parent_path(), directoryError);
+    if (directoryError) {
+        failure = "directory_create_failed|win32_error="
+            + std::to_string(directoryError.value());
+        return false;
+    }
     auto temporary = path;
     temporary += L".tmp";
     {
         std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
         if (!output) {
+            failure = "temporary_open_failed|errno=" + std::to_string(errno);
             return false;
         }
         output.write(contents.data(), static_cast<std::streamsize>(contents.size()));
         output.flush();
         if (!output) {
+            failure = "temporary_write_failed|errno=" + std::to_string(errno);
             return false;
         }
     }
-    return MoveFileExW(temporary.c_str(), path.c_str(),
-        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+    if (!MoveFileExW(temporary.c_str(), path.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        failure = "replace_failed|win32_error=" + std::to_string(GetLastError());
+        return false;
+    }
+    return true;
+}
+
+// Caller holds g_statusMutex; never acquires bridge/world locks here.
+void PublishPendingStatus()
+{
+    g_statusPublication.Poll(GetTickCount64(), [](std::string const& payload) {
+        std::string failure;
+        if (!AtomicWrite(g_statusPath, payload, failure)) {
+            if (failure != g_statusWriteFailure) {
+                Log("ERROR", "native_status_write_failed",
+                    "path=" + Narrow(g_statusPath.wstring()) + "|detail=" + failure);
+                g_statusWriteFailure = std::move(failure);
+            }
+            return false;
+        }
+        if (!g_statusWriteFailure.empty()) {
+            Log("INFO", "native_status_write_recovered",
+                "path=" + Narrow(g_statusPath.wstring()));
+            g_statusWriteFailure.clear();
+        }
+        return true;
+    });
+}
+
+void RetryStatusPublication()
+{
+    std::scoped_lock lock(g_statusMutex);
+    PublishPendingStatus();
 }
 
 void WriteStatus(std::string_view state, std::string_view detail, std::string_view ack)
@@ -2386,7 +2346,8 @@ void WriteStatus(std::string_view state, std::string_view detail, std::string_vi
            << "cap_client_presentation=" << (g_codeHooksReady.load() ? "ready" : "unavailable") << "\n"
            << "detail=" << detail << "\n"
            << "end=1\n";
-    AtomicWrite(g_statusPath, status.str());
+    g_statusPublication.Queue(status.str());
+    PublishPendingStatus();
 }
 
 void SetHookFailure(std::string value)
@@ -6404,19 +6365,10 @@ bool InstallQuickLockpickHooks(std::string& failure)
     g_clientGetCharacterTaskProcedure.store(
         base + g_build->clientGetCharacterTaskRva,
         std::memory_order_release);
-    g_clientTaskSelectionHook = safetyhook::create_mid(
-        reinterpret_cast<void*>(base + g_build->clientTaskSelectionHookRva),
-        &ClientTaskSelectionMidHook);
-    if (!g_clientTaskSelectionHook) {
-        g_clientGetCharacterTaskProcedure.store(0, std::memory_order_release);
-        failure = "client_task_selection_hook_creation_failed";
-        return false;
-    }
     g_clientInputControllerUpdateHook = safetyhook::create_inline(
         reinterpret_cast<void*>(base + g_build->clientInputControllerUpdateRva),
         &ClientInputControllerUpdateDetour);
     if (!g_clientInputControllerUpdateHook) {
-        g_clientTaskSelectionHook.reset();
         g_clientGetCharacterTaskProcedure.store(0, std::memory_order_release);
         failure = "client_input_controller_update_hook_creation_failed";
         return false;
@@ -7389,6 +7341,8 @@ DWORD WINAPI Worker(void*)
         root / L"Script Extender" / L"BestOfHandsNative.leftclick";
     g_statusPath = root / L"Script Extender" / L"BestOfHandsNative.status";
     g_logPath = root / L"Script Extender Logs" / L"BestOfHandsNative.log";
+    Log("INFO", "native_storage", "status=" + Narrow(g_statusPath.wstring())
+        + "|actions=" + Narrow(g_actionPath.wstring()));
     LARGE_INTEGER qpcFrequency{};
     if (QueryPerformanceFrequency(&qpcFrequency)) {
         g_perfQpcFrequency.store(
@@ -7459,6 +7413,7 @@ DWORD WINAPI Worker(void*)
     };
 
     while (!g_stop.load()) {
+        RetryStatusPublication();
         // Game-thread hooks synchronously refresh this document before profile
         // evaluation. The worker is only a fallback and must not make those
         // hooks wait behind background parsing.
@@ -7624,7 +7579,6 @@ DWORD WINAPI Worker(void*)
     g_quickLockpickPending.store(false, std::memory_order_release);
     g_clientGetCharacterTaskProcedure.store(0, std::memory_order_release);
     g_clientInputControllerUpdateHook.reset();
-    g_clientTaskSelectionHook.reset();
     g_quickLockpickHooksReady.store(false);
     RestoreSystemHooks();
     g_codeHooksReady.store(false);

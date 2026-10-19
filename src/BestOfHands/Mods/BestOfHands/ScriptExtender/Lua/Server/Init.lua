@@ -17,8 +17,8 @@ Ext.Vars.RegisterModVariable(Settings.MODULE_UUID, Settings.ACTIVE_ASSISTANCE_VA
 })
 
 local diagnostics = Diagnostics.Create(Settings)
-local features = FeatureSettings.Create(Settings)
 local api = NativeRuntimeApi.Create(Settings, diagnostics)
+local features = FeatureSettings.Create(Settings, api)
 api.PublishNativeActions = function(snapshot)
     local ok, err = pcall(function() Channels.NativeActions:Broadcast(snapshot) end)
     if not ok then diagnostics.Error("native_action_sync_failed", {error = err}) end
@@ -72,8 +72,8 @@ local function statusFields()
     local status = bridge.GetStatus()
     local compatibility = api.GetToolCompatibilityStatus()
     return {
-        best_in_party_lockpick = features.IsEnabled("best_in_party_lockpick") and 1 or 0,
-        best_in_party_disarm = features.IsEnabled("best_in_party_disarm") and 1 or 0,
+        best_in_party_lockpick = features.GetMode("best_in_party_lockpick"),
+        best_in_party_disarm = features.GetMode("best_in_party_disarm"),
         bridge_detail = status.detail,
         bridge_state = status.state,
         eternal_lockpick_loaded =
@@ -195,15 +195,13 @@ listen("StoppedDisarmingTrap", 2, "after", function(character, item)
     interaction.OnNativeStopped("disarm", character, item)
 end)
 
-listen("UseFinished", 3, "before", function(character, item, success)
-    if diagnostics.IsTraceEnabled() then
-        diagnostics.Trace("use_finished", {
-            actor = character,
-            success = success,
-            target = item,
-        })
+-- _Global.txt emits this only after failed locked Use without a blocking
+-- DB_CustomUseItemResponse. A raw UseFinished(0) also includes story/dialogue
+-- responses and must never trigger automatic lockpicking.
+listen("DualEntityEvent", 3, "after", function(character, item, event)
+    if event == "GLO_UsedLockedItem" then
+        quickLockpick.OnUseFinished(character, item, 0)
     end
-    quickLockpick.OnUseFinished(character, item, success)
 end)
 
 listen("EnteredForceTurnBased", 1, "after", function(character)
