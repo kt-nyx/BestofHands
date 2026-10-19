@@ -83,6 +83,9 @@ function QuickLockpickCoordinator.Create(
         if success ~= 0 then
             return false
         end
+        if api.IsAutoLockpickBlocked ~= nil and api.IsAutoLockpickBlocked(actor, target) then
+            return false
+        end
         local key = objectKey(actor, target)
         local nativeInteraction = nativeInteractions[key]
         if nativeInteraction ~= nil then
@@ -156,6 +159,7 @@ function QuickLockpickCoordinator.Create(
             if not nativeReady()
                 or not api.IsLocked(target)
                 or api.IsInCombat(actor)
+                or (api.IsAutoLockpickBlocked ~= nil and api.IsAutoLockpickBlocked(actor, target))
                 or forcedTurnBased[actor] == true then
                 clearRecord(record, "conditions_changed")
                 return
@@ -192,7 +196,7 @@ function QuickLockpickCoordinator.Create(
         if data.operation == "rejected" then
             -- A personal Off preference is an ordinary vanilla click, not a
             -- failed integration. Still clear its unused fallback request.
-            if data.reason ~= "feature_disabled" then
+            if data.reason ~= "feature_disabled" and data.reason ~= "automatic_conditions_not_met" then
                 diagnostics.Warn("quick_lockpick_client_rejected", {
                     actor = record.actor,
                     reason = data.reason or "client_rejected",

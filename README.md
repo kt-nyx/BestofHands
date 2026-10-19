@@ -8,6 +8,8 @@ Best of Hands is a simple, focused QoL mod for lockpicking and trap disarming:
 - Simply **left-click any locked chest or door** and you will attempt a lockpick. *No more lockpicking from the dropdown menu!*
 - Every lockpick and disarm check will now roll using the stats of the character in your party with the **highest modifiers**. *No more switching to Astarion just to open a box!*
 
+Version 2.4.0 lets the normal interaction run first, so scripted doors and cutscenes keep priority. If the game reports an ordinary locked-object failure, the mod starts lockpicking automatically. You may briefly see the normal "Locked" notice before the roll.
+
 If your party has the key for the door or chest, **the key will still be used** rather than starting the lockpick.
 
 Visibility and crime permission remain attached to the character who initiates the lockpick/disarm. So if they see you trying to steal, ***you still get caught*** (not Astarion, even though he does the roll).
@@ -22,31 +24,33 @@ The party member with highest modifiers is calculated when you start the roll so
 
 ## Optional settings
 
-Version 2.3.0 adds support for [Mod Configuration Menu (MCM)](https://www.nexusmods.com/baldursgate3/mods/9162) if you want to turn individual features off. **MCM is optional.** Without it, or with the menu untouched, all three features are enabled with their usual behavior.
+Use [Mod Configuration Menu (MCM)](https://www.nexusmods.com/baldursgate3/mods/9162) to choose **On**, **Only while sneaking**, or **Off** independently for each feature. **MCM is optional.** Without it, or with the menu untouched, all three features default to On.
 
-Open MCM and select **Best of Hands → Features**. All three toggles share one page; a short note below each description explains its multiplayer scope:
+Open MCM and select **Best of Hands → Features**. All three selectors share one page:
 
-| Toggle | Who it affects |
-| --- | --- |
-| Left-click lockpick | Only your client. Other players keep their own preference. |
-| Best-in-party lockpick | Everyone, using the host's setting. |
-| Best-in-party disarm | Everyone, using the host's setting. |
+| Feature | What Only while sneaking means | Who controls it |
+| --- | --- | --- |
+| Left-click lockpick | Start lockpicking automatically only when your character is in Hide mode. | Personal; other players keep their own choice. |
+| Best-in-party lockpick | Share party modifiers only when the character attempting the lockpick is in Hide mode. Otherwise use that character's own modifiers. | Host; applies to everyone. |
+| Best-in-party disarm | Share party modifiers only when the character attempting the disarm is in Hide mode. Otherwise use that character's own modifiers. | Host; applies to everyone. |
 
-Each toggle has an enabled default. When a feature is disabled, its reset button restores that default.
+On enables the feature while standing or hiding. Off disables that feature. Each reset button restores On. For the two party-roll features, the character attempting the action must be hiding; the specialist supplying the modifiers does not need to be hiding. Being completely unseen is not required.
 
-Changes apply to new actions without restarting. A roll already in progress, including its Inspiration rerolls, finishes with the behavior it started with. With left-click lockpick off, you can still choose **Lockpick** from the normal context menu. With either best-in-party feature off, the initiating character uses their own modifiers for that action.
+Changes apply to new actions without restarting. A roll already in progress, including its Inspiration rerolls, finishes with the behavior it started with. Manual context-menu **Lockpick** remains available in every mode; its modifiers follow the separate Best-in-party lockpick choice.
 
-Your left-click preference is saved on your computer and is independent of MCM profiles. Party-roll preferences use MCM's normal settings and profiles. MCM's own host-only mode controls who may edit the shared party-roll settings; guests' local preferences never determine those rolls.
+Your left-click mode is saved on your computer and is independent of MCM profiles. Party-roll modes use MCM's normal settings and profiles. MCM's own host-only mode controls who may edit the shared party-roll settings; guests' local preferences never determine those rolls.
+
+**Updating from 2.3.x:** MCM resets the two former party-roll checkboxes to **On** when converting them to mode selectors. Reapply Off if you previously disabled either feature. Your personal left-click preference is retained.
 
 ## Installation
 **Before you do anything, install [BG3 Script Extender](https://github.com/Norbyte/bg3se/releases/latest) and [Native Mod Loader](https://www.nexusmods.com/baldursgate3/mods/944)... and use [BG3 Mod Manager](https://github.com/LaughingLeader/BG3ModManager/releases/latest) ya animal!**
 
 1. Download this mod manually.
-2. In BG3 Mod Manager, select **File > Import Mod** and choose the downloaded `BestofHands-v2.3.1.zip`.
+2. In BG3 Mod Manager, select **File > Import Mod** and choose the downloaded `BestofHands-v2.4.0.zip`.
 3. Move *Best of Hands - Quick Lockpick & Disarm* to the **Active Mods** side.
 4. Export the load order to the game.
 5. Navigate to your game folder (typically `C:\Program Files (x86)\Steam\steamapps\common\Baldurs Gate 3` for Steam installs).
-6. Open the downloaded `BestofHands-v2.3.1.zip`.
+6. Open the downloaded `BestofHands-v2.4.0.zip`.
 7. Drag the **bin** folder from the ZIP file into your game folder.
 8. Profit!
 

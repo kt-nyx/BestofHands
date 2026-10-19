@@ -328,9 +328,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
         }
         local initiatorValues = {}
         for _, record in pairs(leftClickInitiators) do
-            if features == nil or features.IsEnabled("left_click_lockpick") then
-                initiatorValues[#initiatorValues + 1] = record
-            end
+            initiatorValues[#initiatorValues + 1] = record
         end
         table.sort(initiatorValues, function(left, right)
             return left.initiator < right.initiator
@@ -375,11 +373,15 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
         return true
     end
 
-    local function fixedString(value)
-        if value == nil then
-            return ""
-        end
-        return tostring(value)
+    local function automaticEligible(entity)
+        local darkness = safeField(entity, "Darkness")
+        local sneaking = darkness ~= nil and safeField(darkness, "CharacterSneaking") == true
+        if features ~= nil and not features.IsEnabled("left_click_lockpick", sneaking) then return false end
+        if safeField(entity, "IsInCombat") ~= nil
+            or safeField(entity, "IsInTurnBasedMode") ~= nil then return false end
+        local dialog = safeField(entity, "ClientCharacter")
+        if dialog ~= nil and safeField(dialog, "InDialog") == true then return false end
+        return true
     end
 
     local function refreshLeftClickSnapshot()
@@ -388,7 +390,6 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
         end
 
         local initiators = {}
-        local controlledHandles = {}
         local controlled = Ext.Entity.GetAllEntitiesWithComponent(
             "ClientControl"
         ) or {}
@@ -396,71 +397,18 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
             local initiator = entityHandle(entity)
             if initiator ~= nil then
                 local initiatorKey = initiator:lower()
-                controlledHandles[initiatorKey] = true
                 initiators[initiatorKey] = {
-                    eligible = safeField(entity, "IsInCombat") == nil
-                        and safeField(entity, "IsInTurnBasedMode") == nil,
+                    eligible = automaticEligible(entity),
                     initiator = initiatorKey,
                 }
             end
         end
 
-        -- Preserve vanilla automatic key use. A locked target is intercepted
-        -- only when no key with the matching key identifier is currently
-        -- owned by a locally controlled party character.
-        local availableKeys = {}
-        for _, entity in pairs(
-            Ext.Entity.GetAllEntitiesWithComponent("Key") or {}
-        ) do
-            local key = safeField(entity, "Key")
-            local topOwner = safeField(entity, "InventoryTopOwner")
-            local owner = topOwner and entityHandle(
-                safeField(topOwner, "TopOwner")
-            ) or nil
-            if owner ~= nil and controlledHandles[owner:lower()] then
-                local keyId = fixedString(safeField(key, "Key"))
-                if keyId ~= "" then
-                    availableKeys[keyId] = true
-                end
-            end
-        end
-
+        -- Let vanilla Use and its story permission scripts run first. This
+        -- file carries only actor eligibility; no object is preemptively
+        -- converted to Lockpick. The server's GLO_UsedLockedItem event owns
+        -- automatic admission after vanilla excludes story-handled uses.
         local targets = {}
-        -- Lock is persistent configuration (key/DC), not current lock state.
-        -- LockBoost exists only while the object is actually locked.
-        local lockedEntities =
-            Ext.Entity.GetAllEntitiesWithComponent("LockBoost") or {}
-        for _, entity in pairs(lockedEntities) do
-            local handle = entityHandle(entity)
-            local lock = safeField(entity, "Lock")
-            local key = fixedString(lock and safeField(lock, "Key_M"))
-            local ok, netId = pcall(function()
-                return entity:GetNetId()
-            end)
-            netId = ok and positiveInteger(netId) or nil
-            local guid = objectGuid(entityGuid(entity))
-            local handleKey = handle and handle:lower() or nil
-            local invalidated = (handleKey ~= nil
-                    and invalidatedLockedTargets[handleKey] == true)
-                or (guid ~= nil
-                    and invalidatedLockedTargets[guid] == true)
-            -- An authoritative successful lockpick can arrive before the
-            -- replicated client LockBoost component is destroyed. Keep the
-            -- target excluded until a future LockBoost OnCreate proves that
-            -- it was genuinely locked again.
-            local excluded = (key ~= "" and availableKeys[key] == true)
-                or invalidated
-            if not excluded
-                and handle ~= nil
-                and netId ~= nil
-                and netId > 0 then
-                targets[handleKey] = {
-                    guid = guid,
-                    netId = netId,
-                    target = handleKey,
-                }
-            end
-        end
 
         leftClickInitiators = initiators
         lockedTargets = targets
@@ -650,7 +598,8 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
     end
 
     local function prepareQuickLockpick(data)
-        if features ~= nil and not features.IsEnabled("left_click_lockpick") then
+        if features ~= nil and type(features.GetMode) == "function"
+            and features.GetMode("left_click_lockpick") == "Off" then
             return false, "feature_disabled"
         end
         if type(data) ~= "table"
@@ -671,6 +620,18 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
             return false, "client_entity_unavailable"
         end
 
+        local eligible = automaticEligible(actorEntity)
+        if traceEnabled and features ~= nil and type(features.GetMode) == "function" then
+            trace("client_automatic_mode", {
+                actor = data.actor,
+                enabled = eligible and 1 or 0,
+                mode = features.GetMode("left_click_lockpick"),
+                request = data.request,
+            })
+        end
+        if not eligible then
+            return false, "automatic_conditions_not_met"
+        end
         local initiatorHandle = entityHandle(actorEntity)
         local targetEntityHandle = entityHandle(targetHandle)
         local netIdOk, rawTargetNetId = pcall(function()
@@ -785,7 +746,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
                 end
                 local started, reason = prepareQuickLockpick(data)
                 if not started then
-                    if reason ~= "feature_disabled" then
+                    if reason ~= "feature_disabled" and reason ~= "automatic_conditions_not_met" then
                         write("WARN", "client_quick_lockpick_rejected", {
                             actor = data.actor,
                             reason = reason,
@@ -927,15 +888,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
 
     if type(Ext.OnNextTick) == "function"
         and Ext.Events ~= nil then
-        local snapshotComponents = {
-            "ClientControl",
-            "IsInCombat",
-            "IsInTurnBasedMode",
-            "Key",
-            "InventoryTopOwner",
-            -- Key/DC metadata can change without changing the live LockBoost.
-            "Lock",
-        }
+        local snapshotComponents = { "ClientControl", "IsInCombat", "IsInTurnBasedMode" }
         for _, componentName in ipairs(snapshotComponents) do
             Ext.Entity.OnCreate(componentName, protected(
                 "client_left_click_snapshot_create_failed",
@@ -950,28 +903,6 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
                 scheduleLeftClickSnapshot
             ))
         end
-        Ext.Entity.OnCreate("LockBoost", protected(
-            "client_left_click_lock_boost_create_failed",
-            function(entity)
-                local handle = entityHandle(entity)
-                local guid = objectGuid(entityGuid(entity))
-                if handle ~= nil then
-                    invalidatedLockedTargets[handle:lower()] = nil
-                end
-                if guid ~= nil then
-                    invalidatedLockedTargets[guid] = nil
-                end
-                scheduleLeftClickSnapshot()
-            end
-        ))
-        Ext.Entity.OnChange("LockBoost", protected(
-            "client_left_click_lock_boost_change_failed",
-            scheduleLeftClickSnapshot
-        ))
-        Ext.Entity.OnDestroy("LockBoost", protected(
-            "client_left_click_lock_boost_destroy_failed",
-            scheduleLeftClickSnapshot
-        ))
         Ext.Events.SessionLoaded:Subscribe(scheduleLeftClickSnapshot)
         Ext.Events.ResetCompleted:Subscribe(scheduleLeftClickSnapshot)
         scheduleLeftClickSnapshot()

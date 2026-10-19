@@ -1,113 +1,99 @@
 # Developing Best of Hands
 
-The current source is version 2.3.2. The user has
-completed the short local DX11 test, and its logs show both native features
-ready with no Best of Hands warnings or errors. See
-[release preparation](RELEASE-PREP.md) for the package and coverage limits,
-[the audit](BUGFIX-AUDIT.md) for the findings and fix record, and
-[the local checklist](BUGFIX-TESTING.md) for the test steps.
+The current source is **2.4.0**. The user confirmed the local build working on
+October 19, 2026. Its DX11 test log shows both native capabilities ready,
+expected automatic and party-lockpick mode decisions, and no Best of Hands
+warnings or errors. See [release preparation](RELEASE-PREP.md) for coverage limits.
 
-Best of Hands 2.3.2 consists of a normal BG3 PAK and a small Windows native plugin. The PAK selects the specialist and owns diagnostics; the DLL changes the roll-profile source at narrow validated server action boundaries and supplies the specialist's aggregate advantage at the exact client `DCActiveRoll` presentation boundary. A bounded, exact-roll-UUID client lease retains that presentation value after the replicated `RequestedRoll` is destroyed and preserves it through BG3's signature-validated modifier-aggregation and click-to-roll boundaries. These hooks never change the server roll component or outcome. On the client they may correct only presentation state, including the local advantage byte and immediate-total fallback flag; numeric result values and ownership remain unchanged. Neither half completes actions, rolls dice, consumes tools, or synthesizes success/failure outcomes. The left-click adapter activates only BG3's stock client Lockpick task through its validated native controller lifecycle; the only gameplay target rewrite is an accepted active-roll bonus: its already validated initiator target is changed to the specialist so the effect enters the delegated profile.
+Best of Hands 2.4.0 consists of a normal BG3 PAK and a small Windows native plugin. The PAK selects the specialist and owns diagnostics; the DLL changes the roll-profile source at narrow validated server action boundaries and supplies the specialist's aggregate advantage at the exact client `DCActiveRoll` presentation boundary. A bounded, exact-roll-UUID client lease retains that presentation value after the replicated `RequestedRoll` is destroyed and preserves it through BG3's signature-validated modifier-aggregation and click-to-roll boundaries. These hooks never change the server roll component or outcome. On the client they may correct only presentation state, including the local advantage byte and immediate-total fallback flag; numeric result values and ownership remain unchanged. Neither half completes actions, rolls dice, consumes tools, or synthesizes success/failure outcomes. The left-click adapter activates only BG3's stock client Lockpick task through its validated native controller lifecycle; the only gameplay target rewrite is an accepted active-roll bonus: its already validated initiator target is changed to the specialist so the effect enters the delegated profile.
 
 ## Runtime contract
 
 ### Optional feature settings
 
-Players can independently disable left-click lockpick, best-in-party lockpick,
-and best-in-party disarm. All default to enabled, and MCM remains optional:
+Players choose On, Only while sneaking, or Off independently for left-click
+lockpick, best-in-party lockpick, and best-in-party disarm. All default to On, and MCM remains optional:
 `MCM_blueprint.json` declares `Optional: true`, with no metadata dependency.
 
 `Server/FeatureSettings.lua` reads the two party-roll settings through the
 public `MCM.Get(id, moduleUuid)` API at action admission. Missing APIs, missing
-values, errors, and non-boolean values retain enabled defaults. Resetting MCM
+values, errors, and invalid modes retain On defaults. Legacy booleans are
+also readable as On/Off. Resetting MCM
 settings or switching profiles therefore takes effect on the next action
 without a settings cache or an event-order dependency. Once accepted, a
 delegation keeps its existing specialist/bridge record throughout the roll
 and Inspiration retries. Settings do not clear or rewrite active records.
 
-MCM blueprint settings normally belong to the host. To provide a genuinely
-personal click preference, `Client/LocalSettings.lua` adds its checkbox to the
+MCM blueprint settings normally belong to the host. To provide a personal
+left-click mode, `Client/LocalSettings.lua` adds a three-choice selector to the
 same **Features** page as the two blueprint settings through the public
 `MCM.InsertModMenuTab` API, using the matching tab name. Repeated render callbacks
 reuse the existing personal-control group instead of appending duplicates or
-clearing MCM's host controls. A short multiplayer footnote closes each description.
-The personal checkbox uses MCM's standard faded-white description color and
-reset icon; its reset button appears only when disabled and saves the enabled
-default through the same persistence path as a checkbox change.
-The client saves its checkbox using
+clearing MCM's host controls. Each control has only its short multiplayer scope description.
+The selector uses MCM's standard faded-white description color and reset icon.
+Its reset button appears away from On and saves On through the same path as a selection change.
+The client saves its mode using
 `Ext.IO` to `BestOfHands/ClientSettings.json` under the local Script Extender
 directory. This file is independent of MCM profiles and save files. It is
 ignored when MCM is unavailable, so removing MCM restores all-enabled behavior.
-Failed writes restore the previous checkbox value and show an inline error.
-Split-screen players sharing one client share this preference.
+Failed writes restore the previous selection and show an inline error.
+The old personal boolean and separate sneak preference are read together:
+Off wins, otherwise the old sneak restriction becomes Only while sneaking.
+New saves contain just the mode string. Split-screen players sharing one
+client share this preference.
 
 The client immediately republishes the native left-click eligibility snapshot
-when the preference changes. Off publishes no eligible initiators; it does not
+when the preference changes. Off marks initiators ineligible; it does not
 remove the already accepted fallback requests or roll presentation records.
 The failed-Use fallback also checks the preference on the owning client before
 publishing a native activation request, so the server cannot re-enable a
 guest's disabled click feature. No native hook or bridge-protocol change is
 needed. Context-menu interactions still reach the independent server-side
-party-roll gates.
+party-roll gates. Both sides read `Darkness.CharacterSneaking`; missing Hide
+state does not satisfy a conditional mode. The server checks the initiator
+only when admitting a new action, preserving accepted rolls and Inspiration.
+Status diagnostics report the two host mode strings rather than 1/0 flags.
+
+MCM validates stored values before exposing them through its public API. Since
+an enum cannot retain a saved checkbox boolean, public upgrades from 2.3.x
+reset the two party-roll modes to On. README documents the one-time need to
+reapply Off. The earlier local test install preserved these values by converting
+profile JSON offline with backups; that local conversion is not part of the ZIP.
+Personal left-click booleans migrate in Lua and retain their previous behavior.
 
 The integration uses MCM's [public API and custom-tab contract](https://github.com/AtilioA/BG3-MCM/blob/main/wiki.md).
 See [MCM-TESTING.md](MCM-TESTING.md) for the manual game checks.
 
 ### Interaction flow
 
-Client Lua publishes a compact snapshot of eligible locally controlled
-initiator handles and replicated currently locked targets. It derives current
-lock state from the replicated `LockBoost` marker, not the persistent `Lock`
-key/DC configuration that remains on lock-capable objects after they are
-unlocked. Targets for which the
-controlled party owns the matching key are excluded so BG3's automatic
-key-use path remains vanilla. Initiators in combat or forced turn-based mode
-are also excluded. Identical snapshots are not rewritten, and a failed
-handshake or file write retries after 250 ms instead of on every client tick.
-Native code parses each changed snapshot into duplicate-rejecting hash maps,
-so task-selection lookups do not scan every cached world lock. At BG3's exact,
-signature-guarded internal task-selection
-boundary, after the controller has ranked its reusable character tasks but
-before it clears the non-winning tasks' readiness, prepares the winner, or
-installs `RunningTask`, the DLL detects an ordinary ItemUse aimed at an
-eligible locked target. It reads the real controller owner, obtains that
-controller's reusable ItemUse and Lockpick tasks through the exact-build
-`InputController::GetCharacterTask` routine, fills the Lockpick task, and
-replaces the selected task register. BG3 consequently retires ItemUse,
-prepares and installs Lockpick, and cannot leave the original click armed for
-another update frame or publish the vanilla `Locked` error. The target network
-ID and the following task flags use BG3SE's validated 64-bit `NetId` layout. A
-further click on a locked item while that same stock task is running resolves
-to the already-running task without replacing or restarting it. BG3 then owns
-the normal movement, permission, `RequestCanLockpick`, roll, key/tool, crime,
-and outcome pipeline. The task-selection instruction sequence,
-`GetCharacterTask`, and the fallback-only `SetRunningTask` routine all have
-per-executable RVAs in the exact-build table and independently validated
-machine-code signatures; no source-level vtable index or Lua proxy address is
-assumed. The validated `GetCharacterTask` address is cached once when the hooks
-are installed instead of re-reading and re-validating its machine code during
-each intercepted selection. The five contiguous stock Lockpick task fields are
-published with one guarded 19-byte write.
+Automatic lockpicking now gives the normal interaction priority. In 2.4.0,
+no task-selection hook replaces ItemUse before its story scripts run. The
+base game's `_Global.txt` emits `GLO_UsedLockedItem` only after a failed Use
+on a locked object without `DB_CustomUseItemResponse(..., 0)`. Server Lua
+listens to this `DualEntityEvent`, never to raw `UseFinished`, and also rejects
+current dialogue/custom responses before admission and again on deferred
+activation. This covers scripted ordinary Door actions such as Cazador's
+ballroom door without maintaining an object-name exception list.
 
-After any authoritative lockpick success, including a direct roll by the
-already-selected specialist, server Lua immediately
-removes that target from the owning client's left-click snapshot. The client
-tombstones its stable UUID and handle so a lagging replicated `LockBoost` change
-cannot reclassify the now-unlocked object before the player opens it. A future
-`LockBoost` creation, session load, or reset clears the tombstone, preserving
-genuine relocking and save transitions.
+The owning client checks its personal left-click mode and current combat/
+turn-based/dialogue state before publishing a new native request. Each of the
+three features has an independent On / Only while sneaking / Off mode.
+For conditional party sharing, server Lua checks the initiating character's
+Hide state at `OnNativeRequest`, before selecting a specialist. It does not
+check the specialist's Hide state. `Darkness.CharacterSneaking` represents Hide mode;
+being unseen (`ActuallySneaking`) is not required. No frame polling, new
+native hook, or protocol change is needed for this preference. Accepted
+requests and active rolls retain their admitted behavior.
 
-The older failed-`UseFinished` client request remains only as a fail-open
-fallback if the native task-selection substitution was temporarily
-unavailable. Its
-native activation is strictly one-shot: BG3 may accept or decline it, but an
-accepted `SetRunningTask` call is never replayed from later controller-update
-frames. A short actor-target lifecycle guard suppresses the failed `UseFinished`
-event emitted by an already native-owned context-menu or adapter interaction;
-it expires after that interaction stops so a later genuine left click can
-publish a new fallback request. From
-`RequestCanLockpick` onward, both left-click and context-menu entry use the
-single shared delegation flow below.
+The DLL consumes that one-shot request at the validated controller-update
+boundary using the controller's stock Lockpick task and SetRunningTask
+routine. It checks for an existing running task before writing any task
+configuration. BG3 owns movement, permission, keys, tools, crime and outcomes.
+The normal Locked notice may appear before the roll. Both manual Lockpick and
+automatic entry converge on the same permission and delegation flow below.
+The compatibility resolver retains its conservative exact-layout signature
+checks, including the old task-selection boundary, but installs only the
+controller-update hook for automatic activation.
 
 For a delegated lockpick or disarm:
 
@@ -137,7 +123,7 @@ resource ownership, and rewrites only the effect target to the specialist.
 
 ## Capability readiness and build resolution
 
-Native readiness is capability-scoped. `quick_lockpick` owns the internal task-selection, controller update, `GetCharacterTask`, and `SetRunningTask` boundaries. `delegated_roll` is atomic: its two server profile/math substitutions, two server-world update slots, and the complete client roll-presentation/reconciliation set must all work together. The status protocol reports `ready`, `pending`, or `unavailable`, a stable reason, and `exact_table` or `structural_compatibility` for each capability. Lua validates each capability's complete hook manifest, gates Quick Lockpick and delegated rolls separately, refreshes pending state, and deduplicates visible warnings by capability, executable, and failure reason. Detailed executable identity and resolution failures remain in the native log.
+Native readiness is capability-scoped. `quick_lockpick` uses controller update, `GetCharacterTask`, and `SetRunningTask`; its resolver conservatively retains the reviewed task-selection signature check. `delegated_roll` is atomic: its two server profile/math substitutions, two server-world update slots, and the complete client roll-presentation/reconciliation set must all work together. The status protocol reports `ready`, `pending`, or `unavailable`, a stable reason, and `exact_table` or `structural_compatibility` for each capability. Lua validates each capability's complete hook manifest, gates Quick Lockpick and delegated rolls separately, refreshes pending state, and deduplicates visible warnings by capability, executable, and failure reason. Detailed executable identity and resolution failures remain in the native log.
 
 The DLL contains reviewed native-layout tables for both DX11 and Vulkan executables. A table is the highest-confidence path and is selected only when executable name, PE timestamp, and `SizeOfImage` all match. A known identity never falls back to structural resolution to hide a changed signature: each affected capability fails closed. All pointers, system indexes, entity-map entries, component sizes, and writable slots are range-checked before use.
 
@@ -236,7 +222,7 @@ PAK / server Lua
   Init.lua
     +-- FeatureSettings.lua -- optional host MCM settings at action admission
     +-- PartySkillResolver.lua
-    +-- QuickLockpickCoordinator.lua -- failed-Use fallback + success invalidation
+    +-- QuickLockpickCoordinator.lua -- ordinary locked-Use signal + request lifecycle
     +-- NativeInteractionCoordinator.lua
     +-- NativeBridge.lua <---- files ----> BestofHands.dll
     +-- NativeRuntimeApi.lua
@@ -244,20 +230,18 @@ PAK / server Lua
     `-- Diagnostics.lua
 
 PAK / client Lua
-  LocalSettings.lua -> optional personal MCM checkbox and local persistence
+  LocalSettings.lua -> personal three-choice click mode and local persistence
   Channels.lua
-  NativePresentationBridge.lua -> publish locked target + initiator snapshot
-                               -> exclude available keys/combat/turn-based mode
-                               -> prepare failed-Use fallback request
-                               -> tombstone authoritatively unlocked targets
+  NativePresentationBridge.lua -> accept automatic requests after ordinary locked Use
+                               -> check personal mode/combat/turn-based/dialogue/Hide
+                               -> publish one-shot request with local entity handles
                                -> roll UUID -> client specialist handle
 
 Native DLL
-  stock task adapter -> exact-signature internal task-selection boundary
-                     -> ItemUse -> native controller/GetCharacterTask lookup
-                     -> selected task register = existing Lockpick task
-                     -> first-click ownership; repeated clicks do not restart it
-                     -> validated InputController update + SetRunningTask fallback
+  stock task adapter -> exact-signature controller-update boundary
+                     -> native controller/GetCharacterTask lookup
+                     -> configure existing Lockpick task after vanilla Use finishes
+                     -> one SetRunningTask attempt per admitted request
                      -> ordinary RequestCanLockpick
   build guard -> exact server UI/math, client builder, and roll-start signatures
               -> SafetyHook mid-hooks
@@ -367,7 +351,7 @@ Do not change the module UUID during ordinary development.
 - Rank by calculated raw Sleight of Hand; do not approximate a profile from that number.
 - Never add, subtract, copy, or reconstruct individual modifiers.
 - Never block and replace a native action with `RequestActiveRoll`, `Unlock`, `AttemptedDisarm`, or manual tool removal.
-- Pre-use interception and the failed-`UseFinished` fallback may activate only BG3's stock client Lockpick task. They must never own permission, movement, rolls, outcomes, keys, or tools.
+- Automatic entry must follow the stock `GLO_UsedLockedItem` signal and may activate only BG3's stock client Lockpick task. It must never own permission, movement, rolls, outcomes, keys, or tools.
 - Call every wrapped native system exactly once. Substitute only ephemeral register-local sources; never write `RequestedRoll.Roller` or `ServerRollFinishedEvent.Roller`.
 - Keep native mutation guarded by a complete executable signature set.
 - Treat uncertain state as no delegation. Vanilla behavior must remain available.
@@ -580,3 +564,22 @@ The first native release is 2.0.0 because it introduces a new required loader an
 ## Licensing and reference boundary
 
 Best of Hands acknowledges Auto Lockpicking by Volitio, Use Best Sleight of Hand by JonHinkerton, Best in Party Skills by imCioco, and Eternal Lockpick and Eternal Trap Disarm Kit by SwissFred. Do not copy their source, assets, statuses, localization, or metadata. User-facing acknowledgements are in [README.md](README.md); additional project acknowledgements and reuse terms are maintained here and in [LICENSE](LICENSE).
+
+## 2.4.0 status publication and diagnosis
+
+The DLL retains its latest status until publication succeeds. Its worker
+retries failures with 250 ms to 2 s backoff even while waiting for a Lua
+challenge, and republishes the current status every 5 s to recover a removed
+file, recreating its parent directory if necessary. New status supersedes older pending text without resetting failure
+backoff. Diagnostics log the resolved status/action paths, failing operation,
+OS error and recovery; repeated identical failures do not flood the log.
+Current-process nonce, version, protocol, completion and acknowledgement
+checks remain required before either feature can activate.
+
+Client and server use one status reader. Nil loads, read exceptions, empty/incomplete/malformed documents and
+version/protocol mismatches have distinct reasons. Ext.IO cannot distinguish
+all missing-file and access-denied cases when it returns nil, so that outcome
+is described as unavailable rather than proof that the DLL is missing. Mixed-component diagnostics show expected and observed
+versions. Details stay in logs; the player warning remains bounded to 240
+ASCII characters. These offline guarantees do not establish reporter-specific
+recovery or gameplay qualification of the 2.4.0 candidate.

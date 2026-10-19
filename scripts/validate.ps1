@@ -293,7 +293,8 @@ foreach ($requiredNativeSurface in @(
     'Server/NativeBridge.lua',
     'Server/NativeInteractionCoordinator.lua',
     'Server/QuickLockpickCoordinator.lua',
-    'listen("UseFinished"',
+    'listen("DualEntityEvent"',
+    'GLO_UsedLockedItem',
     'listen("RequestCanLockpick"',
     'listen("RequestCanDisarmTrap"',
     'listen("RequestProcessed"'
@@ -580,9 +581,11 @@ if ($nativeSource -match 'PatchDisarm|PatchLockpick|PatchRequestedRoll|RouteFini
 if ($nativeSource.Contains('ClientSetRunningTaskDetour')) {
     throw 'Native v2 must not retain the bypassed public SetRunningTask interception path.'
 }
-if (-not $nativeSource.Contains('ClientTaskSelectionMidHook') -or
-    -not $nativeSource.Contains('kClientTaskSelectionSignature')) {
-    throw 'Native left-click lockpicking must use the signature-guarded internal task-selection boundary.'
+if ($nativeSource.Contains('ClientTaskSelectionMidHook')) {
+    throw 'Automatic lockpicking must preserve vanilla Use and story permission before starting the stock task.'
+}
+if (-not $nativeSource.Contains('ClientInputControllerUpdateDetour')) {
+    throw 'Automatic lockpicking requires the validated stock-task activation adapter.'
 }
 if ($nativeSource.Contains('0x01b3a2d2')) {
     throw 'Native left-click lockpicking must intercept before BG3 retires non-winning task readiness.'

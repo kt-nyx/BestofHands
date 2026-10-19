@@ -7,6 +7,7 @@
 #include "ProfileRouting.h"
 #include "QuickLockpickState.h"
 #include "SafeMemory.h"
+#include "StatusPublication.h"
 
 #include <cassert>
 #include <cstddef>
@@ -43,6 +44,33 @@ void* TestGetCharacterTask(void* controller, std::uint32_t taskType)
 
 int main()
 {
+    {
+        StatusPublication publication;
+        unsigned calls = 0;
+        bool writable = false;
+        std::string last;
+        auto write = [&](std::string const& value) {
+            ++calls;
+            if (!writable) return false;
+            last = value;
+            return true;
+        };
+        publication.Queue("waiting/current-process");
+        assert(!publication.Poll(0, write));
+        assert(publication.Pending());
+        assert(!publication.Poll(249, write) && calls == 1);
+        publication.Queue("ready/current-process/latest-ack");
+        assert(!publication.Poll(250, write));
+        writable = true;
+        assert(!publication.Poll(749, write));
+        assert(publication.Poll(750, write));
+        assert(last == "ready/current-process/latest-ack");
+        assert(!publication.Pending() && publication.Failures() == 0);
+        assert(!publication.Poll(5749, write));
+        assert(publication.Poll(5750, write)); // restore a removed status
+        publication.Queue("new-session");
+        assert(publication.Poll(5751, write) && last == "new-session");
+    }
     using best_of_hands::CapabilityState;
     using best_of_hands::ResolutionSource;
     using best_of_hands::StructuralCandidate;
@@ -380,7 +408,7 @@ int main()
 
     auto const valid = ParseBridgeDocument(
         "protocol=9\n"
-        "pak_version=2.3.2\n"
+        "pak_version=2.4.0\n"
         "probe=abc-123\n"
         "native_session=44-55\n"
         "trace=1\n"
@@ -405,36 +433,36 @@ int main()
     assert(valid.records[0].finishedEvent == 0x0200000200000200ULL);
     assert(valid.records[1].finishedEvent == 0);
 
-    assert(!ParseBridgeDocument("protocol=2\npak_version=2.3.2\nprobe=x\n").valid);
+    assert(!ParseBridgeDocument("protocol=2\npak_version=2.4.0\nprobe=x\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=1\npak_version=2.3.2\nprobe=x\nend=1\n").valid);
+        "protocol=1\npak_version=2.4.0\nprobe=x\nend=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nprobe=x\n"
+        "protocol=9\npak_version=2.4.0\nprobe=x\n"
         "record=1\tlockpick\tnot-hex\t2\t3\t0\t0\t0\ta\tb\tc\t-1\nend=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nprobe=x\n"
+        "protocol=9\npak_version=2.4.0\nprobe=x\n"
         "record=0\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t-1\nend=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nprobe=x\n"
+        "protocol=9\npak_version=2.4.0\nprobe=x\n"
         "record=1\tlockpick\t1\t2\t3\nend=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nprobe=x\n"
+        "protocol=9\npak_version=2.4.0\nprobe=x\n"
         "record=1\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t0\textra\n"
         "end=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nprobe=x\n"
+        "protocol=9\npak_version=2.4.0\nprobe=x\n"
         "record=1\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t3\n"
         "end=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nprobe=x\n"
+        "protocol=9\npak_version=2.4.0\nprobe=x\n"
         "record=1\tunknown\t1\t2\t3\t0\t0\t0\ta\tb\tc\t-1\n"
         "end=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nprobe=x\n"
+        "protocol=9\npak_version=2.4.0\nprobe=x\n"
         "record=1\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t-2\n"
         "end=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nprobe=x\n"
+        "protocol=9\npak_version=2.4.0\nprobe=x\n"
         "record=1\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t-1\n").valid);
 
     RequestedRollIdentity identity{
@@ -458,7 +486,7 @@ int main()
 
     auto const client = ParseClientBridgeDocument(
         "protocol=9\n"
-        "pak_version=2.3.2\n"
+        "pak_version=2.4.0\n"
         "native_session=44-55\n"
         "trace=1\n"
         "record=7\t4dc3ec09-e11d-e030-cac3-99253090aaf8\t01c0000100000085\t01c00001000000d4\t01c000010000f15c\tlockpick\t1\n"
@@ -494,7 +522,7 @@ int main()
     assert(client.lockedTargets[0].netId == 1125899906937610ULL);
     auto const crlfClient = ParseClientBridgeDocument(
         "protocol=9\r\n"
-        "pak_version=2.3.2\r\n"
+        "pak_version=2.4.0\r\n"
         "native_session=crlf-session\r\n"
         "eligible=1\t1\r\n"
         "locked=2\t3\r\n"
@@ -505,7 +533,7 @@ int main()
     assert(crlfClient.lockedTargets.size() == 1);
     auto const emptyClient = ParseClientBridgeDocument(
         "protocol=9\n"
-        "pak_version=2.3.2\n"
+        "pak_version=2.4.0\n"
         "native_session=empty-session\n"
         "end=1\n");
     assert(emptyClient.valid);
@@ -515,76 +543,76 @@ int main()
     assert(emptyClient.leftClickInitiators.empty());
     assert(emptyClient.lockedTargets.empty());
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "eligible=1\t2\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "eligible=0\t1\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "locked=1\t0\nend=1\n").valid);
     auto const wideNetId = ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "locked=1\t4294967296\nend=1\n");
     assert(wideNetId.valid);
     assert(wideNetId.lockedTargets[0].netId == 4294967296ULL);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "quick=bad token\t1\t2\t3\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "quick=request\t0\t2\t3\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "quick=request\t1\t2\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "quick=request\t1\t0\t3\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "quick=request\t1\t2\t0\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "quick=request\t1\t2\t3\textra\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "quick=request\t1\t2\t18446744073709551616\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "eligible=not-hex\t1\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "eligible=1\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "eligible=1\t1\textra\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "locked=not-hex\t1\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "locked=1\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "locked=1\t1\textra\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "locked=1\tnot-decimal\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "locked=1\t18446744073709551616\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=6\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=6\npak_version=2.4.0\nnative_session=x\n"
         "end=1\n").valid);
     assert(!ParseClientBridgeDocument(
         "protocol=9\npak_version=1.0.0\nnative_session=x\n"
         "end=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nend=1\n").valid);
+        "protocol=9\npak_version=2.4.0\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n").valid);
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n").valid);
     auto const maximumClientValues = ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "quick=request\tffffffffffffffff\tfffffffffffffffe"
         "\t18446744073709551615\n"
         "eligible=ffffffffffffffff\t0\n"
@@ -700,19 +728,19 @@ int main()
         assert(consumedRequests.contains(request.request));
     }
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\n"
+        "protocol=9\npak_version=2.4.0\n"
         "record=7\tuuid\t1\t2\t3\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "record=0\tuuid\t1\t2\t3\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "record=7\tuuid\t1\t0\t3\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "record=7\tuuid\t1\t2\tnot-hex\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.3.2\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
         "record=7\tuuid\t1\t2\t3\textra\nend=1\n").valid);
     RequestedRollIdentity clientIdentity{
         .roll = 0x01c0000200000100ULL,
