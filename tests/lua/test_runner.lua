@@ -116,7 +116,6 @@ local function localSettingsHarness(initial, withMcm)
     local events, ticks = {}, {}
     local registrations, writes, reads, notifications = 0, 0, 0, 0
     local failSave = false
-    local lastCheckbox
     local function installMcm()
         MCM = {
             Get = function() error("personal preference must not read host settings") end,
@@ -172,21 +171,25 @@ local function localSettingsHarness(initial, withMcm)
         function node:AddText(label)
             local widget = {Label=label}
             function widget:SetColor(name, value) self[name .. "Color"] = value end
-            if lastCheckbox == "Left-click lockpick" then errorText = widget end
+            errorText = widget
             self.Children[#self.Children + 1] = widget
             return widget
         end
         function node:AddCombo(label)
-            lastCheckbox = label
-            local widget = {SelectedIndex=0}
-            if label == "Left-click lockpick" then checkbox = widget end
+            local widget = {Label=label, SelectedIndex=0}
+            checkbox = widget
             self.Children[#self.Children + 1] = widget
             return widget
         end
         function node:AddImageButton(label, icon, size)
             assertEqual("ico_randomize_d", icon, "standard MCM reset icon")
             local widget = {Label=label, Image={Icon=icon}, Size=size}
-            if lastCheckbox == "Left-click lockpick" then resetButton = widget end
+            resetButton = widget
+            self.Children[#self.Children + 1] = widget
+            return widget
+        end
+        function node:AddDummy(width, height)
+            local widget = {Size={width, height}}
             self.Children[#self.Children + 1] = widget
             return widget
         end
@@ -204,6 +207,15 @@ local function localSettingsHarness(initial, withMcm)
         installMcm = installMcm,
         events = events,
         render = render,
+        partyTab = function()
+            local tab = container()
+            local lockpick = tab:AddGroup()
+            lockpick.IDContext = Settings.MODULE_UUID .. "_best_in_party_lockpick_Group"
+            lockpick:AddDummy(0, 10) -- MCM's existing separator after the first setting.
+            local disarm = tab:AddGroup()
+            disarm.IDContext = Settings.MODULE_UUID .. "_best_in_party_disarm_Group"
+            return tab
+        end,
         change = function(value)
             if type(value) == "boolean" then value = value and "On" or "Off" end
             for index, option in ipairs(checkbox.Options) do
@@ -270,7 +282,9 @@ test("shared feature page renders one personal mode per UI instance", function()
     local h = localSettingsHarness("off", true)
     local tab = h.render()
     local personalGroup = tab.Children[1]
-    assertEqual(4, #personalGroup.Children, "one personal mode with reset, explanation, and error text")
+    assertEqual(5, #personalGroup.Children, "one personal mode with title, reset, explanation, and error text")
+    assertEqual("Left-click lockpick", personalGroup.Children[1].Label, "title above selector")
+    assertEqual("", personalGroup.Children[2].Label, "selector has no inline title")
     local hostControl = { IDContext = "host_party_controls" }
     tab.Children[#tab.Children + 1] = hostControl
     h.render(tab)
@@ -282,9 +296,16 @@ test("shared feature page renders one personal mode per UI instance", function()
     assertEqual(true, h.features.IsEnabled(), "the single checkbox remains functional")
     local rebuiltTab = h.render()
     assertEqual(1, #rebuiltTab.Children, "a rebuilt UI gets its own personal controls")
-    assertEqual(0, rebuiltTab.Children[1].Children[1].SelectedIndex, "rebuilt mode shows current preference")
+    assertEqual(0, rebuiltTab.Children[1].Children[2].SelectedIndex, "rebuilt mode shows current preference")
     h.render(rebuiltTab)
     assertEqual(1, #rebuiltTab.Children, "rebuilt UI also rejects duplicate render")
+    local partyTab = h.render(h.partyTab())
+    assertEqual(3, #partyTab.Children, "party controls and personal control share one page")
+    assertEqual(6, partyTab.Children[1].Children[2].Size[2], "supplement existing 10px party gap")
+    assertEqual(16, partyTab.Children[2].Children[1].Size[2], "gap before personal setting")
+    h.render(partyTab)
+    assertEqual(2, #partyTab.Children[1].Children, "repeated callbacks do not accumulate padding")
+    assertEqual(1, #partyTab.Children[2].Children, "personal gap also added only once")
     Ext, MCM = previousExt, previousMcm
 end)
 
@@ -304,8 +325,11 @@ test("personal reset restores and persists the enabled default", function()
     assertEqual(false, reset.Visible, "reset hides after returning to default")
     assertEqual(2, writes, "toggle and reset each persist once")
     assertEqual(2, notifications, "toggle and reset both notify the bridge")
-    local description = tab.Children[1].Children[3]
-    assertEqual(0.67, description.TextColor[4], "standard MCM description opacity")
+    local description = tab.Children[1].Children[4]
+    assertEqual(190 / 255, description.TextColor[1], "standard MCM description red")
+    assertEqual(170 / 255, description.TextColor[2], "standard MCM description green")
+    assertEqual(150 / 255, description.TextColor[3], "standard MCM description blue")
+    assertEqual(1, description.TextColor[4], "standard MCM description opacity")
     assertEqual("Multiplayer: your setting here applies only to you.", description.Label,
         "only the requested multiplayer explanation")
     h.change(false)
@@ -972,7 +996,7 @@ test("native bridge requires a live matching challenge acknowledgement", functio
         NATIVE_HANDSHAKE_ATTEMPTS = 2,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.4.0",
+        VERSION = "2.4.1",
     }
     local bridge = NativeBridge.Create(settings, api, recordingDiagnostics())
     bridge.BeginHandshake()
@@ -980,7 +1004,7 @@ test("native bridge requires a live matching challenge acknowledgement", functio
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
         "protocol=9",
-        "version=2.4.0",
+        "version=2.4.1",
         "state=ready",
         "session=123-456",
         "pid=123",
@@ -1113,14 +1137,14 @@ test("native bridge isolates quick lockpick from unavailable delegated rolls", f
         NATIVE_HANDSHAKE_ATTEMPTS = 1,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.4.0",
+        VERSION = "2.4.1",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, recordingDiagnostics())
     bridge.BeginHandshake()
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=9", "version=2.4.0", "state=partial", "session=session-p",
+        "protocol=9", "version=2.4.1", "state=partial", "session=session-p",
         "features=" .. NativeBridge.REQUIRED_FEATURES, "ack=" .. probe,
         "cap_quick_lockpick=ready", "cap_quick_lockpick_source=structural_compatibility",
         "cap_quick_lockpick_reason=ok",
@@ -1164,14 +1188,14 @@ test("native bridge refreshes pending capabilities and validates manifests", fun
         NATIVE_HANDSHAKE_ATTEMPTS = 3,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.4.0",
+        VERSION = "2.4.1",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, recordingDiagnostics())
     bridge.BeginHandshake()
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=9", "version=2.4.0", "state=partial", "session=session-p",
+        "protocol=9", "version=2.4.1", "state=partial", "session=session-p",
         "features=" .. NativeBridge.REQUIRED_FEATURES, "ack=" .. probe,
         "cap_quick_lockpick=ready", "cap_quick_lockpick_source=exact_table",
         "cap_quick_lockpick_hooks=wrong_manifest",
@@ -1185,7 +1209,7 @@ test("native bridge refreshes pending capabilities and validates manifests", fun
         "pending delegated capability remains disabled")
 
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=9", "version=2.4.0", "state=ready", "session=session-p",
+        "protocol=9", "version=2.4.1", "state=ready", "session=session-p",
         "features=" .. NativeBridge.REQUIRED_FEATURES, "ack=" .. probe,
         "cap_quick_lockpick=ready", "cap_quick_lockpick_source=exact_table",
         "cap_quick_lockpick_hooks=" .. NativeBridge.QUICK_LOCKPICK_HOOKS,
@@ -1232,14 +1256,14 @@ test("native bridge cannot report ready when its session acknowledgement write f
         NATIVE_HANDSHAKE_ATTEMPTS = 1,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.4.0",
+        VERSION = "2.4.1",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, diagnostics)
     bridge.BeginHandshake()
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=9", "version=2.4.0", "state=ready", "session=session-a",
+        "protocol=9", "version=2.4.1", "state=ready", "session=session-a",
         "pid=10", "hooks=" .. NativeBridge.REQUIRED_HOOKS,
         "features=" .. NativeBridge.REQUIRED_FEATURES,
         "cap_quick_lockpick=ready", "cap_quick_lockpick_source=exact_table",
@@ -1283,7 +1307,7 @@ test("native bridge fails closed and warns once when the DLL is unavailable", fu
         NATIVE_HANDSHAKE_ATTEMPTS = 1,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.4.0",
+        VERSION = "2.4.1",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, recordingDiagnostics())
@@ -1322,7 +1346,7 @@ test("native bridge warning retries a temporarily unavailable host once per gene
         NATIVE_WARNING_ATTEMPTS = 3,
         NATIVE_WARNING_RETRY_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.4.0",
+        VERSION = "2.4.1",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, recordingDiagnostics())
@@ -1373,7 +1397,7 @@ test("native bridge drops warning retries from a superseded handshake generation
         NATIVE_WARNING_ATTEMPTS = 2,
         NATIVE_WARNING_RETRY_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.4.0",
+        VERSION = "2.4.1",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, recordingDiagnostics())
@@ -1404,14 +1428,14 @@ test("native bridge retries the patch warning after loading exhausted every atte
     }
     local diagnostics, records = recordingDiagnostics()
     local bridge = NativeBridge.Create({
-        VERSION = "2.4.0", NATIVE_HANDSHAKE_ATTEMPTS = 1,
+        VERSION = "2.4.1", NATIVE_HANDSHAKE_ATTEMPTS = 1,
         NATIVE_HANDSHAKE_POLL_MS = 1, NATIVE_WARNING_ATTEMPTS = 3,
         NATIVE_WARNING_RETRY_MS = 1,
     }, { Schedule = function(_, cb) scheduled[#scheduled + 1] = cb end }, diagnostics)
     bridge.BeginHandshake()
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=9", "version=2.4.0", "state=unavailable", "session=new-build",
+        "protocol=9", "version=2.4.1", "state=unavailable", "session=new-build",
         "features=" .. NativeBridge.REQUIRED_FEATURES, "ack=" .. probe,
         "executable=bg3_dx11.exe", "product_version=4.1.1.7631656",
         "cap_quick_lockpick=unavailable",
@@ -1458,14 +1482,14 @@ test("native bridge disables delegation if its acknowledgement is replaced", fun
         NATIVE_HANDSHAKE_ATTEMPTS = 1,
         NATIVE_HANDSHAKE_POLL_MS = 1,
         TRACE_EVENTS = false,
-        VERSION = "2.4.0",
+        VERSION = "2.4.1",
     }, {
         Schedule = function(_, callback) scheduled[#scheduled + 1] = callback end,
     }, recordingDiagnostics())
     bridge.BeginHandshake()
     local probe = files["BestOfHandsNative.actions"]:match("probe=([^\r\n]+)")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=9", "version=2.4.0", "state=ready", "session=session-a",
+        "protocol=9", "version=2.4.1", "state=ready", "session=session-a",
         "pid=10", "hooks=" .. NativeBridge.REQUIRED_HOOKS,
         "features=" .. NativeBridge.REQUIRED_FEATURES,
         "cap_quick_lockpick=ready", "cap_quick_lockpick_source=exact_table",
@@ -1477,7 +1501,7 @@ test("native bridge disables delegation if its acknowledgement is replaced", fun
     scheduled[1]()
     assertEqual(true, bridge.IsReady(), "initially ready")
     files["BestOfHandsNative.status"] = table.concat({
-        "protocol=9", "version=2.4.0", "state=ready", "session=session-a",
+        "protocol=9", "version=2.4.1", "state=ready", "session=session-a",
         "pid=10", "hooks=" .. NativeBridge.REQUIRED_HOOKS,
         "features=" .. NativeBridge.REQUIRED_FEATURES,
         "ack=replaced-probe", "detail=another bridge replaced the ack", "end=1", "",
@@ -1518,7 +1542,7 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
             "protocol=9",
-            "pak_version=2.4.0",
+            "pak_version=2.4.1",
             "probe=test",
             "native_session=44-55",
             "trace=0",
@@ -1583,7 +1607,7 @@ test("client bridge correlates delegated rolls by stable UUID and publishes clie
     }
     local bridge = NativePresentationBridge.Start({
         TRACE_EVENTS = false,
-        VERSION = "2.4.0",
+        VERSION = "2.4.1",
     })
     local component = {
         RollContext = 5,
@@ -1688,7 +1712,7 @@ test("client bridge prepares and queues BG3's stock lockpick task", function()
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
             "protocol=9",
-            "pak_version=2.4.0",
+            "pak_version=2.4.1",
             "probe=test",
             "native_session=44-55",
             "trace=0",
@@ -1743,7 +1767,7 @@ test("client bridge prepares and queues BG3's stock lockpick task", function()
     local featureChanged
     NativePresentationBridge.Start({
         TRACE_EVENTS = false,
-        VERSION = "2.4.0",
+        VERSION = "2.4.1",
     }, channel, {
         GetMode = function() return leftClick and "On" or "Off" end,
         IsEnabled = function() return leftClick end,
@@ -1782,7 +1806,7 @@ test("client bridge prepares and queues BG3's stock lockpick task", function()
     assertEqual(1, #serverMessages,
         "duplicate start does not acknowledge or queue twice")
     leftClick = false
-    featureChanged()
+    assertEqual(nil, featureChanged, "settings are checked at admission without snapshot listeners")
     assertContains(files["BestOfHandsNative.client"], "quick=42-0-1",
         "turning Off preserves an already accepted fallback")
     handler({
@@ -1835,7 +1859,7 @@ test("client bridge rejects malformed or unpublishable fallback requests", funct
     local files = {
         ["BestOfHandsNative.actions"] = table.concat({
             "protocol=9",
-            "pak_version=2.4.0",
+            "pak_version=2.4.1",
             "probe=test",
             "native_session=44-55",
             "trace=0",
@@ -1881,7 +1905,7 @@ test("client bridge rejects malformed or unpublishable fallback requests", funct
     }
     NativePresentationBridge.Start({
         TRACE_EVENTS = false,
-        VERSION = "2.4.0",
+        VERSION = "2.4.1",
     }, channel)
 
     local function start(request, actor, targetValue)
@@ -3645,13 +3669,23 @@ test("client session retries startup and rejects old generation acknowledgements
     timers[2]()
     assertEqual("client-process", session.GetSession(), "current client ack enables exchange")
     assertContains(logs[#logs], "state=ready|", "acknowledged session reports ready")
+    assertEqual(2, #timers, "ready session schedules no recurring reads or writes")
     failSave = true
-    timers[3]()
+    local acknowledgedStatus = files["BestOfHandsNative.status"]
+    files["BestOfHandsNative.status"] = acknowledgedStatus:gsub("client_ack=[^\r\n]*", "client_ack=other", 1)
     assertEqual("", session.GetSession(), "failed handshake write disables exchange")
     assertContains(logs[#logs], "state=native_handshake_write_failed|", "write failure is actionable")
     failSave = false
+    timers[3]()
+    files["BestOfHandsNative.status"] = acknowledgedStatus
     timers[4]()
     assertEqual("client-process", session.GetSession(), "write retry recovers without reset")
+    assertEqual(4, #timers, "recovery stops polling after acknowledgement")
+    files["BestOfHandsNative.status"] = nil
+    assertEqual("", session.GetSession(), "action-time missing status fails closed")
+    files["BestOfHandsNative.status"] = acknowledgedStatus
+    timers[5]()
+    assertEqual("client-process", session.GetSession(), "status restoration recovers")
     events.ResetCompleted()
     assertEqual("", session.GetSession(), "old ack cannot enable a reset generation")
 end)
@@ -3796,9 +3830,8 @@ test("automatic admission checks current hide state without touching manual acti
     NativePresentationBridge.Start(Settings, {SetHandler=function(_,cb) handler=cb end,
         SendToServer=function(_,v) messages[#messages+1]=v return true end},
         {IsEnabled=function(_, hiding) return not sneak or hiding end, Subscribe=function() end})
-    table.remove(ticks,1)()
-    assertEqual(nil, files["BestOfHandsNative.leftclick"]:find("locked=",1,true),
-        "no locked object can preempt vanilla Use")
+    assertEqual(0, #ticks, "no exploration snapshot scan is scheduled")
+    assertEqual(nil, files["BestOfHandsNative.leftclick"], "obsolete routing file is never written")
     local function start(id) handler({operation="start",request=id,actor=a.guid,target=t.guid}) return messages[#messages] end
     assertEqual("automatic_conditions_not_met", start("standing").reason, "standing fails sneak-only")
     a.Darkness={CharacterSneaking=true, ActuallySneaking=false}
@@ -3839,6 +3872,12 @@ test("story-safe game signal is the sole automatic entry point", function()
     assertEqual(1,calls,"ordinary locked use admitted")
     assertEqual(nil,s:find('listen("UseFinished"',1,true),"raw story-rejected Use cannot admit a roll")
 end)
+
+dofile(BEST_OF_HANDS_ROOT .. "/tests/lua/performance_regressions.lua")({
+    test=test, assertEqual=assertEqual, assertContains=assertContains,
+    Settings=Settings, Bridge=NativePresentationBridge, entity=entity,
+    regressionBridge=regressionBridge,
+})
 
 if failed > 0 then
     error(string.format("%d Lua tests failed; %d passed", failed, passed))

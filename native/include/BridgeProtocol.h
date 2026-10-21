@@ -14,7 +14,7 @@
 namespace best_of_hands {
 
 inline constexpr std::string_view kProtocolVersion = "9";
-inline constexpr std::string_view kPluginVersion = "2.4.0";
+inline constexpr std::string_view kPluginVersion = "2.4.1";
 
 enum class ActionKind {
     Lockpick,

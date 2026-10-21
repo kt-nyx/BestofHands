@@ -1,11 +1,11 @@
 # Developing Best of Hands
 
-The current source is **2.4.0**. The user confirmed the local build working on
-October 19, 2026. Its DX11 test log shows both native capabilities ready,
-expected automatic and party-lockpick mode decisions, and no Best of Hands
-warnings or errors. See [release preparation](RELEASE-PREP.md) for coverage limits.
+The current source is **2.4.1**. On October 21, 2026, the player confirmed the
+optimized build working, reported that the click-to-roll delay had disappeared,
+and approved the revised MCM layout. See [release preparation](RELEASE-PREP.md)
+for measured performance evidence and remaining coverage limits.
 
-Best of Hands 2.4.0 consists of a normal BG3 PAK and a small Windows native plugin. The PAK selects the specialist and owns diagnostics; the DLL changes the roll-profile source at narrow validated server action boundaries and supplies the specialist's aggregate advantage at the exact client `DCActiveRoll` presentation boundary. A bounded, exact-roll-UUID client lease retains that presentation value after the replicated `RequestedRoll` is destroyed and preserves it through BG3's signature-validated modifier-aggregation and click-to-roll boundaries. These hooks never change the server roll component or outcome. On the client they may correct only presentation state, including the local advantage byte and immediate-total fallback flag; numeric result values and ownership remain unchanged. Neither half completes actions, rolls dice, consumes tools, or synthesizes success/failure outcomes. The left-click adapter activates only BG3's stock client Lockpick task through its validated native controller lifecycle; the only gameplay target rewrite is an accepted active-roll bonus: its already validated initiator target is changed to the specialist so the effect enters the delegated profile.
+Best of Hands 2.4.1 consists of a normal BG3 PAK and a small Windows native plugin. The PAK selects the specialist and owns diagnostics; the DLL changes the roll-profile source at narrow validated server action boundaries and supplies the specialist's aggregate advantage at the exact client `DCActiveRoll` presentation boundary. A bounded, exact-roll-UUID client lease retains that presentation value after the replicated `RequestedRoll` is destroyed and preserves it through BG3's signature-validated modifier-aggregation and click-to-roll boundaries. These hooks never change the server roll component or outcome. On the client they may correct only presentation state, including the local advantage byte and immediate-total fallback flag; numeric result values and ownership remain unchanged. Neither half completes actions, rolls dice, consumes tools, or synthesizes success/failure outcomes. The left-click adapter activates only BG3's stock client Lockpick task through its validated native controller lifecycle; the only gameplay target rewrite is an accepted active-roll bonus: its already validated initiator target is changed to the specialist so the effect enters the delegated profile.
 
 ## Runtime contract
 
@@ -30,7 +30,11 @@ same **Features** page as the two blueprint settings through the public
 `MCM.InsertModMenuTab` API, using the matching tab name. Repeated render callbacks
 reuse the existing personal-control group instead of appending duplicates or
 clearing MCM's host controls. Each control has only its short multiplayer scope description.
-The selector uses MCM's standard faded-white description color and reset icon.
+The personal selector uses a separate title above it, MCM's standard muted-gold
+description color below it, and the standard reset icon. The menu callback adds
+spacing to the two known blueprint groups so all three features have a 16-pixel
+gap between groups (including MCM's existing 10-pixel spacer after the first).
+These layout adjustments run only when the menu is built.
 Its reset button appears away from On and saves On through the same path as a selection change.
 The client saves its mode using
 `Ext.IO` to `BestOfHands/ClientSettings.json` under the local Script Extender
@@ -42,10 +46,9 @@ Off wins, otherwise the old sneak restriction becomes Only while sneaking.
 New saves contain just the mode string. Split-screen players sharing one
 client share this preference.
 
-The client immediately republishes the native left-click eligibility snapshot
-when the preference changes. Off marks initiators ineligible; it does not
-remove the already accepted fallback requests or roll presentation records.
-The failed-Use fallback also checks the preference on the owning client before
+The client checks the current preference when admitting an automatic action.
+Changing it does not remove accepted fallback requests or roll presentation
+records. The failed-Use fallback checks the preference on the owning client before
 publishing a native activation request, so the server cannot re-enable a
 guest's disabled click feature. No native hook or bridge-protocol change is
 needed. Context-menu interactions still reach the independent server-side
@@ -157,9 +160,10 @@ ECS systems allocation to share one Windows memory region or protection. A
 transient, stale, or malformed candidate is rejected and polling continues
 without modifying the game.
 
-After installation, the two update slots are health-checked against the exact
-Best of Hands refresh-hook addresses instead of being mistaken for unpatched
-BG3 functions. Their stored original BG3 targets remain executable-validated
+After installation, inexpensive fault-guarded reads check the two update slots
+against the exact Best of Hands hook addresses. Full memory-region and executable
+protection validation runs on bridge input changes,
+rather than during exploration. The originals were fully validated at installation
 and are never discarded while an installed hook could still call them. A
 temporary null server-world observation does not retire live hooks; a stable
 non-null replacement world drops only the retired slot addresses and reuses
@@ -268,7 +272,6 @@ place of the `Baldur's Gate 3` folder.
 
 - `BestOfHandsNative.actions`
 - `BestOfHandsNative.client`
-- `BestOfHandsNative.leftclick`
 - `BestOfHandsNative.status`
 - `BestOfHandsNative.handshake`
 
@@ -279,6 +282,112 @@ handshake file. The host separately sends action records through the
 to its own memory handles before publishing its client file; host memory
 handles and the host's native session are never used on a guest. Updated
 advantage values are also published in that client file.
+
+### Idle runtime work
+
+The mod waits for Windows to report changes to its bridge files using
+[`ReadDirectoryChangesW`](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-readdirectorychangesw).
+Notifications from unrelated mods are ignored. No
+timestamps, documents, status files, eligibility lists, or memory regions are
+polled during stable exploration. The retired `BestOfHandsNative.leftclick`
+producer and reader are removed; automatic eligibility and story permissions
+are checked at action admission instead.
+
+A 25 ms notification wait permits constant-size, fault-guarded reads of the
+server/world pointers and installed hook slots. These detect world replacement
+and hook removal without querying Windows memory regions. New worlds retain
+the complete installation preflight and four-observation stability requirement.
+The game system wrappers only call their originals; synchronous bridge refresh
+moves to actual profile-selection boundaries so a roll cannot race ahead of
+the worker's notification. Action processing may still read files and take
+short document locks; idle updates do neither.
+
+Status writes run exclusively on the worker, without holding a game-visible
+mutex during disk operations. Equal payloads are not republished. A notification
+of a removed/replaced status file triggers repair; failed writes retain bounded
+backoff. Notification overflow triggers reconciliation, while unavailable
+notification storage is retried every two seconds. Incomplete input gets three
+short read retries after a notification; subsequent changes and actual rolls
+can retry again. This recovery work is separate from stable exploration.
+
+Once the local client receives its acknowledgement, its startup timer stops.
+Session/reset events restart the exchange, and actual client actions recheck
+status and restart recovery when necessary. Settings, ownership boundaries,
+roll leases, Inspiration and action cleanup retain their existing behavior.
+Individual roll hooks retain their existing memory checks before using game
+objects or writing presentation values. Hook lifecycle state remains owned
+by the worker; game hooks do not inspect its mutable installation-slot metadata.
+
+October 21 local DX11 validation used the same latest manual save at Jannath's
+Estate for standing and walking/camera samples. Independently identified workers
+used 53.3296% versus 0.0533% of one logical CPU in matched 29.3-second focused
+windows. An 87-second focused optimized window recorded 0.0180%. Windows CPU
+accounting is quantized; these figures establish negligible measured overhead,
+not mathematical zero. Aggregate timings isolated the main baseline cost to the
+server-world `VirtualQuery` preflight: about 4.9 seconds per ten seconds. The
+remaining world/slot observations took about 0.44 ms per ten seconds afterward.
+Settled optimized intervals recorded no bridge reads, timestamps, status writes,
+refresh-lock attempts or memory-region queries. Wrapper overhead before calling
+the original game update averaged 58.37 microseconds before and 0.17 microseconds
+after in the diagnostic build.
+
+The player reported the requested lockpick, disarm, specialist-bonus and
+Inspiration checks working on the older test save; native logs captured five
+completed delegated roll profiles after that transition and empty action records
+after cleanup. All 77 Lua tests, native tests (including real directory
+notifications), existing repository checks and package byte verification passed.
+The installed normal build has diagnostics compiled out and verified hashes.
+Raw investigation evidence and rollback copies are retained outside the
+checkout in the maintainer's dated BestofHands archive. This does not establish an FPS improvement, Vulkan behavior,
+or a fresh multiplayer/MCM-absent gameplay test.
+
+### Further roll and action-update improvements
+
+The follow-up changes reduce work during actual rolls and action-data updates.
+The player subsequently reported these working and the click-to-roll delay gone.
+The numeric live measurements above describe the first pass; the follow-up
+has no separate matched CPU or frame-time measurement.
+
+Five read-only native sites now copy bounded roll data through the existing
+fault-guarded reader and inspect the local bytes. This replaces repeated
+`VirtualQuery` preflights for roll identity, the active-roll state/viewmodel
+span, and result fields. A failed copy does not publish partial bytes. This is
+not an atomic engine snapshot: exact roll/session/actor matching still matters.
+Checks before writes, game-function calls, hook installation and world replacement
+remain. No page-validation cache can outlive a game object.
+
+The client reads its local action file only when the host fallback needs it.
+Network data uses local client handles and the current local native session.
+Roll create/change/destroy observations maintain a cache of relevant rolls;
+ordinary action updates remap only affected rolls. Source changes, resets and
+local-session recovery retain a full engine rescan, including rolls that arrived
+before their metadata. Identity changes re-resolve the specialist handle even
+when the roll UUID is unchanged. Accepted quick requests survive ordinary updates.
+
+Equal client output and server action output are not rewritten. Before skipping
+such a write, an event-time read verifies that the file still has those contents;
+removed/replaced files are repaired. Failed publications are never cached as
+successful, recovery retries can force writes, and server network resends retain
+their existing semantics. These checks run on action updates, not idle timers.
+
+All 86 Lua tests and the native tests pass. Focused counters show 100 identical
+network updates doing zero engine scans, roll lookups, client writes or speculative
+action-file reads, with 100 client-file confirmation reads for recovery. An
+advantage update resolves the affected roll once, leaves the unrelated roll
+untouched and writes once. Native tests cover null/inaccessible addresses,
+cross-page faults, unchanged destinations after failed capture, read-only memory,
+and the production field spans. `BestOfHandsReadBenchmark` is an isolated Windows
+microbenchmark of the region preflight versus the same guarded copy without it;
+its timings do not predict BG3 frame time or end-to-end roll latency.
+
+Release builds have performance recording/output disabled by default. Developers
+can opt in with `scripts/build.ps1 -PerformanceDiagnostics`; normal builds omit
+the output and enable markers, checked by the build script. Diagnostic roll
+summaries include `snapshot_read` alongside the remaining `memory_probe`
+queries and ten-second aggregate runtime summaries. Build with BG3 closed and
+use `scripts/build.ps1 -Install` without the diagnostic switch to restore the
+normal build. The one-off paired diagnostic binaries and switch helper from the
+investigation are archived outside the checkout and are not release tools.
 
 Temporary startup waiting does not immediately show a failure notice. Failed
 reads are retried without requiring another file modification. After the fast
@@ -435,6 +544,16 @@ Build with `scripts\build-native.ps1 -PerformanceDiagnostics` (or pass the
 same switch to `test.ps1`/`build.ps1`) to emit one background `PERF` summary
 after each roll. The profiled hooks perform no formatting, allocation, file
 I/O, or diagnostic locking while a roll is active.
+
+That switch also emits ten-second `runtime_profile` summaries: each named
+metric is `calls,total_microseconds,max_microseconds`, and worker user/kernel
+CPU is reported separately. Nested timings overlap and must not be added
+together. `game_refresh` excludes the original game update. Normal builds
+compile these counters and periodic output out. `scripts/measure-runtime.ps1`
+independently finds the current worker by its start address inside the loaded
+DLL, records Windows thread CPU and foreground-process samples, and saves CSV
+under `artifacts/runtime-performance`. A foreground sample alone cannot
+distinguish gameplay from a menu; record the player's test phase separately.
 
 The full native/UI instrumentation is preserved on
 `dev/native-hook-tracing`. Use that branch for a diagnostic build when a

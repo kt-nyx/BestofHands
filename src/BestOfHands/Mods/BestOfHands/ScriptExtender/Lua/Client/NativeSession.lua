@@ -10,11 +10,14 @@ function NativeSession.Start(settings, manifests)
     local instance, callbacks = {}, {}
     local generation, probe, session, running = 0, "", "", false
     local ready, lastState = false, ""
+    local pollPending, refreshing = false, false
     local function notify()
         for _, callback in ipairs(callbacks) do callback() end
     end
     local function poll(currentGeneration)
         if generation ~= currentGeneration or not running then return end
+        if refreshing then return end
+        refreshing = true
         local status, readReason = manifests.ReadStatus(settings.VERSION)
         local valid = readReason == nil and status.protocol == "9" and status.version == settings.VERSION
             and status["end"] == "1" and type(status.session) == "string"
@@ -26,9 +29,12 @@ function NativeSession.Start(settings, manifests)
             session = status.session
             local payload = table.concat({"protocol=9", "pak_version=" .. settings.VERSION,
                 "probe=" .. probe, "native_session=" .. session, "trace=0", "end=1", ""}, "\n")
-            -- Repeat until acknowledged. A failed read/write or late worker
-            -- initialization must never permanently strand the local client.
-            local saved, result = pcall(Ext.IO.SaveFile, HANDSHAKE_FILE, payload)
+            -- Repeat only until acknowledged. Once ready, lifecycle events
+            -- and actual actions recheck status; exploration does no file I/O.
+            local saved, result = true, true
+            if status.client_ack ~= probe then
+                saved, result = pcall(Ext.IO.SaveFile, HANDSHAKE_FILE, payload)
+            end
             ready = saved and result ~= false and status.client_ack == probe
                 and status.features == manifests.REQUIRED_FEATURES
             if not saved or result == false then
@@ -52,17 +58,29 @@ function NativeSession.Start(settings, manifests)
                 .. "|file=" .. STATUS_FILE)
         end
         if previousSession ~= session or previousReady ~= ready then notify() end
-        Ext.Timer.WaitFor(ready and 2000 or 250, function() poll(currentGeneration) end)
+        refreshing = false
+        if not ready and not pollPending then
+            pollPending = true
+            Ext.Timer.WaitFor(250, function()
+                if generation ~= currentGeneration then return end
+                pollPending = false
+                poll(currentGeneration)
+            end)
+        end
     end
     local function start()
         generation = generation + 1
         probe = tostring(Ext.Utils.MonotonicTime()) .. "-client-" .. generation
             .. "-" .. tostring({}):gsub("[^%x]", "")
-        running, ready, session = true, false, ""
+        running, ready, session, pollPending = true, false, "", false
         notify()
         poll(generation)
     end
-    function instance.GetSession() return ready and session or "" end
+    function instance.GetSession()
+        -- Called at action/session boundaries, never by a gameplay timer.
+        if ready then poll(generation) end
+        return ready and session or ""
+    end
     function instance.Subscribe(callback) callbacks[#callbacks + 1] = callback end
     Ext.Events.SessionLoaded:Subscribe(start)
     Ext.Events.ResetCompleted:Subscribe(start)

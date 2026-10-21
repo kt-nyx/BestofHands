@@ -1,4 +1,4 @@
-# Best of Hands 2.4.0: quick manual test
+# Best of Hands 2.4.1: quick manual test
 
 The Features page has three independent selectors: Left-click lockpick,
 Best-in-party lockpick, and Best-in-party disarm. Each offers **On / Only while
@@ -14,7 +14,10 @@ The user confirmed the local 2.4.0 build working on October 19, 2026. The
 captured DX11 session shows healthy startup and expected lockpick mode
 decisions, without Best of Hands warnings or errors. It does not independently
 establish every row below, multiplayer, or scripted-door coverage. No in-game
-tests were run by the coding agent.
+tests were run by the coding agent. On October 21, the player also confirmed
+the optimized build working and approved the three groups' matching titles,
+descriptions and spacing. See [RELEASE-PREP.md](RELEASE-PREP.md) for that patch's
+validation and remaining coverage limits.
 
 ## Prepare once
 

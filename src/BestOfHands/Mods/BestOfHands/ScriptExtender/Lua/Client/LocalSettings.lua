@@ -41,9 +41,22 @@ function LocalSettings.Start(settings)
     local function render(tab)
         local groupId = "BestOfHands_PersonalLockpick"
         for _, child in ipairs(tab.Children) do if child.IDContext == groupId then return end end
+        -- MCM already adds a 10px spacer after the first blueprint setting,
+        -- but none after the last. Give both setting groups a 16px gap.
+        for _, child in ipairs(tab.Children) do
+            if child.IDContext == settings.MODULE_UUID .. "_best_in_party_lockpick_Group" then
+                child:AddDummy(0, 6)
+            elseif child.IDContext == settings.MODULE_UUID .. "_best_in_party_disarm_Group" then
+                child:AddDummy(0, 16)
+            end
+        end
         local group = tab:AddGroup(groupId)
         group.IDContext = groupId
-        local combo = group:AddCombo("Left-click lockpick")
+        local title = group:AddText("Left-click lockpick")
+        title.TextWrapPos = 0
+        -- Match MCM's SettingTitle and SettingDescription text styles.
+        title:SetColor("Text", {250 / 255, 240 / 255, 220 / 255, 1})
+        local combo = group:AddCombo("")
         combo.IDContext = groupId .. "_Mode"
         combo.Options = MODES
         local reset = group:AddImageButton("Reset to default", "ico_randomize_d", {32, 32})
@@ -54,7 +67,7 @@ function LocalSettings.Start(settings)
         reset.IDContext, reset.SameLine = groupId .. "_Reset", true
         local explanation = group:AddText("Multiplayer: your setting here applies only to you.")
         explanation.TextWrapPos = 0
-        explanation:SetColor("Text", {1, 1, 1, 0.67})
+        explanation:SetColor("Text", {190 / 255, 170 / 255, 150 / 255, 1})
         local errorText = group:AddText("")
         errorText.TextWrapPos = 0
         local function refresh()

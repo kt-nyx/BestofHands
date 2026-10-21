@@ -46,11 +46,11 @@ Your left-click mode is saved on your computer and is independent of MCM profile
 **Before you do anything, install [BG3 Script Extender](https://github.com/Norbyte/bg3se/releases/latest) and [Native Mod Loader](https://www.nexusmods.com/baldursgate3/mods/944)... and use [BG3 Mod Manager](https://github.com/LaughingLeader/BG3ModManager/releases/latest) ya animal!**
 
 1. Download this mod manually.
-2. In BG3 Mod Manager, select **File > Import Mod** and choose the downloaded `BestofHands-v2.4.0.zip`.
+2. In BG3 Mod Manager, select **File > Import Mod** and choose the downloaded `BestofHands-v2.4.1.zip`.
 3. Move *Best of Hands - Quick Lockpick & Disarm* to the **Active Mods** side.
 4. Export the load order to the game.
 5. Navigate to your game folder (typically `C:\Program Files (x86)\Steam\steamapps\common\Baldurs Gate 3` for Steam installs).
-6. Open the downloaded `BestofHands-v2.4.0.zip`.
+6. Open the downloaded `BestofHands-v2.4.1.zip`.
 7. Drag the **bin** folder from the ZIP file into your game folder.
 8. Profit!
 
