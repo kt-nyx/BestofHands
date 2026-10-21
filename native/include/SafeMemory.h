@@ -3,6 +3,7 @@
 
 #include <Windows.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -98,6 +99,32 @@ bool SafeRead(void const* source, T& value) noexcept
     value = observed;
     return true;
 }
+
+// Capture a bounded read-only part of a game object in one fault-guarded copy.
+// This is not an atomic engine snapshot: callers still validate object/roll
+// identity. It neither queries page metadata nor changes write/call preflights.
+template <std::size_t Size>
+class ReadOnlySnapshot {
+public:
+    bool Capture(void const* source) noexcept
+    {
+        return SafeRead(source, bytes_);
+    }
+
+    // Call only after Capture succeeds. memcpy handles unaligned game fields.
+    template <class T, std::size_t Offset>
+    T Field() const noexcept
+    {
+        static_assert(std::is_trivially_copyable_v<T>);
+        static_assert(Offset <= Size && sizeof(T) <= Size - Offset);
+        T value{};
+        std::memcpy(&value, bytes_.data() + Offset, sizeof(value));
+        return value;
+    }
+
+private:
+    std::array<std::byte, Size> bytes_{};
+};
 
 template <class T>
 bool SafeWrite(void* destination, T const& value) noexcept

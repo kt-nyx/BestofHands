@@ -343,7 +343,7 @@ foreach ($requiredClientPresentationSurface in @(
     'client_profile_mapping_removed',
     'client_quick_lockpick_queued',
     'dc_active_roll_trace',
-    'saveLeftClickSnapshot',
+    'automaticEligible',
     'SendToServer',
     'rollUuid',
     'specialistHandle'
@@ -393,7 +393,6 @@ foreach ($requiredMissingToolSurface in @(
 foreach ($requiredQuickLockpickSurface in @(
     '"quick=" .. record.request',
     'operation = "queued"',
-    '"eligible=" .. record.initiator',
     'tostring(record.targetNetId)'
 )) {
     if (-not $clientPresentationText.Contains($requiredQuickLockpickSurface)) {
@@ -481,7 +480,6 @@ foreach ($requiredNativeMarker in @(
     'kClientInputControllerUpdateSignature',
     'kClientSetRunningTaskSignature',
     'FindStockCharacterTask',
-    'BuildLeftClickRoutingSnapshot',
     'g_clientGetCharacterTaskProcedure',
     'StockLockpickTaskConfiguration',
     'activation=engine_set_running_task',

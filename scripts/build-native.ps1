@@ -96,7 +96,9 @@ if ($Configuration -eq 'Release') {
     }
     Write-Host 'Verified release DLL contains no disabled native trace payloads.'
     if (-not $PerformanceDiagnostics) {
-        foreach ($marker in @('perf_diagnostics_enabled', 'roll_profile')) {
+        # Metric names may remain as inert constant data. Output/enable markers
+        # identify the compiled diagnostic paths; names alone do not.
+        foreach ($marker in @('perf_diagnostics_enabled', 'roll_profile', 'runtime_profile')) {
             if ($ascii.Contains($marker)) {
                 throw "Release DLL retained disabled performance payload '$marker': $dll"
             }
@@ -104,7 +106,7 @@ if ($Configuration -eq 'Release') {
         Write-Host 'Verified release DLL contains no disabled performance payloads.'
     }
     else {
-        foreach ($marker in @('perf_diagnostics_enabled', 'roll_profile')) {
+        foreach ($marker in @('perf_diagnostics_enabled', 'roll_profile', 'runtime_profile', 'snapshot_read')) {
             if (-not $ascii.Contains($marker)) {
                 throw "Diagnostic DLL is missing performance payload '$marker': $dll"
             }

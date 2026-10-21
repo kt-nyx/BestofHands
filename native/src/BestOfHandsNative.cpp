@@ -7,6 +7,8 @@
 #include "QuickLockpickState.h"
 #include "SafeMemory.h"
 #include "StatusPublication.h"
+#include "RuntimeDiagnostics.h"
+#include "BridgeFileWatcher.h"
 
 #include <Windows.h>
 #include <ShlObj.h>
@@ -858,30 +860,25 @@ std::wstring g_session;
 std::string g_sessionUtf8;
 fs::path g_actionPath;
 fs::path g_clientActionPath;
-fs::path g_leftClickActionPath;
 fs::path g_statusPath;
 fs::path g_logPath;
 std::mutex g_logMutex;
 std::mutex g_statusMutex;
+std::string g_queuedStatus;
 boh::StatusPublication g_statusPublication;
 std::string g_statusWriteFailure;
 std::mutex g_documentRefreshMutex;
 std::mutex g_clientDocumentRefreshMutex;
-std::mutex g_leftClickDocumentRefreshMutex;
 std::mutex g_hookFailureMutex;
 std::shared_mutex g_documentMutex;
 boh::BridgeDocument g_document;
 std::shared_mutex g_clientDocumentMutex;
 boh::ClientBridgeDocument g_clientDocument;
-std::shared_mutex g_leftClickDocumentMutex;
-boh::LeftClickRoutingSnapshot g_leftClickDocument;
 std::string g_hookFailure;
 std::optional<fs::file_time_type> g_actionWriteTime;
 std::optional<fs::file_time_type> g_clientActionWriteTime;
-std::optional<fs::file_time_type> g_leftClickActionWriteTime;
 ULONGLONG g_actionReadRetryAfter{};
 ULONGLONG g_clientReadRetryAfter{};
-ULONGLONG g_leftClickReadRetryAfter{};
 std::mutex g_profileTraceMutex;
 std::unordered_map<std::uint64_t, std::uint64_t> g_profilePasses;
 std::mutex g_clientPresentationLeaseMutex;
@@ -931,6 +928,7 @@ enum class PerfMetric : std::size_t {
     SetPresentationType,
     SetNamePresentation,
     SetResolvedValue,
+    SnapshotRead,
     Count,
 };
 
@@ -965,6 +963,7 @@ constexpr std::array<std::string_view,
     "set_presentation_type",
     "set_name_presentation",
     "set_resolved_value",
+    "snapshot_read",
 };
 static_assert(kPerfMetricNames.size()
     == static_cast<std::size_t>(PerfMetric::Count));
@@ -1421,6 +1420,7 @@ void FlushCompletedPerfRolls()
 
 bool IsReadable(void const* pointer, std::size_t size = 1)
 {
+    boh::RuntimeScope runtime(boh::RuntimeMetric::MemoryRegion);
     PerfScope perf(PerfMetric::MemoryProbe);
     if (pointer == nullptr || size == 0) {
         return false;
@@ -1439,6 +1439,7 @@ bool IsReadable(void const* pointer, std::size_t size = 1)
 
 bool IsCommittedDataRange(void const* pointer, std::size_t size)
 {
+    boh::RuntimeScope runtime(boh::RuntimeMetric::MemoryRegion);
     if (pointer == nullptr || size == 0) {
         return false;
     }
@@ -1459,6 +1460,7 @@ bool IsCommittedDataRange(void const* pointer, std::size_t size)
 
 bool IsExecutableGameAddress(void const* pointer)
 {
+    boh::RuntimeScope runtime(boh::RuntimeMetric::MemoryRegion);
     if (pointer == nullptr || g_build == nullptr) {
         return false;
     }
@@ -1487,6 +1489,14 @@ template <class T>
 bool Read(void const* pointer, T& value)
 {
     return boh::SafeRead(pointer, value);
+}
+
+template <std::size_t Size>
+bool CaptureReadOnly(void const* pointer, boh::ReadOnlySnapshot<Size>& snapshot)
+{
+    PerfScope perf(PerfMetric::SnapshotRead);
+    boh::RuntimeScope runtime(boh::RuntimeMetric::SnapshotRead);
+    return snapshot.Capture(pointer);
 }
 
 template <class T>
@@ -2200,6 +2210,7 @@ bool FreezeClientPresentationAdvantage(
 
 std::optional<fs::file_time_type> LastWrite(fs::path const& path)
 {
+    boh::RuntimeScope runtime(boh::RuntimeMetric::FileTimestamp);
     std::error_code error;
     auto const value = fs::last_write_time(path, error);
     return error ? std::optional<fs::file_time_type>{} : value;
@@ -2207,6 +2218,7 @@ std::optional<fs::file_time_type> LastWrite(fs::path const& path)
 
 std::string ReadAll(fs::path const& path)
 {
+    boh::RuntimeScope runtime(boh::RuntimeMetric::FileRead);
     std::ifstream input(path, std::ios::binary | std::ios::ate);
     if (!input) {
         return {};
@@ -2227,6 +2239,7 @@ std::string ReadAll(fs::path const& path)
 
 bool AtomicWrite(fs::path const& path, std::string const& contents, std::string& failure)
 {
+    boh::RuntimeScope runtime(boh::RuntimeMetric::StatusWrite);
     // Startup may have failed to create this directory while storage was
     // unavailable. Retry it along with publication after storage recovers.
     std::error_code directoryError;
@@ -2259,7 +2272,7 @@ bool AtomicWrite(fs::path const& path, std::string const& contents, std::string&
     return true;
 }
 
-// Caller holds g_statusMutex; never acquires bridge/world locks here.
+// Worker only. Never hold a game-visible mutex across disk publication.
 void PublishPendingStatus()
 {
     g_statusPublication.Poll(GetTickCount64(), [](std::string const& payload) {
@@ -2283,7 +2296,12 @@ void PublishPendingStatus()
 
 void RetryStatusPublication()
 {
-    std::scoped_lock lock(g_statusMutex);
+    std::string queued;
+    {
+        std::scoped_lock lock(g_statusMutex);
+        queued.swap(g_queuedStatus);
+    }
+    if (!queued.empty()) g_statusPublication.Queue(std::move(queued));
     PublishPendingStatus();
 }
 
@@ -2299,7 +2317,6 @@ void WriteStatus(std::string_view state, std::string_view detail, std::string_vi
         if (g_handshakeDocument.nativeSession == g_sessionUtf8)
             clientAck = g_handshakeDocument.probe;
     }
-    std::scoped_lock lock(g_statusMutex);
     std::ostringstream status;
     status << "protocol=" << boh::kProtocolVersion << "\n"
            << "version=" << boh::kPluginVersion << "\n"
@@ -2346,8 +2363,13 @@ void WriteStatus(std::string_view state, std::string_view detail, std::string_vi
            << "cap_client_presentation=" << (g_codeHooksReady.load() ? "ready" : "unavailable") << "\n"
            << "detail=" << detail << "\n"
            << "end=1\n";
-    g_statusPublication.Queue(status.str());
-    PublishPendingStatus();
+    auto payload = status.str();
+    {
+        std::scoped_lock lock(g_statusMutex);
+        g_queuedStatus = std::move(payload);
+    }
+    // The worker owns disk publication. Game-side roll admission never waits
+    // for a rename/write-through while holding the action-refresh mutex.
 }
 
 void SetHookFailure(std::string value)
@@ -2395,6 +2417,7 @@ void WriteCurrentStatus(std::string_view ack)
 
 void RefreshLocalHandshake()
 {
+    boh::RuntimeScope runtime(boh::RuntimeMetric::Handshake);
     auto parsed = boh::ParseBridgeDocument(ReadAll(g_handshakePath));
     bool changed{};
     {
@@ -2414,12 +2437,16 @@ void RefreshLocalHandshake()
 
 void RefreshDocument(bool force, bool waitForLock = true)
 {
+    boh::RuntimeScope runtime(boh::RuntimeMetric::ActionRefresh);
     std::unique_lock refreshLock(
         g_documentRefreshMutex, std::defer_lock);
-    if (waitForLock) {
-        refreshLock.lock();
-    } else if (!refreshLock.try_lock()) {
-        return;
+    {
+        boh::RuntimeScope wait(boh::RuntimeMetric::RefreshLockWait);
+        if (waitForLock) {
+            refreshLock.lock();
+        } else if (!refreshLock.try_lock()) {
+            return;
+        }
     }
     if (!force && GetTickCount64() < g_actionReadRetryAfter) return;
     auto const writeTime = LastWrite(g_actionPath);
@@ -2452,6 +2479,7 @@ void RefreshDocument(bool force, bool waitForLock = true)
 
 void RefreshClientDocument(bool force)
 {
+    boh::RuntimeScope runtime(boh::RuntimeMetric::ClientRefresh);
     std::scoped_lock refreshLock(g_clientDocumentRefreshMutex);
     if (!force && GetTickCount64() < g_clientReadRetryAfter) return;
     auto const writeTime = LastWrite(g_clientActionPath);
@@ -2502,42 +2530,25 @@ void RefreshClientDocument(bool force)
     }
 }
 
-void RefreshLeftClickDocument(bool force)
-{
-    std::scoped_lock refreshLock(g_leftClickDocumentRefreshMutex);
-    if (!force && GetTickCount64() < g_leftClickReadRetryAfter) return;
-    auto const writeTime = LastWrite(g_leftClickActionPath);
-    if (!force && writeTime == g_leftClickActionWriteTime) {
-        return;
-    }
-    auto parsed = boh::BuildLeftClickRoutingSnapshot(
-        boh::ParseClientBridgeDocument(ReadAll(g_leftClickActionPath)));
-    g_leftClickActionWriteTime = parsed.valid ? writeTime : std::nullopt;
-    g_leftClickReadRetryAfter = parsed.valid ? 0 : GetTickCount64() + 25;
-    {
-        std::unique_lock lock(g_leftClickDocumentMutex);
-        g_leftClickDocument = std::move(parsed);
-    }
-}
-
 std::optional<boh::ProfileSelection> FindProfileRecord(
     void const* component, bool* usedClientLease = nullptr, bool server = false)
 {
+    // Synchronous visibility belongs to an actual roll boundary, not every
+    // world update. This also covers a roll preceding the worker notification.
+    if (server) RefreshDocument(false);
+    else RefreshClientDocument(false);
     if (usedClientLease != nullptr) {
         *usedClientLease = false;
     }
-    if (!IsReadable(component, kMinimumRequestedRollBytes)) {
+    boh::ReadOnlySnapshot<kMinimumRequestedRollBytes> snapshot;
+    if (!CaptureReadOnly(component, snapshot)) {
         return {};
     }
     boh::RequestedRollIdentity identity;
-    auto const bytes = static_cast<std::byte const*>(component);
-    std::array<std::uint8_t, 16> rollUuid{};
-    if (!Read(bytes + kRequestedRollRollEntityOffset, identity.roll)
-        || !Read(bytes + kRequestedRollRollUuidOffset, rollUuid)
-        || !Read(bytes + kRequestedRollRollerOffset, identity.roller)
-        || !Read(bytes + kRequestedRollSubjectOffset, identity.subject)) {
-        return {};
-    }
+    identity.roll = snapshot.Field<std::uint64_t, kRequestedRollRollEntityOffset>();
+    auto const rollUuid = snapshot.Field<std::array<std::uint8_t, 16>, kRequestedRollRollUuidOffset>();
+    identity.roller = snapshot.Field<std::uint64_t, kRequestedRollRollerOffset>();
+    identity.subject = snapshot.Field<std::uint64_t, kRequestedRollSubjectOffset>();
     identity.rollUuid = boh::FormatGuid(rollUuid);
 
     std::optional<boh::ProfileSelection> selection;
@@ -2898,16 +2909,14 @@ void ClientRollStartMidHook(safetyhook::Context& context) noexcept
             DrainDeferredClientViewModelReleases();
         }
         auto const activeRoll = reinterpret_cast<void*>(context.rcx);
-        if (!IsReadable(activeRoll, kActiveRollVmRollOffset + sizeof(void*))) {
+        boh::ReadOnlySnapshot<kActiveRollVmRollOffset + sizeof(void*) - kActiveRollStateOffset> snapshot;
+        if (activeRoll == nullptr || !CaptureReadOnly(
+                At<void>(activeRoll, kActiveRollStateOffset), snapshot)) {
             return;
         }
-
-        std::uint32_t rollState{};
-        void* vmRoll{};
-        if (!Read(At<std::uint32_t>(
-                    activeRoll, kActiveRollStateOffset), rollState)
-            || !Read(At<void*>(activeRoll, kActiveRollVmRollOffset), vmRoll)
-            || vmRoll == nullptr) {
+        auto const rollState = snapshot.Field<std::uint32_t, 0>();
+        auto const vmRoll = snapshot.Field<void*, kActiveRollVmRollOffset - kActiveRollStateOffset>();
+        if (vmRoll == nullptr) {
             return;
         }
 
@@ -3003,16 +3012,14 @@ void ClientRollPayloadReadyMidHook(safetyhook::Context& context) noexcept
             std::exchange(g_pendingRollPayloadVmRoll, 0);
         auto const activeRoll =
             reinterpret_cast<void*>(activeRollAddress);
-        if (!IsReadable(activeRoll,
-                kActiveRollVmRollOffset + sizeof(void*))) {
+        boh::ReadOnlySnapshot<kActiveRollVmRollOffset + sizeof(void*) - kActiveRollStateOffset> snapshot;
+        if (activeRoll == nullptr || !CaptureReadOnly(
+                At<void>(activeRoll, kActiveRollStateOffset), snapshot)) {
             return;
         }
-
-        std::uint32_t rollState{};
-        void* vmRoll{};
-        if (!Read(At<void>(activeRoll, kActiveRollStateOffset), rollState)
-            || rollState != 1
-            || !Read(At<void*>(activeRoll, kActiveRollVmRollOffset), vmRoll)
+        auto const rollState = snapshot.Field<std::uint32_t, 0>();
+        auto const vmRoll = snapshot.Field<void*, kActiveRollVmRollOffset - kActiveRollStateOffset>();
+        if (rollState != 1
             || vmRoll == nullptr
             || reinterpret_cast<std::uintptr_t>(vmRoll) != expectedVmRoll
             || !FindClientPresentationLeaseByVmRoll(
@@ -3074,19 +3081,13 @@ void ClientRollResultMidHook(safetyhook::Context& context) noexcept
             return;
         }
         auto const result = reinterpret_cast<void*>(context.rbx);
-        if (!IsReadable(result, kMinimumRollResultBytes)) {
+        boh::ReadOnlySnapshot<kMinimumRollResultBytes> snapshot;
+        if (!CaptureReadOnly(result, snapshot)) {
             return;
         }
-        std::uint8_t natural{};
-        std::uint8_t discarded{};
-        std::int8_t modifier{};
-        if (!Read(At<std::uint8_t>(result, kRollResultNaturalOffset), natural)
-            || !Read(At<std::uint8_t>(
-                    result, kRollResultDiscardedOffset), discarded)
-            || !Read(At<std::int8_t>(
-                    result, kRollResultModifierOffset), modifier)) {
-            return;
-        }
+        auto const natural = snapshot.Field<std::uint8_t, kRollResultNaturalOffset>();
+        auto const discarded = snapshot.Field<std::uint8_t, kRollResultDiscardedOffset>();
+        auto const modifier = snapshot.Field<std::int8_t, kRollResultModifierOffset>();
 
         auto const activeRoll = reinterpret_cast<void*>(context.rdi);
         auto* fallback = At<std::uint8_t>(
@@ -6227,18 +6228,13 @@ void ClientRollFinalizeMidHook(safetyhook::Context& context) noexcept
         }
 
         auto const result = reinterpret_cast<void*>(context.rbx);
-        std::uint8_t natural{};
-        std::uint8_t discarded{};
-        std::int8_t modifier{};
-        if (!IsReadable(result, kMinimumRollResultBytes)
-            || !Read(At<std::uint8_t>(
-                    result, kRollResultNaturalOffset), natural)
-            || !Read(At<std::uint8_t>(
-                    result, kRollResultDiscardedOffset), discarded)
-            || !Read(At<std::int8_t>(
-                    result, kRollResultModifierOffset), modifier)) {
+        boh::ReadOnlySnapshot<kMinimumRollResultBytes> snapshot;
+        if (!CaptureReadOnly(result, snapshot)) {
             return;
         }
+        auto const natural = snapshot.Field<std::uint8_t, kRollResultNaturalOffset>();
+        auto const discarded = snapshot.Field<std::uint8_t, kRollResultDiscardedOffset>();
+        auto const modifier = snapshot.Field<std::int8_t, kRollResultModifierOffset>();
 
         // The client result's discarded-die byte may still be stale here even
         // though the authoritative specialist result contains the second die.
@@ -6901,7 +6897,9 @@ bool WritePointer(void** slot, void* value)
 
 void RefreshingModifierSystemHook(void* system, void* world, void* gameTime)
 {
-    RefreshDocument(false);
+    {
+        boh::RuntimeScope runtime(boh::RuntimeMetric::GameRefresh);
+    }
     auto const original = g_modifierOriginal;
     if (original != nullptr) {
         original(system, world, gameTime);
@@ -6910,7 +6908,9 @@ void RefreshingModifierSystemHook(void* system, void* world, void* gameTime)
 
 void RefreshingRollSystemHook(void* system, void* world, void* gameTime)
 {
-    RefreshDocument(false);
+    {
+        boh::RuntimeScope runtime(boh::RuntimeMetric::GameRefresh);
+    }
     auto const original = g_rollOriginal;
     if (original != nullptr) {
         original(system, world, gameTime);
@@ -6988,16 +6988,21 @@ bool PatchSystem(std::string_view name, void* world, std::uintptr_t indexRva,
     return true;
 }
 
-bool ValidateInstalledSystemHooks(void* world, std::string& failure)
+bool ValidateInstalledSystemHooks(void* world, std::string& failure, bool full = true)
 {
+    // Idle observations retain exact slot/original identity and fault-guarded
+    // reads. Region/protection queries are repeated at bridge changes; those
+    // queries are disproportionately expensive in large BG3
+    // allocations. Installation/replacement still uses the complete preflight.
+    boh::RuntimeScope runtime(boh::RuntimeMetric::InstalledValidation);
     if (world == nullptr || world != g_serverWorld.load()) {
         failure = "installed_hook_world_mismatch";
         return false;
     }
     if (g_modifierUpdateSlot == nullptr
         || g_rollUpdateSlot == nullptr
-        || !IsCommittedDataRange(g_modifierUpdateSlot, sizeof(void*))
-        || !IsCommittedDataRange(g_rollUpdateSlot, sizeof(void*))) {
+        || (full && (!IsCommittedDataRange(g_modifierUpdateSlot, sizeof(void*))
+            || !IsCommittedDataRange(g_rollUpdateSlot, sizeof(void*))))) {
         failure = "installed_hook_slots_unavailable";
         return false;
     }
@@ -7026,10 +7031,10 @@ bool ValidateInstalledSystemHooks(void* world, std::string& failure)
         failure = "installed_hook_pointer_mismatch";
         return false;
     }
-    if (!IsExecutableGameAddress(
+    if (full && (!IsExecutableGameAddress(
             reinterpret_cast<void const*>(modifierOriginal))
         || !IsExecutableGameAddress(
-            reinterpret_cast<void const*>(rollOriginal))) {
+            reinterpret_cast<void const*>(rollOriginal)))) {
         failure = "installed_hook_originals_not_game_executable";
         return false;
     }
@@ -7285,16 +7290,17 @@ bool ResolveCompatibleBuild()
 
 void* ServerWorld()
 {
+    boh::RuntimeScope runtime(boh::RuntimeMetric::WorldObservation);
     if (g_build == nullptr) {
         return nullptr;
     }
     auto const base = reinterpret_cast<std::uintptr_t>(g_gameModule);
     void* server{};
     void* world{};
+    // Read is an SEH-guarded copy: inaccessible pointers fail closed. Querying
+    // the entire server allocation's memory region is unnecessary for a read.
     if (!Read(reinterpret_cast<void const*>(base + g_build->serverGlobalRva), server)
         || server == nullptr
-        || !IsCommittedDataRange(
-            At<void*>(server, g_build->serverWorldOffset), sizeof(void*))
         || !Read(At<void*>(server, g_build->serverWorldOffset), world)) {
         return nullptr;
     }
@@ -7337,8 +7343,6 @@ DWORD WINAPI Worker(void*)
     g_actionPath = root / L"Script Extender" / L"BestOfHandsNative.actions";
     g_handshakePath = root / L"Script Extender" / L"BestOfHandsNative.handshake";
     g_clientActionPath = root / L"Script Extender" / L"BestOfHandsNative.client";
-    g_leftClickActionPath =
-        root / L"Script Extender" / L"BestOfHandsNative.leftclick";
     g_statusPath = root / L"Script Extender" / L"BestOfHandsNative.status";
     g_logPath = root / L"Script Extender Logs" / L"BestOfHandsNative.log";
     Log("INFO", "native_storage", "status=" + Narrow(g_statusPath.wstring())
@@ -7412,20 +7416,55 @@ DWORD WINAPI Worker(void*)
             g_document, g_sessionUtf8);
     };
 
+    boh::BridgeFileWatcher watcher(g_actionPath.parent_path());
+    unsigned retryFiles{};
+    unsigned retryBudget{};
+    ULONGLONG retryAfter{};
+
     while (!g_stop.load()) {
+        // The timed wait also permits tiny, SEH-guarded lifecycle observations.
+        // Stable gameplay does no file polling or VirtualQuery calls here.
+        auto const changed = watcher.Poll(25);
+        boh::FlushRuntimeDiagnostics([](std::string const& fields) {
+            Log("PERF", "runtime_profile", fields);
+        });
+        if (changed & boh::BridgeFileWatcher::Status) {
+            auto const desired = g_statusPublication.Text();
+            if (!desired.empty() && ReadAll(g_statusPath) != desired) {
+                g_statusPublication.Queue(desired, true);
+            }
+        }
         RetryStatusPublication();
-        // Game-thread hooks synchronously refresh this document before profile
-        // evaluation. The worker is only a fallback and must not make those
-        // hooks wait behind background parsing.
-        RefreshDocument(false, false);
-        RefreshLocalHandshake();
-        RefreshClientDocument(false);
-        RefreshLeftClickDocument(false);
+        auto const inputs = changed & (boh::BridgeFileWatcher::Actions
+            | boh::BridgeFileWatcher::Handshake | boh::BridgeFileWatcher::Client);
+        if (inputs) {
+            retryFiles |= inputs;
+            retryBudget = 3;
+            retryAfter = 0;
+        }
+        if (retryFiles && GetTickCount64() >= retryAfter) {
+            if (retryFiles & boh::BridgeFileWatcher::Actions) {
+                RefreshDocument(true, false);
+                std::shared_lock lock(g_documentMutex);
+                if (g_document.valid) retryFiles &= ~boh::BridgeFileWatcher::Actions;
+            }
+            if (retryFiles & boh::BridgeFileWatcher::Handshake) {
+                RefreshLocalHandshake();
+                std::scoped_lock lock(g_handshakeMutex);
+                if (g_handshakeDocument.valid) retryFiles &= ~boh::BridgeFileWatcher::Handshake;
+            }
+            if (retryFiles & boh::BridgeFileWatcher::Client) {
+                RefreshClientDocument(true);
+                std::shared_lock lock(g_clientDocumentMutex);
+                if (g_clientDocument.valid) retryFiles &= ~boh::BridgeFileWatcher::Client;
+            }
+            retryAfter = GetTickCount64() + 100;
+            if (retryBudget && --retryBudget == 0) retryFiles = 0;
+        }
         if (!quickInstallAttempted || !delegatedInstallAttempted) {
             if (!bridgeAllowsNativeHooks()) {
                 worldGate.Reset();
                 FlushCompletedPerfRolls();
-                Sleep(25);
                 continue;
             }
             if (!quickInstallAttempted) {
@@ -7472,7 +7511,7 @@ DWORD WINAPI Worker(void*)
                 && installedHooks
                 && candidateWorld == installedWorld
                 && !ValidateInstalledSystemHooks(
-                    candidateWorld, rejection)) {
+                    candidateWorld, rejection, inputs != 0)) {
                 Log("ERROR", "installed_hook_integrity_lost",
                     "detail=" + rejection + "|world="
                     + Hex(reinterpret_cast<std::uintptr_t>(
@@ -7490,7 +7529,6 @@ DWORD WINAPI Worker(void*)
                     g_clientDocument.records.clear();
                 }
                 ClearClientPresentationLeases("delegated_integrity_lost");
-                Sleep(25);
                 continue;
             }
             if (candidateWorld != nullptr
@@ -7516,7 +7554,6 @@ DWORD WINAPI Worker(void*)
             observationEnabled);
         if (!decision.ready) {
             FlushCompletedPerfRolls();
-            Sleep(25);
             continue;
         }
         auto const world = reinterpret_cast<void*>(decision.value);
@@ -7572,7 +7609,6 @@ DWORD WINAPI Worker(void*)
             }
         }
         FlushCompletedPerfRolls();
-        Sleep(25);
     }
     EndActivePerfRoll(true);
     FlushCompletedPerfRolls();
@@ -7583,6 +7619,7 @@ DWORD WINAPI Worker(void*)
     RestoreSystemHooks();
     g_codeHooksReady.store(false);
     WriteStatus("stopped", "native plugin stopped", "");
+    RetryStatusPublication();
     return 0;
 }
 

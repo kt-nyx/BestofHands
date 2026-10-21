@@ -2,11 +2,11 @@
 
 cmake_minimum_required(VERSION 3.28)
 
-project(BestOfHandsNative VERSION 2.4.0 LANGUAGES CXX RC)
+project(BestOfHandsNative VERSION 2.4.1 LANGUAGES CXX RC)
 
 option(BEST_OF_HANDS_BUILD_TESTS "Build native unit tests" ON)
 option(BEST_OF_HANDS_PERF_DIAGNOSTICS
-    "Enable low-overhead per-roll native timing summaries" OFF)
+    "Enable per-roll and aggregate native timing summaries" OFF)
 
 include(CheckIPOSupported)
 check_ipo_supported(RESULT BEST_OF_HANDS_IPO_SUPPORTED)
@@ -88,4 +88,12 @@ if(BEST_OF_HANDS_BUILD_TESTS)
         target_compile_options(BestOfHandsNativeTests PRIVATE -UNDEBUG)
     endif()
     add_test(NAME BestOfHandsNativeTests COMMAND BestOfHandsNativeTests)
+    add_executable(BestOfHandsReadBenchmark tests/ReadSnapshotBenchmark.cpp)
+    target_include_directories(BestOfHandsReadBenchmark PRIVATE include)
+    target_compile_features(BestOfHandsReadBenchmark PRIVATE cxx_std_20)
+    set_target_properties(BestOfHandsReadBenchmark PROPERTIES
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    if(MSVC)
+        target_compile_options(BestOfHandsReadBenchmark PRIVATE /W4 /WX /permissive- /utf-8 /EHsc)
+    endif()
 endif()

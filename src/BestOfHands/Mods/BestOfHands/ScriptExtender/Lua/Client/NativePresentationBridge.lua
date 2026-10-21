@@ -3,7 +3,6 @@
 local NativePresentationBridge = {}
 local ACTION_FILE = "BestOfHandsNative.actions"
 local CLIENT_FILE = "BestOfHandsNative.client"
-local LEFT_CLICK_FILE = "BestOfHandsNative.leftclick"
 local PROTOCOL = "9"
 local GUID_PATTERN = "%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x"
 local SAVE_RETRY_DELAYS_MS = { 250, 1000, 5000 }
@@ -86,6 +85,19 @@ local function positiveInteger(value)
     return number
 end
 
+local function sameActionIdentity(left, right)
+    return left ~= nil and right ~= nil and left.action == right.action
+        and (objectGuid(left.rollUuid) or "0") == (objectGuid(right.rollUuid) or "0")
+        and objectGuid(left.initiatorUuid) == objectGuid(right.initiatorUuid)
+        and objectGuid(left.specialistUuid) == objectGuid(right.specialistUuid)
+        and objectGuid(left.targetUuid) == objectGuid(right.targetUuid)
+end
+
+local function sameActionRecord(left, right)
+    return sameActionIdentity(left, right)
+        and (tonumber(left.presentationAdvantage) or -1) == (tonumber(right.presentationAdvantage) or -1)
+end
+
 local function write(level, event, fields)
     local keys = {}
     for key, _ in pairs(fields or {}) do
@@ -109,18 +121,21 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
     local tracked = {}
     local clientRecords = {}
     local quickRequests = {}
-    local leftClickInitiators = {}
-    local lockedTargets = {}
-    local invalidatedLockedTargets = {}
     local lastSession = ""
     local lastProbe = ""
-    local lastLeftClickPayload = ""
     local traceEnabled = settings.TRACE_EVENTS == true
-    local scheduleLeftClickSnapshot
     local saveClientRecords
     local clientRecordsSaveRetryPending = false
     local clientRecordsSaveRetryAttempt = 0
     local remoteSnapshot = nil
+    local observedRolls = {}
+    local needsFullResync = true
+    local lastClientPayload = nil
+
+    local function clientFileIsCurrent(payload)
+        local ok, contents = pcall(Ext.IO.LoadFile, CLIENT_FILE)
+        return ok and contents == payload
+    end
 
     local function scheduleClientRecordsSaveRetry()
         if clientRecordsSaveRetryPending then
@@ -133,7 +148,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
         )
         local function retry()
             clientRecordsSaveRetryPending = false
-            saveClientRecords()
+            saveClientRecords(true)
         end
         if Ext.Timer ~= nil
             and type(Ext.Timer.WaitFor) == "function" then
@@ -151,7 +166,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
     end
 
     local function loadActionText()
-        local ok, text = pcall(Ext.IO.LoadFile, ACTION_FILE)
+        local ok, text
         if nativeSession ~= nil then
             local localSession = nativeSession.GetSession()
             if localSession == "" then return nil end
@@ -171,9 +186,14 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
                 end
                 lines[#lines + 1] = "end=1"
                 text, ok = table.concat(lines, "\n") .. "\n", true
-            elseif ok and type(text) == "string" then
-                text = text:gsub("native_session=[^\r\n]*", "native_session=" .. localSession)
+            else
+                ok, text = pcall(Ext.IO.LoadFile, ACTION_FILE)
+                if ok and type(text) == "string" then
+                    text = text:gsub("native_session=[^\r\n]*", "native_session=" .. localSession)
+                end
             end
+        else
+            ok, text = pcall(Ext.IO.LoadFile, ACTION_FILE)
         end
         if not ok or type(text) ~= "string" then
             traceEnabled = false
@@ -200,10 +220,8 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
             tracked = {}
             clientRecords = {}
             quickRequests = {}
-            leftClickInitiators = {}
-            lockedTargets = {}
-            invalidatedLockedTargets = {}
-            lastLeftClickPayload = ""
+            needsFullResync = true
+            lastClientPayload = nil
         end
         return text
     end
@@ -254,7 +272,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
         return records
     end
 
-    saveClientRecords = function()
+    saveClientRecords = function(force)
         if lastSession == "" then
             return false
         end
@@ -299,12 +317,15 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
             }, "\t")
         end
         lines[#lines + 1] = "end=1"
+        local payload = table.concat(lines, "\n") .. "\n"
+        if not force and payload == lastClientPayload and clientFileIsCurrent(payload) then return true end
         local ok, result = pcall(
             Ext.IO.SaveFile,
             CLIENT_FILE,
-            table.concat(lines, "\n") .. "\n"
+            payload
         )
         if not ok or result == false then
+            lastClientPayload = nil
             write("ERROR", "client_profile_bridge_write_failed", {
                 error = ok and "save_returned_false" or result,
                 file = CLIENT_FILE,
@@ -313,63 +334,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
             return false
         end
         clientRecordsSaveRetryAttempt = 0
-        return true
-    end
-
-    local function saveLeftClickSnapshot()
-        if lastSession == "" then
-            return false
-        end
-        local lines = {
-            "protocol=" .. PROTOCOL,
-            "pak_version=" .. settings.VERSION,
-            "native_session=" .. lastSession,
-            "trace=" .. (traceEnabled and "1" or "0"),
-        }
-        local initiatorValues = {}
-        for _, record in pairs(leftClickInitiators) do
-            initiatorValues[#initiatorValues + 1] = record
-        end
-        table.sort(initiatorValues, function(left, right)
-            return left.initiator < right.initiator
-        end)
-        for _, record in ipairs(initiatorValues) do
-            lines[#lines + 1] = table.concat({
-                "eligible=" .. record.initiator,
-                record.eligible and "1" or "0",
-            }, "\t")
-        end
-        local targetValues = {}
-        for _, record in pairs(lockedTargets) do
-            targetValues[#targetValues + 1] = record
-        end
-        table.sort(targetValues, function(left, right)
-            return left.target < right.target
-        end)
-        for _, record in ipairs(targetValues) do
-            lines[#lines + 1] = table.concat({
-                "locked=" .. record.target,
-                tostring(record.netId),
-            }, "\t")
-        end
-        lines[#lines + 1] = "end=1"
-        local payload = table.concat(lines, "\n") .. "\n"
-        if payload == lastLeftClickPayload then
-            return true
-        end
-        local ok, result = pcall(
-            Ext.IO.SaveFile,
-            LEFT_CLICK_FILE,
-            payload
-        )
-        if not ok or result == false then
-            write("ERROR", "client_left_click_bridge_write_failed", {
-                error = ok and "save_returned_false" or result,
-                file = LEFT_CLICK_FILE,
-            })
-            return false
-        end
-        lastLeftClickPayload = payload
+        lastClientPayload = payload
         return true
     end
 
@@ -382,37 +347,6 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
         local dialog = safeField(entity, "ClientCharacter")
         if dialog ~= nil and safeField(dialog, "InDialog") == true then return false end
         return true
-    end
-
-    local function refreshLeftClickSnapshot()
-        if loadActionText() == nil then
-            return false
-        end
-
-        local initiators = {}
-        local controlled = Ext.Entity.GetAllEntitiesWithComponent(
-            "ClientControl"
-        ) or {}
-        for _, entity in pairs(controlled) do
-            local initiator = entityHandle(entity)
-            if initiator ~= nil then
-                local initiatorKey = initiator:lower()
-                initiators[initiatorKey] = {
-                    eligible = automaticEligible(entity),
-                    initiator = initiatorKey,
-                }
-            end
-        end
-
-        -- Let vanilla Use and its story permission scripts run first. This
-        -- file carries only actor eligibility; no object is preemptively
-        -- converted to Lockpick. The server's GLO_UsedLockedItem event owns
-        -- automatic admission after vanilla excludes story-handled uses.
-        local targets = {}
-
-        leftClickInitiators = initiators
-        lockedTargets = targets
-        return saveLeftClickSnapshot()
     end
 
     local function classify(entity, component)
@@ -451,6 +385,15 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
     end
 
     local function mapClientProfile(entity, component)
+        local action = actionFromRoll(component)
+        if action ~= nil then
+            observedRolls[tostring(entity)] = {
+                entity = entity, action = action,
+                rollUuid = objectGuid(safeField(component, "RollUuid")),
+                initiatorUuid = objectGuid(entityGuid(safeField(component, "Roller"))),
+                targetUuid = objectGuid(entityGuid(safeField(component, "Subject"))),
+            }
+        end
         local record = classify(entity, component)
         if record == nil or record.rollUuid == nil then
             return nil
@@ -519,6 +462,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
 
     local function removeClientProfile(entity, component)
         local key = tostring(entity)
+        observedRolls[key] = nil
         local record = tracked[key]
         local rollUuid = objectGuid(
             component and safeField(component, "RollUuid") or nil
@@ -681,44 +625,6 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
         return true, nil
     end
 
-    local function invalidateLockedTarget(data)
-        local targetGuid = type(data) == "table"
-            and objectGuid(data.target)
-            or nil
-        if targetGuid == nil then
-            return false
-        end
-        invalidatedLockedTargets[targetGuid] = true
-        for targetHandle, record in pairs(lockedTargets) do
-            if record.guid == targetGuid then
-                invalidatedLockedTargets[targetHandle] = true
-                lockedTargets[targetHandle] = nil
-            end
-        end
-        local ok, targetHandle = pcall(
-            Ext.Entity.UuidToHandle,
-            targetGuid
-        )
-        local handle = ok and targetHandle and entityHandle(targetHandle) or nil
-        if handle ~= nil then
-            handle = handle:lower()
-            invalidatedLockedTargets[handle] = true
-            lockedTargets[handle] = nil
-        end
-        local saved = saveLeftClickSnapshot()
-        if not saved and type(scheduleLeftClickSnapshot) == "function" then
-            scheduleLeftClickSnapshot()
-        end
-        if traceEnabled then
-            trace("client_left_click_target_invalidated", {
-                saved = saved and 1 or 0,
-                target = targetGuid,
-                target_handle = handle,
-            })
-        end
-        return saved
-    end
-
     if quickLockpickChannel ~= nil then
         quickLockpickChannel:SetHandler(protected(
             "client_quick_lockpick_message_failed",
@@ -727,7 +633,7 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
                     return
                 end
                 if data.operation == "invalidate" then
-                    invalidateLockedTarget(data)
+                    -- No target routing cache remains; admission rechecks the real target.
                     return
                 end
                 if type(data.request) ~= "string" then
@@ -789,50 +695,40 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
         end
     ))
 
-    local snapshotRefreshPending = false
-    local snapshotRetryAttempt = 0
-    local function runLeftClickSnapshotRefresh()
-        snapshotRefreshPending = false
-        local ok, refreshed = xpcall(
-            refreshLeftClickSnapshot,
-            debug.traceback
-        )
-        if not ok then
-            write("ERROR", "client_left_click_snapshot_failed", {
-                error = refreshed,
-            })
-        end
-        if not ok or not refreshed then
-            if snapshotRefreshPending then
-                return
+    local function resyncClientProfiles(full, changedRecords)
+        if full then
+            -- Bootstrap and recovery discover rolls that predate this observer.
+            -- Ordinary metadata updates use our create/change/destroy cache.
+            needsFullResync = true
+            tracked, clientRecords, observedRolls = {}, {}, {}
+            for _, roll in pairs(Ext.Entity.GetAllEntitiesWithComponent("RequestedRoll") or {}) do
+                if roll.RequestedRoll ~= nil then mapClientProfile(roll, roll.RequestedRoll) end
             end
-            snapshotRefreshPending = true
-            snapshotRetryAttempt = math.min(
-                snapshotRetryAttempt + 1,
-                #SAVE_RETRY_DELAYS_MS
-            )
-            if Ext.Timer ~= nil
-                and type(Ext.Timer.WaitFor) == "function" then
-                Ext.Timer.WaitFor(
-                    SAVE_RETRY_DELAYS_MS[snapshotRetryAttempt],
-                    runLeftClickSnapshotRefresh
-                )
-            elseif snapshotRetryAttempt == 1
-                and type(Ext.OnNextTick) == "function" then
-                Ext.OnNextTick(runLeftClickSnapshotRefresh)
-            else
-                snapshotRefreshPending = false
-            end
+            needsFullResync = false
         else
-            snapshotRetryAttempt = 0
+            for key, observed in pairs(observedRolls) do
+                local affected = false
+                for _, record in ipairs(changedRecords) do
+                    if record.action == observed.action and (
+                        (observed.rollUuid ~= nil and observed.rollUuid == objectGuid(record.rollUuid))
+                        or (observed.initiatorUuid == objectGuid(record.initiatorUuid)
+                            and observed.targetUuid == objectGuid(record.targetUuid))) then
+                        affected = true
+                        break
+                    end
+                end
+                if affected then
+                    tracked[key] = nil
+                    local roll = Ext.Entity.Get(observed.entity)
+                    if roll ~= nil and roll.RequestedRoll ~= nil then
+                        mapClientProfile(observed.entity, roll.RequestedRoll)
+                    else
+                        observedRolls[key] = nil
+                    end
+                end
+            end
         end
-    end
-    scheduleLeftClickSnapshot = function()
-        if snapshotRefreshPending then
-            return
-        end
-        snapshotRefreshPending = true
-        Ext.OnNextTick(runLeftClickSnapshotRefresh)
+        return saveClientRecords(full)
     end
 
     if actionChannel ~= nil then
@@ -850,62 +746,56 @@ function NativePresentationBridge.Start(settings, quickLockpickChannel, features
                     or objectGuid(record.specialistUuid) == nil
                     or objectGuid(record.targetUuid) == nil then return end
             end
+            local previous = remoteSnapshot
+            local before, after, changedIds, changedRecords = {}, {}, {}, {}
+            for _, record in ipairs(previous and previous.records or {}) do before[tostring(record.id)] = record end
+            for _, record in ipairs(data.records) do after[tostring(record.id)] = record end
+            for id, record in pairs(before) do
+                if not sameActionRecord(record, after[id]) then
+                    changedIds[id] = true
+                    changedRecords[#changedRecords + 1] = record
+                end
+            end
+            for id, record in pairs(after) do
+                if not sameActionRecord(before[id], record) then
+                    changedIds[id] = true
+                    changedRecords[#changedRecords + 1] = record
+                end
+            end
             remoteSnapshot = data
-            loadActionText()
-            local retained = {}
-            for _, record in ipairs(data.records) do retained[tostring(record.id)] = true end
+            if loadActionText() == nil then needsFullResync = true; return end
+            local full = needsFullResync or previous == nil or previous.probe ~= data.probe
+            if not full and next(changedIds) == nil and lastClientPayload ~= nil
+                and (not not previous.trace) == (not not data.trace) then
+                -- Equal metadata needs no entity work. Confirm storage before
+                -- skipping publication so deletion/replacement still repairs.
+                if not clientFileIsCurrent(lastClientPayload) then saveClientRecords(true) end
+                return
+            end
             for id in pairs(clientRecords) do
-                if not retained[tostring(id)] then clientRecords[id] = nil end
+                if after[tostring(id)] == nil
+                    or not sameActionIdentity(before[tostring(id)], after[tostring(id)]) then
+                    clientRecords[id] = nil
+                end
             end
-            -- Replication may have delivered RequestedRoll before its host
-            -- metadata. Remap existing rolls when the authoritative data arrives.
-            for _, roll in pairs(Ext.Entity.GetAllEntitiesWithComponent("RequestedRoll") or {}) do
-                tracked[tostring(roll)] = nil
-                if roll.RequestedRoll ~= nil then mapClientProfile(roll, roll.RequestedRoll) end
+            for key, record in pairs(tracked) do
+                if changedIds[tostring(record.delegationId)] then tracked[key] = nil end
             end
-            saveClientRecords()
-            scheduleLeftClickSnapshot()
+            resyncClientProfiles(full, changedRecords)
         end))
         local function subscribe()
             remoteSnapshot = nil
-            tracked, clientRecords, quickRequests = {}, {}, {}
-            lastProbe, lastSession, lastLeftClickPayload = "", "", ""
+            tracked, clientRecords, quickRequests, observedRolls = {}, {}, {}, {}
+            lastProbe, lastSession = "", ""
+            needsFullResync, lastClientPayload = true, nil
             pcall(function() actionChannel:SendToServer({operation = "subscribe"}) end)
-            scheduleLeftClickSnapshot()
         end
         Ext.Events.SessionLoaded:Subscribe(subscribe)
         Ext.Events.ResetCompleted:Subscribe(subscribe)
-        nativeSession.Subscribe(scheduleLeftClickSnapshot)
-    end
-
-    if features ~= nil then
-        features.Subscribe(function()
-            -- Republish eligibility immediately; leave accepted fallback
-            -- requests and all delegated roll/presentation records intact.
-            if not saveLeftClickSnapshot() then scheduleLeftClickSnapshot() end
-        end)
-    end
-
-    if type(Ext.OnNextTick) == "function"
-        and Ext.Events ~= nil then
-        local snapshotComponents = { "ClientControl", "IsInCombat", "IsInTurnBasedMode" }
-        for _, componentName in ipairs(snapshotComponents) do
-            Ext.Entity.OnCreate(componentName, protected(
-                "client_left_click_snapshot_create_failed",
-                scheduleLeftClickSnapshot
-            ))
-            Ext.Entity.OnChange(componentName, protected(
-                "client_left_click_snapshot_change_failed",
-                scheduleLeftClickSnapshot
-            ))
-            Ext.Entity.OnDestroy(componentName, protected(
-                "client_left_click_snapshot_destroy_failed",
-                scheduleLeftClickSnapshot
-            ))
-        end
-        Ext.Events.SessionLoaded:Subscribe(scheduleLeftClickSnapshot)
-        Ext.Events.ResetCompleted:Subscribe(scheduleLeftClickSnapshot)
-        scheduleLeftClickSnapshot()
+        nativeSession.Subscribe(protected("client_native_resync_failed", function()
+            needsFullResync, lastClientPayload = true, nil
+            if loadActionText() ~= nil then resyncClientProfiles(true) end
+        end))
     end
 
     if traceEnabled then

@@ -173,8 +173,9 @@ function NativeBridge.Create(settings, api, diagnostics)
     local visibleWarning
     local revision = 0
     local snapshot = nil
+    local lastActionPayload = nil
 
-    local function save()
+    local function save(force)
         local lines = {
             "protocol=" .. PROTOCOL,
             "pak_version=" .. settings.VERSION,
@@ -182,7 +183,8 @@ function NativeBridge.Create(settings, api, diagnostics)
             "native_session=" .. nativeSession,
             "trace=" .. (trace and "1" or "0"),
         }
-        for _, record in ipairs(stableRecords(records)) do
+        local ordered = stableRecords(records)
+        for _, record in ipairs(ordered) do
             lines[#lines + 1] = table.concat({
                 "record=" .. tostring(record.id),
                 record.action,
@@ -199,8 +201,18 @@ function NativeBridge.Create(settings, api, diagnostics)
             }, "\t")
         end
         lines[#lines + 1] = "end=1"
-        local ok, result = pcall(Ext.IO.SaveFile, ACTION_FILE, table.concat(lines, "\n") .. "\n")
+        local payload = table.concat(lines, "\n") .. "\n"
+        local ok, result = true, true
+        local alreadyCurrent = false
+        if not force and payload == lastActionPayload then
+            local loaded, contents = pcall(Ext.IO.LoadFile, ACTION_FILE)
+            alreadyCurrent = loaded and contents == payload
+        end
+        if not alreadyCurrent then
+            ok, result = pcall(Ext.IO.SaveFile, ACTION_FILE, payload)
+        end
         if not ok or result == false then
+            lastActionPayload = nil
             diagnostics.Error("native_bridge_write_failed", {
                 error = ok and "save_returned_false" or result,
                 file = ACTION_FILE,
@@ -219,9 +231,10 @@ function NativeBridge.Create(settings, api, diagnostics)
             if scheduleRecovery ~= nil then scheduleRecovery() end
             return false
         end
+        lastActionPayload = payload
         revision = revision + 1
         local exported = {}
-        for _, record in ipairs(stableRecords(records)) do
+        for _, record in ipairs(ordered) do
             exported[#exported + 1] = {
                 id = record.id, action = record.action, rollUuid = record.rollUuid,
                 initiatorUuid = record.initiatorUuid, specialistUuid = record.specialistUuid,
@@ -410,7 +423,7 @@ function NativeBridge.Create(settings, api, diagnostics)
             handshakeExpired = false
             state = "ready"
             detail = status.detail
-            if not save() then
+            if not save(true) then
                 return
             end
             if not wasReady then
@@ -466,7 +479,7 @@ function NativeBridge.Create(settings, api, diagnostics)
             and type(status.session) == "string" and status.session ~= ""
             then
             nativeSession = status.session
-            save()
+            save(true)
         end
         scheduleRecovery(remaining - 1, settings.NATIVE_HANDSHAKE_POLL_MS)
     end
@@ -501,7 +514,7 @@ function NativeBridge.Create(settings, api, diagnostics)
         if status.protocol == PROTOCOL and status.version == settings.VERSION then
             nativeSession = status.session or ""
         end
-        if not save() then
+        if not save(true) then
             scheduleRecovery()
             return false
         end

@@ -8,11 +8,14 @@
 #include "QuickLockpickState.h"
 #include "SafeMemory.h"
 #include "StatusPublication.h"
+#include "BridgeFileWatcher.h"
 
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <unordered_set>
 #include <vector>
@@ -67,9 +70,54 @@ int main()
         assert(last == "ready/current-process/latest-ack");
         assert(!publication.Pending() && publication.Failures() == 0);
         assert(!publication.Poll(5749, write));
-        assert(publication.Poll(5750, write)); // restore a removed status
+        assert(!publication.Poll(5750, write)); // unchanged status stays idle
+        publication.Queue(last);
+        assert(!publication.Poll(5750, write)); // identical queue is also idle
+        publication.Queue(last, true); // notification of removal/replacement
+        assert(publication.Poll(5750, write));
         publication.Queue("new-session");
         assert(publication.Poll(5751, write) && last == "new-session");
+    }
+    assert(BridgeFileWatcher::Classify(L"BestOfHandsNative.actions") == BridgeFileWatcher::Actions);
+    assert(BridgeFileWatcher::Classify(L"BestOfHandsNative.handshake") == BridgeFileWatcher::Handshake);
+    assert(BridgeFileWatcher::Classify(L"BestOfHandsNative.client") == BridgeFileWatcher::Client);
+    assert(BridgeFileWatcher::Classify(L"BestOfHandsNative.status") == BridgeFileWatcher::Status);
+    assert(BridgeFileWatcher::Classify(L"BestOfHandsNative.status.tmp") == 0);
+    assert(BridgeFileWatcher::Classify(L"BestOfHandsNative.leftclick") == 0);
+    assert(BridgeFileWatcher::Classify(L"OtherMod.json") == 0);
+    {
+        // Exercise the real notification API: ordinary Lua writes, atomic
+        // native replacement, deletion and unrelated mod traffic.
+        namespace fs = std::filesystem;
+        auto const directory = fs::temp_directory_path() / (L"boh-watch-"
+            + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+        assert(fs::create_directory(directory));
+        {
+            BridgeFileWatcher watcher(directory);
+            assert(watcher.Poll(0) == BridgeFileWatcher::All);
+            assert(watcher.Poll(0) == 0);
+            auto waitFor = [&](unsigned expected) {
+                auto const deadline = GetTickCount64() + 2000;
+                unsigned observed{};
+                do { observed |= watcher.Poll(10); }
+                while (!(observed & expected) && GetTickCount64() < deadline);
+                assert(observed & expected);
+            };
+            { std::ofstream file(directory / L"OtherMod.json"); file << "unrelated"; }
+            assert(watcher.Poll(50) == 0);
+            { std::ofstream file(directory / L"BestOfHandsNative.actions"); file << "first"; }
+            waitFor(BridgeFileWatcher::Actions);
+            { std::ofstream file(directory / L"BestOfHandsNative.actions"); file << "second"; }
+            waitFor(BridgeFileWatcher::Actions);
+            { std::ofstream file(directory / L"BestOfHandsNative.status.tmp"); file << "ready"; }
+            fs::rename(directory / L"BestOfHandsNative.status.tmp", directory / L"BestOfHandsNative.status");
+            waitFor(BridgeFileWatcher::Status);
+            assert(fs::remove(directory / L"BestOfHandsNative.status"));
+            waitFor(BridgeFileWatcher::Status);
+        }
+        assert(fs::remove(directory / L"OtherMod.json"));
+        assert(fs::remove(directory / L"BestOfHandsNative.actions"));
+        assert(fs::remove(directory));
     }
     using best_of_hands::CapabilityState;
     using best_of_hands::ResolutionSource;
@@ -327,6 +375,9 @@ int main()
     assert(!SafeRead(inaccessible, observedValue));
     assert(observedValue == 0x1122334455667788ULL);
     assert(!SafeWrite(inaccessible, replacementValue));
+    ReadOnlySnapshot<0x68> rollSnapshot;
+    assert(!rollSnapshot.Capture(nullptr));
+    assert(!rollSnapshot.Capture(inaccessible));
     assert(VirtualFree(inaccessible, 0, MEM_RELEASE) != FALSE);
 
     auto* splitRegion = static_cast<std::byte*>(VirtualAlloc(
@@ -341,6 +392,11 @@ int main()
     observedValue = 0x8877665544332211ULL;
     assert(!SafeRead(splitRegion + 4092, observedValue));
     assert(observedValue == 0x8877665544332211ULL);
+    assert(!rollSnapshot.Capture(splitRegion + 4092));
+    assert(rollSnapshot.Capture(splitRegion + 4096 - 0x68));
+    assert((rollSnapshot.Field<std::uint32_t, 0x64>() == readablePrefix));
+    assert(!rollSnapshot.Capture(splitRegion + 4096 - 0x67));
+    assert((rollSnapshot.Field<std::uint32_t, 0x64>() == readablePrefix));
     assert(VirtualFree(splitRegion, 0, MEM_RELEASE) != FALSE);
 
     auto* readOnly = VirtualAlloc(
@@ -352,8 +408,43 @@ int main()
         readOnly, 4096, PAGE_READONLY, &previousProtection) != FALSE);
     assert(SafeRead(readOnly, observedValue));
     assert(observedValue == replacementValue);
+    assert(rollSnapshot.Capture(readOnly));
+    assert((rollSnapshot.Field<std::uint64_t, 0>() == replacementValue));
+    assert(!rollSnapshot.Capture(nullptr)); // failed capture retains no partial bytes
+    assert((rollSnapshot.Field<std::uint64_t, 0>() == replacementValue));
     assert(!SafeWrite(readOnly, readableValue));
     assert(VirtualFree(readOnly, 0, MEM_RELEASE) != FALSE);
+
+    {
+        // Production read shapes: unaligned roll identity, active-roll span,
+        // and signed result fields. Sources remain unchanged after capture.
+        std::array<std::byte, 0x68> identity{};
+        std::uint64_t subject = 0x8877665544332211ULL;
+        std::memcpy(identity.data() + 0x60, &subject, sizeof(subject));
+        ReadOnlySnapshot<0x68> captured;
+        assert(captured.Capture(identity.data()));
+        assert((captured.Field<std::uint64_t, 0x60>() == subject));
+        assert((captured.Field<std::uint64_t, 0x20>() == 0));
+        std::array<std::byte, 0x1a0> active{};
+        std::uint32_t state = 2;
+        void* vm = identity.data();
+        std::memcpy(active.data(), &state, sizeof(state));
+        std::memcpy(active.data() + 0x198, &vm, sizeof(vm));
+        ReadOnlySnapshot<0x1a0> activeSnapshot;
+        assert(activeSnapshot.Capture(active.data()));
+        assert((activeSnapshot.Field<std::uint32_t, 0>() == 2));
+        assert((activeSnapshot.Field<void*, 0x198>() == vm));
+        std::array<std::byte, 0x45> result{};
+        result[0x42] = std::byte{20};
+        result[0x43] = std::byte{3};
+        result[0x44] = std::byte{0xfc};
+        ReadOnlySnapshot<0x45> resultSnapshot;
+        assert(resultSnapshot.Capture(result.data()));
+        assert((resultSnapshot.Field<std::uint8_t, 0x42>() == 20));
+        assert((resultSnapshot.Field<std::uint8_t, 0x43>() == 3));
+        assert((resultSnapshot.Field<std::int8_t, 0x44>() == -4));
+        assert(result[0x42] == std::byte{20} && result[0x44] == std::byte{0xfc});
+    }
 
     FixedSnapshot<int, 3> snapshot;
     assert(snapshot.empty());
@@ -408,7 +499,7 @@ int main()
 
     auto const valid = ParseBridgeDocument(
         "protocol=9\n"
-        "pak_version=2.4.0\n"
+        "pak_version=2.4.1\n"
         "probe=abc-123\n"
         "native_session=44-55\n"
         "trace=1\n"
@@ -433,36 +524,36 @@ int main()
     assert(valid.records[0].finishedEvent == 0x0200000200000200ULL);
     assert(valid.records[1].finishedEvent == 0);
 
-    assert(!ParseBridgeDocument("protocol=2\npak_version=2.4.0\nprobe=x\n").valid);
+    assert(!ParseBridgeDocument("protocol=2\npak_version=2.4.1\nprobe=x\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=1\npak_version=2.4.0\nprobe=x\nend=1\n").valid);
+        "protocol=1\npak_version=2.4.1\nprobe=x\nend=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nprobe=x\n"
+        "protocol=9\npak_version=2.4.1\nprobe=x\n"
         "record=1\tlockpick\tnot-hex\t2\t3\t0\t0\t0\ta\tb\tc\t-1\nend=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nprobe=x\n"
+        "protocol=9\npak_version=2.4.1\nprobe=x\n"
         "record=0\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t-1\nend=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nprobe=x\n"
+        "protocol=9\npak_version=2.4.1\nprobe=x\n"
         "record=1\tlockpick\t1\t2\t3\nend=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nprobe=x\n"
+        "protocol=9\npak_version=2.4.1\nprobe=x\n"
         "record=1\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t0\textra\n"
         "end=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nprobe=x\n"
+        "protocol=9\npak_version=2.4.1\nprobe=x\n"
         "record=1\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t3\n"
         "end=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nprobe=x\n"
+        "protocol=9\npak_version=2.4.1\nprobe=x\n"
         "record=1\tunknown\t1\t2\t3\t0\t0\t0\ta\tb\tc\t-1\n"
         "end=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nprobe=x\n"
+        "protocol=9\npak_version=2.4.1\nprobe=x\n"
         "record=1\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t-2\n"
         "end=1\n").valid);
     assert(!ParseBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nprobe=x\n"
+        "protocol=9\npak_version=2.4.1\nprobe=x\n"
         "record=1\tlockpick\t1\t2\t3\t0\t0\t0\ta\tb\tc\t-1\n").valid);
 
     RequestedRollIdentity identity{
@@ -486,7 +577,7 @@ int main()
 
     auto const client = ParseClientBridgeDocument(
         "protocol=9\n"
-        "pak_version=2.4.0\n"
+        "pak_version=2.4.1\n"
         "native_session=44-55\n"
         "trace=1\n"
         "record=7\t4dc3ec09-e11d-e030-cac3-99253090aaf8\t01c0000100000085\t01c00001000000d4\t01c000010000f15c\tlockpick\t1\n"
@@ -522,7 +613,7 @@ int main()
     assert(client.lockedTargets[0].netId == 1125899906937610ULL);
     auto const crlfClient = ParseClientBridgeDocument(
         "protocol=9\r\n"
-        "pak_version=2.4.0\r\n"
+        "pak_version=2.4.1\r\n"
         "native_session=crlf-session\r\n"
         "eligible=1\t1\r\n"
         "locked=2\t3\r\n"
@@ -533,7 +624,7 @@ int main()
     assert(crlfClient.lockedTargets.size() == 1);
     auto const emptyClient = ParseClientBridgeDocument(
         "protocol=9\n"
-        "pak_version=2.4.0\n"
+        "pak_version=2.4.1\n"
         "native_session=empty-session\n"
         "end=1\n");
     assert(emptyClient.valid);
@@ -543,76 +634,76 @@ int main()
     assert(emptyClient.leftClickInitiators.empty());
     assert(emptyClient.lockedTargets.empty());
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "eligible=1\t2\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "eligible=0\t1\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "locked=1\t0\nend=1\n").valid);
     auto const wideNetId = ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "locked=1\t4294967296\nend=1\n");
     assert(wideNetId.valid);
     assert(wideNetId.lockedTargets[0].netId == 4294967296ULL);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "quick=bad token\t1\t2\t3\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "quick=request\t0\t2\t3\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "quick=request\t1\t2\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "quick=request\t1\t0\t3\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "quick=request\t1\t2\t0\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "quick=request\t1\t2\t3\textra\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "quick=request\t1\t2\t18446744073709551616\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "eligible=not-hex\t1\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "eligible=1\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "eligible=1\t1\textra\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "locked=not-hex\t1\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "locked=1\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "locked=1\t1\textra\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "locked=1\tnot-decimal\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "locked=1\t18446744073709551616\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=6\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=6\npak_version=2.4.1\nnative_session=x\n"
         "end=1\n").valid);
     assert(!ParseClientBridgeDocument(
         "protocol=9\npak_version=1.0.0\nnative_session=x\n"
         "end=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nend=1\n").valid);
+        "protocol=9\npak_version=2.4.1\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n").valid);
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n").valid);
     auto const maximumClientValues = ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "quick=request\tffffffffffffffff\tfffffffffffffffe"
         "\t18446744073709551615\n"
         "eligible=ffffffffffffffff\t0\n"
@@ -728,19 +819,19 @@ int main()
         assert(consumedRequests.contains(request.request));
     }
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\n"
+        "protocol=9\npak_version=2.4.1\n"
         "record=7\tuuid\t1\t2\t3\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "record=0\tuuid\t1\t2\t3\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "record=7\tuuid\t1\t0\t3\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "record=7\tuuid\t1\t2\tnot-hex\nend=1\n").valid);
     assert(!ParseClientBridgeDocument(
-        "protocol=9\npak_version=2.4.0\nnative_session=x\n"
+        "protocol=9\npak_version=2.4.1\nnative_session=x\n"
         "record=7\tuuid\t1\t2\t3\textra\nend=1\n").valid);
     RequestedRollIdentity clientIdentity{
         .roll = 0x01c0000200000100ULL,
